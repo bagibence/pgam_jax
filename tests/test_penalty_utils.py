@@ -87,10 +87,13 @@ def test_one_dim_bspline_der_2_null_space_penalty(one_dim_bspline_penalty):
 def test_one_dim_bspline_der_2_symmetric_sqrt(one_dim_bspline_penalty):
     """Check that the full penalty matches the original PGAM implementation."""
     sqrt_pen = penalty_utils.symmetric_sqrt(one_dim_bspline_penalty["energy_penalty"])
-    assert np.allclose(sqrt_pen, one_dim_bspline_penalty["sqrt_energy_penalty"])
+    sqrt_pen_orig = one_dim_bspline_penalty["sqrt_energy_penalty"]
+    # Compare squared matrices due to eigenvector sign ambiguity across numpy/LAPACK versions
+    assert np.allclose(sqrt_pen.T @ sqrt_pen, sqrt_pen_orig.T @ sqrt_pen_orig)
     log_lam = np.log(one_dim_bspline_penalty["reg_strength"][0])
     scaled_pen = penalty_utils.tree_compute_sqrt_penalty([one_dim_bspline_penalty["energy_penalty"]], [np.array([log_lam])], 0, apply_identifiability=lambda x:x)
-    assert np.allclose(scaled_pen, np.sqrt(np.exp(log_lam)) * one_dim_bspline_penalty["sqrt_energy_penalty"])
+    scaled_pen_orig = np.sqrt(np.exp(log_lam)) * one_dim_bspline_penalty["sqrt_energy_penalty"]
+    assert np.allclose(scaled_pen.T @ scaled_pen, scaled_pen_orig.T @ scaled_pen_orig)
 
 
 def test_one_dim_bspline_der_2_penalty_tensor(one_dim_bspline_penalty):
@@ -225,9 +228,9 @@ def test_sum_two_one_dim_bspline_penalty_tensor(sum_two_one_dim_bspline_penalty)
     with set_debug(True):
         # use Cholesky sqrt
         pen_new = penalty_utils.compute_penalty_agumented_from_basis(bas, list(reg_strength))
-    pen_orig = sum_two_one_dim_bspline_penalty["block_penalty"]
-    # remove first col of zeros from orig
-    assert np.allclose(pen_new, pen_orig[:, 1:])
+    pen_orig = sum_two_one_dim_bspline_penalty["block_penalty"][:, 1:]
+    # Compare squared matrices due to eigenvector sign ambiguity across numpy/LAPACK versions
+    assert np.allclose(pen_new.T @ pen_new, pen_orig.T @ pen_orig)
 
 
 def test_sum_two_two_dim_bspline_penalty_tensor(sum_of_two_dim_two_dim_bspline_penalty):
