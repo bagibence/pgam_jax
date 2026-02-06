@@ -3,13 +3,13 @@ requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nemos"
+name = "pgam"
 dynamic = ["version"]
 authors = [{name = "nemos authors"}]
 description = "NEural MOdelS, a statistical modeling framework for neuroscience."
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-keywords = ["neuroscience", "Poisson-GLM"]
+keywords = ["neuroscience", "PGAM"]
 license = { file = "LICENSE" }
 classifiers = [
     "Intended Audience :: Science/Research",
@@ -23,14 +23,7 @@ classifiers = [
 
 # Define dependencies for the project
 dependencies = [
-    "jax>=0.4.28",                  # Numerical computing library
-    "numpy>1.20",                   # Numerical computing library
-    "scipy>=1.10",                  # Scientific computing library
-    "typing_extensions>=4.6",       # Typing extensions for Python
-    'pynapple>=0.10.1',               # On this version, changed tuning curve API
-    "scikit-learn",                 # BaseEstimator and Tags inheritance
-    "optimistix>=0.0.11",
-    "optax>=0.2.5",
+    "nemos",
 ]
 
 
@@ -109,7 +102,7 @@ jaxopt = [
 
 
 [tool.black]
-target-version = ['py310', 'py311', 'py312']
+target-version = ['py310', 'py311', 'py312', 'py313']
 skip-string-normalization = false
 exclude = '''
 (
