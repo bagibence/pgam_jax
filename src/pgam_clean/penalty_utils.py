@@ -209,28 +209,6 @@ def compute_energy_penalty(n_samples: int, basis_derivative: Callable):
     energy_pen:
         Energy penalty matrix of shape (K, K), where K is the number of basis functions.
     """
-    if config.DEBUG:
-        return compute_energy_penalty_numpy(n_samples, basis_derivative)
-    else:
-        return compute_energy_penalty_jax(n_samples, basis_derivative)
-
-
-def compute_energy_penalty_jax(n_samples: int, basis_derivative: Callable):
-    """
-    Compute the energy penalty for a basis derivative.
-
-    Parameters
-    ----------
-    n_samples :
-        Number of samples for integration.
-    basis_derivative :
-        Function that computes the derivative of the basis.
-
-    Returns
-    -------
-    energy_pen:
-        Energy penalty matrix of shape (K, K), where K is the number of basis functions.
-    """
     samples = jnp.linspace(0, 1, n_samples)
     eval_bas = jnp.asarray(basis_derivative(samples))
     indices = jnp.triu_indices(eval_bas.shape[1])
@@ -242,20 +220,6 @@ def compute_energy_penalty_jax(n_samples: int, basis_derivative: Callable):
     energy_pen = energy_pen.at[indices].set(integr)
     energy_pen = energy_pen + jnp.triu(energy_pen, 1).T
     return energy_pen
-
-
-def compute_energy_penalty_numpy(n_samples: int, basis_derivative: Callable):
-    from scipy.integrate import simpson
-    samples = np.linspace(0, 1, n_samples)
-    eval_bas = np.asarray(basis_derivative(samples))
-    dx = samples[1] - samples[0]
-    # Simpson integration of squared basis.
-    integr = np.zeros((eval_bas.shape[1], eval_bas.shape[1]))
-    for i in range(eval_bas.shape[1]):
-        for j in range(i, eval_bas.shape[1]):
-            integr[i, j] = simpson(eval_bas[:, i] * eval_bas[:, j], dx=dx)
-    integr += np.triu(integr, 1).T
-    return integr
 
 
 def compute_penalty_null_space(penalty):
