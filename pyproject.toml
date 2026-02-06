@@ -1,9 +1,9 @@
 [build-system]
-requires = ["setuptools", "setuptools-scm"]
+requires = ["setuptools>=42", "wheel", "Cython", "setuptools-scm", "tomli", "scipy"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pgam"
+name = "pgam_clean"
 dynamic = ["version"]
 authors = [{name = "nemos authors"}]
 description = "NEural MOdelS, a statistical modeling framework for neuroscience."
@@ -24,13 +24,16 @@ classifiers = [
 # Define dependencies for the project
 dependencies = [
     "nemos",
+    "matplotlib",
+    # only needed for comparrison with origina implemetation
+    "PGAM @ git+ssh://git@github.com/BalzaniEdoardo/PGAM.git@PGAM_from_nemos",
 ]
 
 
 # Configure package discovery for setuptools
 [tool.setuptools.packages.find]
 where = ["src"]     # The directory where package modules are located
-include = ["pgam"] # The specific package(s) to include in the distribution
+include = ["pgam_clean"] # The specific package(s) to include in the distribution
 
 [tool.setuptools_scm]
 version_scheme = 'python-simplified-semver'
