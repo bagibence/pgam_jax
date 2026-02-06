@@ -8,7 +8,7 @@ Statsmodels terminology:
 import jax.numpy as jnp
 import jax
 import jax.tree_util as jtu
-from nemos.initialize_regressor import INVERSE_FUNCS
+from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
 from jaxopt import LBFGSB,LBFGS
 from nemos.observation_models import PoissonObservations

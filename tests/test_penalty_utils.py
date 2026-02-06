@@ -2,13 +2,13 @@ import pytest
 import json
 import pathlib
 import numpy as np
-from PGAM import penalty_utils
+from pgam import penalty_utils
 import nemos as nmo
 import jax
 from jax.tree_util import tree_map,  treedef_is_leaf, tree_structure
 
-from PGAM.basis import GAMBSplineEval
-from PGAM.config import set_debug
+from pgam.basis import GAMBSplineEval
+from pgam.config import set_debug
 
 
 @pytest.fixture()
