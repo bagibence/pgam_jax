@@ -201,6 +201,7 @@ def test_two_dim_bspline_der_2_agumented(two_dim_bspline_penalty):
     orig_agu_pen = two_dim_bspline_penalty["agumented_penalty"][:, 1:]
     assert np.allclose(out, orig_agu_pen)
 
+
 def test_orig_vs_new_sqrt():
     M = np.random.randn(10, 10)
     M = M.dot(M.T)
