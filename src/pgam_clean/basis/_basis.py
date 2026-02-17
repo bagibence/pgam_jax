@@ -1,6 +1,6 @@
 import inspect
 from copy import deepcopy
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 from nemos.basis._basis import AdditiveBasis, MultiplicativeBasis
@@ -19,7 +19,7 @@ def has_param(bas, method, param_name="apply_identifiability"):
     return param_name in (p.name for p in sig.parameters.values())
 
 
-def _evaluate_on_grid(bas, *n_samples) -> Tuple[Tuple[NDArray], NDArray]:
+def _evaluate_on_grid(bas, *n_samples) -> tuple[tuple[NDArray], NDArray]:
     sample_tuple = bas._get_samples(*n_samples)
     Xs = np.meshgrid(*sample_tuple, indexing="ij")
     Y = bas.compute_features(*(grid_axis.flatten() for grid_axis in Xs))
@@ -27,7 +27,6 @@ def _evaluate_on_grid(bas, *n_samples) -> Tuple[Tuple[NDArray], NDArray]:
 
 
 class GAMBasisMixin:
-
     def __add__(self, other):
         return GAMAdditiveBasis(self, other)
 
@@ -46,12 +45,11 @@ class GAMBasisMixin:
             result = result * self
         return result
 
-    def evaluate_on_grid(self, *n_samples: int) -> Tuple[Tuple[NDArray], NDArray]:
+    def evaluate_on_grid(self, *n_samples: int) -> tuple[tuple[NDArray], NDArray]:
         return _evaluate_on_grid(self, *n_samples)
 
 
 class GAMAtomicBasisMixin(GAMBasisMixin):
-
     def __init__(self, identifiability: bool):
         self._identifiability = int(identifiability)
         # get the attribute or the func
@@ -124,7 +122,6 @@ class GAMAtomicBasisMixin(GAMBasisMixin):
 
 
 class GAMAdditiveBasis(GAMBasisMixin, AdditiveBasis):
-
     def __init__(self, basis1, basis2):
         AdditiveBasis.__init__(self, basis1, basis2)
         GAMBasisMixin.__init__(self)
@@ -138,7 +135,6 @@ class GAMAdditiveBasis(GAMBasisMixin, AdditiveBasis):
 
 
 class GAMMultiplicativeBasis(GAMBasisMixin, MultiplicativeBasis):
-
     def __init__(self, basis1: GAMBasisMixin, basis2: GAMBasisMixin):
         # copy and reset number of basis and identifiability.
         basis1 = deepcopy(basis1)

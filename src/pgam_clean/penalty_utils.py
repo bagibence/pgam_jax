@@ -1,6 +1,6 @@
 import math
 from functools import partial
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -328,7 +328,7 @@ def create_block_penalty(
     full_penalty: jnp.ndarray,
     start_idx_row: int,
     start_idx_col: int,
-    block_shape: Tuple[int, int],
+    block_shape: tuple[int, int],
 ):
     """
     Create a block penalty matrix.
@@ -362,7 +362,7 @@ def create_block_penalty(
 
 
 def tree_create_block(
-    tree_penalty_blocks, start_idx_row, start_idx_col, block_shape: Tuple[int, int]
+    tree_penalty_blocks, start_idx_row, start_idx_col, block_shape: tuple[int, int]
 ):
     """
     Create a block diagonal penalty matrix from a tree of penalty blocks.

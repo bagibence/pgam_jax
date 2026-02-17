@@ -1,5 +1,3 @@
-from typing import Optional, Tuple
-
 import numpy as np
 from nemos.basis import BSplineEval
 from nemos.basis._basis import check_transform_input, min_max_rescale_samples
@@ -14,7 +12,7 @@ class GAMBSplineEval(GAMAtomicBasisMixin, BSplineEval):
         self,
         n_basis_funcs: int,
         order: int = 4,
-        bounds: Optional[Tuple[float, float]] = None,
+        bounds: Optional[tuple[float, float]] = None,
         label: Optional[str] = "GAMBSplineEval",
         identifiability: Optional[bool] = True,
     ):
