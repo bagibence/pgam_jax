@@ -1,6 +1,7 @@
 import math
 from functools import partial
-from typing import Any, Callable, Optional
+from typing import Any
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
@@ -107,7 +108,7 @@ def compute_start_block(tree_penalty: Any, shift_by=0):
 def tree_compute_sqrt_penalty(
     tree_penalty: Any,
     reg_strength: Any,
-    shift_by: Optional[int] = 0,
+    shift_by: int | None = 0,
     positive_mon_func: Callable = jnp.exp,
     apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
 ):
@@ -158,7 +159,7 @@ def tree_compute_sqrt_penalty(
 @partial(jax.jit, static_argnums=(1, 2))
 def compute_penalty_blocks(
     tree_penalty: Any,
-    shift_by: Optional[int] = 0,
+    shift_by: int | None = 0,
     apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[
         ..., :-1, :-1
     ],
@@ -526,7 +527,7 @@ def compute_penalty_agumented_from_basis(
     reg_strength: float,
     n_samples: int = 10**4,
     penalize_null_space: bool = True,
-    shift_by: Optional[int] = 0,
+    shift_by: int | None = 0,
     positive_mon_func=jnp.exp,
     apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
 ):

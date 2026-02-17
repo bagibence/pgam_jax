@@ -1,6 +1,5 @@
 import inspect
 from copy import deepcopy
-from typing import Optional
 
 import numpy as np
 from nemos.basis._basis import AdditiveBasis, MultiplicativeBasis
@@ -77,7 +76,7 @@ class GAMAtomicBasisMixin(GAMBasisMixin):
     def _compute_features(
         self,
         sample_pts: ArrayLike | Tsd | TsdFrame | TsdTensor,
-        apply_identifiability: Optional[bool] = None,
+        apply_identifiability: bool | None = None,
     ) -> FeatureMatrix:
         # this gets the compute feature from the inheritance (bspline or similar)
         X = super()._compute_features(sample_pts)
@@ -96,7 +95,7 @@ class GAMAtomicBasisMixin(GAMBasisMixin):
         self,
         sample_pts: np.ndarray,
         der: int = 2,
-        apply_identifiability: Optional[bool] = None,
+        apply_identifiability: bool | None = None,
     ):
         """
         Compute the basis derivative and concatenate output on the second axis.

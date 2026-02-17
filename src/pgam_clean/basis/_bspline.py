@@ -12,9 +12,9 @@ class GAMBSplineEval(GAMAtomicBasisMixin, BSplineEval):
         self,
         n_basis_funcs: int,
         order: int = 4,
-        bounds: Optional[tuple[float, float]] = None,
-        label: Optional[str] = "GAMBSplineEval",
-        identifiability: Optional[bool] = True,
+        bounds: tuple[float, float] | None = None,
+        label: str | None = "GAMBSplineEval",
+        identifiability: bool | None = True,
     ):
         BSplineEval.__init__(
             self, n_basis_funcs=n_basis_funcs, order=order, bounds=bounds, label=label

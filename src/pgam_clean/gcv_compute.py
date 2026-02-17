@@ -1,5 +1,6 @@
 from functools import partial
-from typing import Any, Callable, Optional
+from typing import Any
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
@@ -25,7 +26,7 @@ def _compute_gcv_and_states(
     R: NDArray,
     y: NDArray,
     positive_mon_func: Callable[[jnp.ndarray], jnp.ndarray] = jnp.exp,
-    apply_identifiability: Optional[Callable] = None,
+    apply_identifiability: Callable | None = None,
     gamma=1.5,
 ):
     # identifiability constraint drops column by default
@@ -131,7 +132,6 @@ def _gcv_grad_compute_from_states(
 def gcv_compute_factory(
     positive_mon_func, apply_identifiability_columns, apply_identifiability, gamma
 ):
-
     @jax.custom_vjp
     def _gcv_compute(
         regularization_strength: Any,
