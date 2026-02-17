@@ -1,12 +1,13 @@
-import pytest
 import json
 import pathlib
-import numpy as np
-from pgam_clean import penalty_utils
-import nemos as nmo
-import jax
-from jax.tree_util import tree_map,  treedef_is_leaf, tree_structure
 
+import jax
+import nemos as nmo
+import numpy as np
+import pytest
+from jax.tree_util import tree_map, tree_structure, treedef_is_leaf
+
+from pgam_clean import penalty_utils
 from pgam_clean.basis import GAMBSplineEval
 from pgam_clean.config import set_debug
 
@@ -15,10 +16,12 @@ from pgam_clean.config import set_debug
 def script_dir():
     return pathlib.Path(__file__).resolve().parent / "data"
 
+
 @pytest.fixture()
 def _tree_map_list_to_array():
 
     is_leaf = lambda x: treedef_is_leaf(tree_structure(x)) or isinstance(x, list)
+
     def map_list_to_array(params):
         if "reg_strength" in params:
             rs = params.pop("reg_strength")
@@ -26,10 +29,16 @@ def _tree_map_list_to_array():
             reg_strength = {"reg_strength": jax.numpy.array(rs)}
         except:
             reg_strength = {"reg_strength": [np.array(r) for r in rs]}
-        params = tree_map(lambda x: x if not isinstance(x, list) else np.asarray(x), params, is_leaf=is_leaf)
+        params = tree_map(
+            lambda x: x if not isinstance(x, list) else np.asarray(x),
+            params,
+            is_leaf=is_leaf,
+        )
         params.update(reg_strength)
         return params
+
     return map_list_to_array
+
 
 @pytest.fixture()
 def one_dim_bspline_penalty(_tree_map_list_to_array, script_dir):
@@ -38,6 +47,7 @@ def one_dim_bspline_penalty(_tree_map_list_to_array, script_dir):
         params = _tree_map_list_to_array(params)
     return params
 
+
 @pytest.fixture()
 def two_dim_bspline_penalty(_tree_map_list_to_array, script_dir):
     with open(script_dir / "two_dim_bspline_penalty.json", "r", encoding="utf-8") as f:
@@ -45,9 +55,12 @@ def two_dim_bspline_penalty(_tree_map_list_to_array, script_dir):
         params = _tree_map_list_to_array(params)
     return params
 
+
 @pytest.fixture()
 def sum_two_one_dim_bspline_penalty(_tree_map_list_to_array, script_dir):
-    with open(script_dir / "sum_of_two_one_dim_bspline_penalty.json", "r", encoding="utf-8") as f:
+    with open(
+        script_dir / "sum_of_two_one_dim_bspline_penalty.json", "r", encoding="utf-8"
+    ) as f:
         params = json.load(f)
         params = _tree_map_list_to_array(params)
     return params
@@ -55,31 +68,57 @@ def sum_two_one_dim_bspline_penalty(_tree_map_list_to_array, script_dir):
 
 @pytest.fixture()
 def sum_one_dim_two_dim_bspline_penalty(_tree_map_list_to_array, script_dir):
-    with open(script_dir / "sum_of_one_dim_two_dim_bspline_penalty.json", "r", encoding="utf-8") as f:
+    with open(
+        script_dir / "sum_of_one_dim_two_dim_bspline_penalty.json",
+        "r",
+        encoding="utf-8",
+    ) as f:
         params = json.load(f)
         params = _tree_map_list_to_array(params)
     return params
 
+
 @pytest.fixture()
 def sum_of_two_dim_two_dim_bspline_penalty(_tree_map_list_to_array, script_dir):
-    with open(script_dir / "sum_of_two_dim_two_dim_bspline_penalty.json", "r", encoding="utf-8") as f:
+    with open(
+        script_dir / "sum_of_two_dim_two_dim_bspline_penalty.json",
+        "r",
+        encoding="utf-8",
+    ) as f:
         params = json.load(f)
         params = _tree_map_list_to_array(params)
     return params
+
 
 def test_one_dim_bspline_der_2_energy_penalty(one_dim_bspline_penalty):
     """Check that the full penalty matches the original PGAM implementation."""
     basis_parms = one_dim_bspline_penalty["bspline_params"]
-    der_basis = lambda x : nmo.basis._spline_basis.bspline(x, basis_parms["knots"], basis_parms["order"], der=basis_parms["der"], outer_ok=False)
-    pen = penalty_utils.compute_energy_penalty(one_dim_bspline_penalty["n_samples"], der_basis)
+    der_basis = lambda x: nmo.basis._spline_basis.bspline(
+        x,
+        basis_parms["knots"],
+        basis_parms["order"],
+        der=basis_parms["der"],
+        outer_ok=False,
+    )
+    pen = penalty_utils.compute_energy_penalty(
+        one_dim_bspline_penalty["n_samples"], der_basis
+    )
     assert np.allclose(pen, one_dim_bspline_penalty["energy_penalty"])
 
 
 def test_one_dim_bspline_der_2_null_space_penalty(one_dim_bspline_penalty):
     """Check that the full penalty matches the original PGAM implementation."""
     basis_params = one_dim_bspline_penalty["bspline_params"]
-    der_basis = lambda x : nmo.basis._spline_basis.bspline(x, basis_params["knots"], basis_params["order"], der=basis_params["der"], outer_ok=False)
-    pen = penalty_utils.compute_energy_penalty(one_dim_bspline_penalty["n_samples"], der_basis)
+    der_basis = lambda x: nmo.basis._spline_basis.bspline(
+        x,
+        basis_params["knots"],
+        basis_params["order"],
+        der=basis_params["der"],
+        outer_ok=False,
+    )
+    pen = penalty_utils.compute_energy_penalty(
+        one_dim_bspline_penalty["n_samples"], der_basis
+    )
     null_pen = penalty_utils.compute_penalty_null_space(pen[None])
     assert np.allclose(null_pen, one_dim_bspline_penalty["null_space_penalty"])
 
@@ -91,8 +130,15 @@ def test_one_dim_bspline_der_2_symmetric_sqrt(one_dim_bspline_penalty):
     # Compare squared matrices due to eigenvector sign ambiguity across numpy/LAPACK versions
     assert np.allclose(sqrt_pen.T @ sqrt_pen, sqrt_pen_orig.T @ sqrt_pen_orig)
     log_lam = np.log(one_dim_bspline_penalty["reg_strength"][0])
-    scaled_pen = penalty_utils.tree_compute_sqrt_penalty([one_dim_bspline_penalty["energy_penalty"]], [np.array([log_lam])], 0, apply_identifiability=lambda x:x)
-    scaled_pen_orig = np.sqrt(np.exp(log_lam)) * one_dim_bspline_penalty["sqrt_energy_penalty"]
+    scaled_pen = penalty_utils.tree_compute_sqrt_penalty(
+        [one_dim_bspline_penalty["energy_penalty"]],
+        [np.array([log_lam])],
+        0,
+        apply_identifiability=lambda x: x,
+    )
+    scaled_pen_orig = (
+        np.sqrt(np.exp(log_lam)) * one_dim_bspline_penalty["sqrt_energy_penalty"]
+    )
     assert np.allclose(scaled_pen.T @ scaled_pen, scaled_pen_orig.T @ scaled_pen_orig)
 
 
@@ -123,7 +169,7 @@ def test_one_dim_bspline_der_2_agumented(one_dim_bspline_penalty):
         # the equivalence of the sqrt is checked with: test_orig_vs_new_sqrt
         out = penalty_utils.tree_compute_sqrt_penalty(
             pen_list,
-            [jax.numpy.log(jax.numpy.asarray(one_dim_bspline_penalty["reg_strength"]))]
+            [jax.numpy.log(jax.numpy.asarray(one_dim_bspline_penalty["reg_strength"]))],
         )
     orig_agu_pen = one_dim_bspline_penalty["agumented_penalty"][:, 1:]
     assert np.allclose(out, orig_agu_pen)
@@ -132,8 +178,16 @@ def test_one_dim_bspline_der_2_agumented(one_dim_bspline_penalty):
 def test_two_dim_bspline_der_2_energy_penalty(two_dim_bspline_penalty):
     """Check that the full penalty matches the original PGAM implementation."""
     basis_parms = two_dim_bspline_penalty["bspline_params"]
-    der_basis = lambda x : nmo.basis._spline_basis.bspline(x, basis_parms["knots"], basis_parms["order"], der=basis_parms["der"], outer_ok=False)
-    pen = penalty_utils.compute_energy_penalty(two_dim_bspline_penalty["n_samples"], der_basis)
+    der_basis = lambda x: nmo.basis._spline_basis.bspline(
+        x,
+        basis_parms["knots"],
+        basis_parms["order"],
+        der=basis_parms["der"],
+        outer_ok=False,
+    )
+    pen = penalty_utils.compute_energy_penalty(
+        two_dim_bspline_penalty["n_samples"], der_basis
+    )
     pen = penalty_utils.ndim_tensor_product_basis_penalty(pen, pen)
     assert np.allclose(pen[0], two_dim_bspline_penalty["energy_penalty_0"])
     assert np.allclose(pen[1], two_dim_bspline_penalty["energy_penalty_1"])
@@ -142,8 +196,16 @@ def test_two_dim_bspline_der_2_energy_penalty(two_dim_bspline_penalty):
 def test_two_dim_bspline_der_2_null_space_penalty(two_dim_bspline_penalty):
     """Check that the full penalty matches the original PGAM implementation."""
     basis_params = two_dim_bspline_penalty["bspline_params"]
-    der_basis = lambda x : nmo.basis._spline_basis.bspline(x, basis_params["knots"], basis_params["order"], der=basis_params["der"], outer_ok=False)
-    pen = penalty_utils.compute_energy_penalty(two_dim_bspline_penalty["n_samples"], der_basis)
+    der_basis = lambda x: nmo.basis._spline_basis.bspline(
+        x,
+        basis_params["knots"],
+        basis_params["order"],
+        der=basis_params["der"],
+        outer_ok=False,
+    )
+    pen = penalty_utils.compute_energy_penalty(
+        two_dim_bspline_penalty["n_samples"], der_basis
+    )
     pen = penalty_utils.ndim_tensor_product_basis_penalty(pen, pen)
     null_pen = penalty_utils.compute_penalty_null_space(pen)
     # due to poor conditioning of the penalty and different LAPACK versions
@@ -160,7 +222,9 @@ def test_two_dim_bspline_der_2_symmetric_sqrt(two_dim_bspline_penalty):
     out = two_dim_bspline_penalty["penalties_for_compute_sqrt"]
     log_lam = np.log(two_dim_bspline_penalty["reg_strength"][0])
     sqrt_orig = two_dim_bspline_penalty["sqrt_energy_penalty"]
-    scaled_sqrt_pen = penalty_utils.tree_compute_sqrt_penalty(out, np.array([log_lam, log_lam, log_lam]), 0, apply_identifiability=lambda x:x)
+    scaled_sqrt_pen = penalty_utils.tree_compute_sqrt_penalty(
+        out, np.array([log_lam, log_lam, log_lam]), 0, apply_identifiability=lambda x: x
+    )
     squared_pen = scaled_sqrt_pen.T.dot(scaled_sqrt_pen)
     squared_pen_orig = sqrt_orig.T.dot(sqrt_orig)
     assert np.allclose(squared_pen_orig, squared_pen)
@@ -169,14 +233,19 @@ def test_two_dim_bspline_der_2_symmetric_sqrt(two_dim_bspline_penalty):
 def test_two_dim_bspline_der_2_penalty_tensor(two_dim_bspline_penalty):
     bspline_params = two_dim_bspline_penalty["bspline_params"]
     n_basis = bspline_params["knots"].shape[0] - bspline_params["order"]
-    bas = GAMBSplineEval(n_basis, order=bspline_params["order"], identifiability=False) ** 2
+    bas = (
+        GAMBSplineEval(n_basis, order=bspline_params["order"], identifiability=False)
+        ** 2
+    )
     pen_tensor = penalty_utils.compute_energy_penalty_tensor_additive_component(bas)
     s_list = np.concatenate(
         (
-            [two_dim_bspline_penalty["energy_penalty_0"][None],
-             two_dim_bspline_penalty["energy_penalty_1"][None]]
+            [
+                two_dim_bspline_penalty["energy_penalty_0"][None],
+                two_dim_bspline_penalty["energy_penalty_1"][None],
+            ]
         ),
-        axis=0
+        axis=0,
     )
     assert np.allclose(pen_tensor[:2], s_list)
 
@@ -198,8 +267,7 @@ def test_two_dim_bspline_der_2_agumented(two_dim_bspline_penalty):
         # this context sets the original Cholesky sqrt algorithm
         # the equivalence of the sqrt is checked with: test_orig_vs_new_sqrt
         out = penalty_utils.tree_compute_sqrt_penalty(
-            pen_list,
-            [jax.numpy.log(two_dim_bspline_penalty["reg_strength"])]
+            pen_list, [jax.numpy.log(two_dim_bspline_penalty["reg_strength"])]
         )
     orig_agu_pen = two_dim_bspline_penalty["agumented_penalty"][:, 1:]
     assert np.allclose(out, orig_agu_pen)
@@ -223,11 +291,15 @@ def test_sum_two_one_dim_bspline_penalty_tensor(sum_two_one_dim_bspline_penalty)
     params2 = sum_two_one_dim_bspline_penalty["bspline_2_params"]
     n_basis1 = params1["knots"].shape[0] - params1["order"]
     n_basis2 = params2["knots"].shape[0] - params2["order"]
-    bas = GAMBSplineEval(n_basis1, identifiability=False) + GAMBSplineEval(n_basis2, identifiability=False)
+    bas = GAMBSplineEval(n_basis1, identifiability=False) + GAMBSplineEval(
+        n_basis2, identifiability=False
+    )
     reg_strength = np.log(sum_two_one_dim_bspline_penalty["reg_strength"])
     with set_debug(True):
         # use Cholesky sqrt
-        pen_new = penalty_utils.compute_penalty_agumented_from_basis(bas, list(reg_strength))
+        pen_new = penalty_utils.compute_penalty_agumented_from_basis(
+            bas, list(reg_strength)
+        )
     pen_orig = sum_two_one_dim_bspline_penalty["block_penalty"][:, 1:]
     # Compare squared matrices due to eigenvector sign ambiguity across numpy/LAPACK versions
     assert np.allclose(pen_new.T @ pen_new, pen_orig.T @ pen_orig)
@@ -239,15 +311,19 @@ def test_sum_two_two_dim_bspline_penalty_tensor(sum_of_two_dim_two_dim_bspline_p
     params2 = sum_of_two_dim_two_dim_bspline_penalty["bspline_2_params"]
     n_basis1 = params1["knots"].shape[0] - params1["order"]
     n_basis2 = params2["knots"].shape[0] - params2["order"]
-    bas = GAMBSplineEval(n_basis1, identifiability=False)**2 + GAMBSplineEval(n_basis2, identifiability=False)**2
+    bas = (
+        GAMBSplineEval(n_basis1, identifiability=False) ** 2
+        + GAMBSplineEval(n_basis2, identifiability=False) ** 2
+    )
     reg_strength = sum_of_two_dim_two_dim_bspline_penalty["reg_strength"]
     with set_debug(True):
         # use Cholesky sqrt
-        pen_new = penalty_utils.compute_penalty_agumented_from_basis(bas, list(np.log(reg_strength)))
+        pen_new = penalty_utils.compute_penalty_agumented_from_basis(
+            bas, list(np.log(reg_strength))
+        )
     pen_orig = sum_of_two_dim_two_dim_bspline_penalty["block_penalty"]
     # remove first col of zeros from orig
     assert np.allclose(pen_new, pen_orig[:, 1:])
-
 
 
 # TODO:

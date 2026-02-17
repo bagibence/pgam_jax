@@ -1,5 +1,5 @@
+import math
 from functools import partial
-
 from typing import Any, Callable, Optional, Tuple
 
 import jax
@@ -7,8 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 from nemos.tree_utils import pytree_map_and_reduce
 from scipy import sparse
-
-import math
 
 from .basis import GAMBSplineEval
 from .basis._basis import GAMAdditiveBasis, GAMMultiplicativeBasis
@@ -42,6 +40,7 @@ def _symmetric_sqrt_numpy(symmetric_matrix):
         Bx[:, mask] = np.delete(U, i_rem, 1) * np.sqrt(eig)
         Bx = Bx.T
         return Bx
+
 
 @jax.jit
 def _symmetric_sqrt_jax(symmetric_matrix):
@@ -99,12 +98,19 @@ def compute_start_block(tree_penalty: Any, shift_by=0):
         for v_curr in val_iter:
             yield v_curr + v_prev
             v_prev = v_curr + v_prev
+
     idx_start_row = jax.tree_util.tree_unflatten(struct, [k for k in cum_sum(rows)])
     idx_start_col = jax.tree_util.tree_unflatten(struct, [k for k in cum_sum(cols)])
     return idx_start_row, idx_start_col
 
 
-def tree_compute_sqrt_penalty(tree_penalty: Any, reg_strength: Any, shift_by: Optional[int]=0, positive_mon_func: Callable=jnp.exp, apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[...,:-1]):
+def tree_compute_sqrt_penalty(
+    tree_penalty: Any,
+    reg_strength: Any,
+    shift_by: Optional[int] = 0,
+    positive_mon_func: Callable = jnp.exp,
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
+):
     """
     Compute the square root of penalties in a pytree and apply weighting.
 
@@ -132,24 +138,30 @@ def tree_compute_sqrt_penalty(tree_penalty: Any, reg_strength: Any, shift_by: Op
         Weighted penalty matrix.
     """
     scaled_pen = jax.tree_util.tree_map(
-        lambda pen, reg: compute_weighted_penalty(pen, reg, positive_mon_func=positive_mon_func),
+        lambda pen, reg: compute_weighted_penalty(
+            pen, reg, positive_mon_func=positive_mon_func
+        ),
         tree_penalty,
-        reg_strength
+        reg_strength,
     )
-    sqrt_tree = jax.tree_util.tree_map(lambda x: apply_identifiability(symmetric_sqrt(x)), scaled_pen)
+    sqrt_tree = jax.tree_util.tree_map(
+        lambda x: apply_identifiability(symmetric_sqrt(x)), scaled_pen
+    )
     tree_start_row, tree_start_col = compute_start_block(sqrt_tree, shift_by=shift_by)
     tot_shape = (
         pytree_map_and_reduce(lambda x: x.shape[0], sum, sqrt_tree),
-        pytree_map_and_reduce(lambda x: x.shape[1], sum, sqrt_tree)
+        pytree_map_and_reduce(lambda x: x.shape[1], sum, sqrt_tree),
     )
     return tree_create_block(sqrt_tree, tree_start_row, tree_start_col, tot_shape)
 
 
 @partial(jax.jit, static_argnums=(1, 2))
 def compute_penalty_blocks(
-        tree_penalty: Any,
-        shift_by: Optional[int]=0,
-        apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[...,:-1,:-1]
+    tree_penalty: Any,
+    shift_by: Optional[int] = 0,
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[
+        ..., :-1, :-1
+    ],
 ):
     """
     Compute the penalty blocks for a pytree and apply weighting.
@@ -179,7 +191,9 @@ def compute_penalty_blocks(
 
     """
     scaled_penalties = jax.tree_util.tree_map(apply_identifiability, tree_penalty)
-    tree_start_row, tree_start_col = compute_start_block(scaled_penalties, shift_by=shift_by)
+    tree_start_row, tree_start_col = compute_start_block(
+        scaled_penalties, shift_by=shift_by
+    )
 
     # compute shape of blocks (individual penalty matrices)
     block_shapes = jax.tree_util.tree_map(lambda x: x.shape[1:], scaled_penalties)
@@ -187,10 +201,24 @@ def compute_penalty_blocks(
 
     # compute size of the full block penalty and allocate the blocks
     size = 1 + sum(jax.tree_util.tree_leaves(block_shapes)[1::2])
-    penalty_blocks = jax.tree_util.tree_map(lambda n: jnp.zeros((n, size, size)), num_pen_per_block)
+    penalty_blocks = jax.tree_util.tree_map(
+        lambda n: jnp.zeros((n, size, size)), num_pen_per_block
+    )
+
     # function that build the blocks
-    func = lambda pen, full, start_row, start_col, shape: pen.at[:, start_row: start_row+shape[0], start_col: start_col+shape[1]].set(full)
-    return jax.tree_util.tree_map(func, penalty_blocks, scaled_penalties, tree_start_row, tree_start_col, block_shapes)
+    def func(pen, full, start_row, start_col, shape):
+        return pen.at[
+            :, start_row : start_row + shape[0], start_col : start_col + shape[1]
+        ].set(full)
+
+    return jax.tree_util.tree_map(
+        func,
+        penalty_blocks,
+        scaled_penalties,
+        tree_start_row,
+        tree_start_col,
+        block_shapes,
+    )
 
 
 def compute_energy_penalty(n_samples: int, basis_derivative: Callable):
@@ -272,7 +300,9 @@ def compute_penalty_null_space_jax(penalty):
     return jnp.dot(U, U.T)
 
 
-def compute_weighted_penalty(penalty_tensor: jnp.ndarray, reg_strength: jnp.ndarray, positive_mon_func=jnp.exp):
+def compute_weighted_penalty(
+    penalty_tensor: jnp.ndarray, reg_strength: jnp.ndarray, positive_mon_func=jnp.exp
+):
     """
     Compute a weighted sum of the penalties.
 
@@ -294,7 +324,12 @@ def compute_weighted_penalty(penalty_tensor: jnp.ndarray, reg_strength: jnp.ndar
     return jnp.sum(penalty_tensor * pos_reg[:, None, None], axis=0)
 
 
-def create_block_penalty(full_penalty: jnp.ndarray, start_idx_row: int, start_idx_col: int, block_shape: Tuple[int, int]):
+def create_block_penalty(
+    full_penalty: jnp.ndarray,
+    start_idx_row: int,
+    start_idx_col: int,
+    block_shape: Tuple[int, int],
+):
     """
     Create a block penalty matrix.
 
@@ -315,13 +350,20 @@ def create_block_penalty(full_penalty: jnp.ndarray, start_idx_row: int, start_id
         Block penalty matrix of shape (num_weights, num_weights).
     """
     block_rows, block_cols = full_penalty.shape
-    block_penalty = jnp.zeros(block_shape).at[
-                    start_idx_row: start_idx_row+block_rows, start_idx_col: start_idx_col+block_cols
-                    ].set(full_penalty)
+    block_penalty = (
+        jnp.zeros(block_shape)
+        .at[
+            start_idx_row : start_idx_row + block_rows,
+            start_idx_col : start_idx_col + block_cols,
+        ]
+        .set(full_penalty)
+    )
     return block_penalty
 
 
-def tree_create_block(tree_penalty_blocks, start_idx_row, start_idx_col, block_shape: Tuple[int, int]):
+def tree_create_block(
+    tree_penalty_blocks, start_idx_row, start_idx_col, block_shape: Tuple[int, int]
+):
     """
     Create a block diagonal penalty matrix from a tree of penalty blocks.
 
@@ -382,7 +424,7 @@ def ndim_tensor_product_basis_penalty(*penalty: jnp.ndarray) -> jnp.ndarray:
     num_dimensions = len(penalty)
     penalty = tuple(penalty)
     # from the identities for the kron prod
-    identities = tuple(sparse.identity(pen.shape[0], format='csr') for pen in penalty)
+    identities = tuple(sparse.identity(pen.shape[0], format="csr") for pen in penalty)
 
     # initialize the output tensor
     final_dim = math.prod(p.shape[0] for p in penalty)
@@ -391,16 +433,16 @@ def ndim_tensor_product_basis_penalty(*penalty: jnp.ndarray) -> jnp.ndarray:
     # apply the sparse kron between each element
     for k, pen in enumerate(penalty):
         out = pen if k == 0 else identities[0]
-        for j in  range(1, num_dimensions):
+        for j in range(1, num_dimensions):
             out = sparse.kron(out, pen) if j == k else sparse.kron(out, identities[j])
-        ndim_penalty_tensor[k] = out.toarray() if hasattr(out, 'toarray') else out
+        ndim_penalty_tensor[k] = out.toarray() if hasattr(out, "toarray") else out
     return ndim_penalty_tensor
 
 
 def compute_energy_penalty_tensor_additive_component(
-        basis_component: GAMBSplineEval | GAMMultiplicativeBasis,
-        n_samples: int = 10 ** 4,
-        penalize_null_space: bool = True,
+    basis_component: GAMBSplineEval | GAMMultiplicativeBasis,
+    n_samples: int = 10**4,
+    penalize_null_space: bool = True,
 ) -> jnp.ndarray:
     r"""
     Define a penalty tensor for an additive component.
@@ -425,7 +467,10 @@ def compute_energy_penalty_tensor_additive_component(
     - For 2-dimensional predictors, it adds a penalty to ..math:`a + b \cdot x + c \cdot y + d \cdot xy`.
 
     """
-    one_dim_pen = (compute_energy_penalty(n_samples, b.derivative) for b in basis_component._iterate_over_components())
+    one_dim_pen = (
+        compute_energy_penalty(n_samples, b.derivative)
+        for b in basis_component._iterate_over_components()
+    )
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)
     if penalize_null_space:
         # In GAMs one penalizes the null space of a linear combinations of positive-semidefinite
@@ -437,18 +482,19 @@ def compute_energy_penalty_tensor_additive_component(
         # null(B). For this reason we can compute the null-space of the sum of the penality matrices and penalize that.
         # In the original code the sum was used, however, the mean is more stable when summing many matrices.
         null_pen = compute_penalty_null_space(out)
-        full_rank = null_pen[None] if ~np.all(null_pen == 0) else jnp.zeros((0, *null_pen.shape))
-        out = jnp.concatenate(
-            (out, full_rank),
-            axis=0
+        full_rank = (
+            null_pen[None]
+            if ~np.all(null_pen == 0)
+            else jnp.zeros((0, *null_pen.shape))
         )
+        out = jnp.concatenate((out, full_rank), axis=0)
     return out
 
 
 def compute_energy_penalty_tensor(
-        basis: GAMBSplineEval | GAMMultiplicativeBasis | GAMAdditiveBasis,
-        n_sample: int = 10**4,
-        penalize_null_space: bool = True,
+    basis: GAMBSplineEval | GAMMultiplicativeBasis | GAMAdditiveBasis,
+    n_sample: int = 10**4,
+    penalize_null_space: bool = True,
 ) -> list[jnp.ndarray]:
     """
     Create an energy penalty for each additive component.
@@ -468,18 +514,21 @@ def compute_energy_penalty_tensor(
 
     """
     return [
-        compute_energy_penalty_tensor_additive_component(bas, n_sample, penalize_null_space=penalize_null_space)
+        compute_energy_penalty_tensor_additive_component(
+            bas, n_sample, penalize_null_space=penalize_null_space
+        )
         for bas in basis
     ]
 
+
 def compute_penalty_agumented_from_basis(
-        basis: GAMBSplineEval | GAMMultiplicativeBasis | GAMAdditiveBasis,
-        reg_strength: float,
-        n_samples: int = 10 ** 4,
-        penalize_null_space: bool = True,
-        shift_by: Optional[int] = 0,
-        positive_mon_func = jnp.exp,
-        apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[...,:-1],
+    basis: GAMBSplineEval | GAMMultiplicativeBasis | GAMAdditiveBasis,
+    reg_strength: float,
+    n_samples: int = 10**4,
+    penalize_null_space: bool = True,
+    shift_by: Optional[int] = 0,
+    positive_mon_func=jnp.exp,
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
 ):
     """
     Compute the block-diagonal penalization matrix.
@@ -510,13 +559,15 @@ def compute_penalty_agumented_from_basis(
     Block-diagonal penalization matrix.
 
     """
-    penalty_tree = compute_energy_penalty_tensor(basis, n_samples, penalize_null_space=penalize_null_space)
+    penalty_tree = compute_energy_penalty_tensor(
+        basis, n_samples, penalize_null_space=penalize_null_space
+    )
     return tree_compute_sqrt_penalty(
         penalty_tree,
         reg_strength,
         shift_by=shift_by,
         positive_mon_func=positive_mon_func,
-        apply_identifiability=apply_identifiability
+        apply_identifiability=apply_identifiability,
     )
 
 
@@ -530,8 +581,12 @@ def irregularly_sampled_simps(x, y):
     second_scale = h0_plus_h1**2 / (dx[:-1:2] * dx[1::2])
     third_scale = 2 - h0_over_h1
     # compute simpson 1/3 formula
-    even_tot = jnp.sum(glob_scale * (
-            first_scale * y[:len(y)-2:2] + second_scale * y[1:len(y)-1:2] + third_scale * y[2::2]
+    even_tot = jnp.sum(
+        glob_scale
+        * (
+            first_scale * y[: len(y) - 2 : 2]
+            + second_scale * y[1 : len(y) - 1 : 2]
+            + third_scale * y[2::2]
         )
     )
 
@@ -539,31 +594,40 @@ def irregularly_sampled_simps(x, y):
         len_y = len(y) - 1
         h0, h1 = dx[-2], dx[-1]
         return (
-                out + y[len_y] * (2 * h1 ** 2 + 3 * h0 * h1) / (6 * (h0 + h1)) +
-                y[len_y - 1] * (h1 ** 2 + 3 * h1 * h0) / (6 * h0) -
-                y[len_y - 2] * h1 ** 3 / (6 * h0 * (h0 + h1))
+            out
+            + y[len_y] * (2 * h1**2 + 3 * h0 * h1) / (6 * (h0 + h1))
+            + y[len_y - 1] * (h1**2 + 3 * h1 * h0) / (6 * h0)
+            - y[len_y - 2] * h1**3 / (6 * h0 * (h0 + h1))
         )
-    return jax.lax.cond(len(y) % 2 == 0, add_correction, lambda *x: x[0], even_tot, dx, y)
+
+    return jax.lax.cond(
+        len(y) % 2 == 0, add_correction, lambda *x: x[0], even_tot, dx, y
+    )
 
 
 def regularly_sampled_simps(dx, y):
     # compute scaling
-    glob_scale = dx / 3.
+    glob_scale = dx / 3.0
     second_scale = 4
     # compute simpson 1/3 formula
-    even_tot = jnp.sum(glob_scale * (
-            y[:len(y)-2:2] + second_scale * y[1:len(y)-1:2] + y[2::2]
-        )
+    even_tot = jnp.sum(
+        glob_scale
+        * (y[: len(y) - 2 : 2] + second_scale * y[1 : len(y) - 1 : 2] + y[2::2])
     )
 
     def add_correction(out, dx, y):
         len_y = len(y) - 1
         return (
-                out + y[len_y] * (5 * dx) / 12 +
-                y[len_y - 1] * (2 * dx) / 3 -
-                y[len_y - 2] * dx / 12
+            out
+            + y[len_y] * (5 * dx) / 12
+            + y[len_y - 1] * (2 * dx) / 3
+            - y[len_y - 2] * dx / 12
         )
-    return jax.lax.cond(len(y) % 2 == 0, add_correction, lambda *x: x[0], even_tot, dx, y)
+
+    return jax.lax.cond(
+        len(y) % 2 == 0, add_correction, lambda *x: x[0], even_tot, dx, y
+    )
+
 
 _vec_irregularly_sampled_simps = jax.vmap(irregularly_sampled_simps, in_axes=(None, 1))
 _vec_regularly_sampled_simps = jax.vmap(regularly_sampled_simps, in_axes=(None, 1))
@@ -572,4 +636,3 @@ _vec_regularly_sampled_simps = jax.vmap(regularly_sampled_simps, in_axes=(None, 
 def vmap_simpson_regular(dx, y):
     shape = y.shape[1:]
     return _vec_regularly_sampled_simps(dx, y.reshape(y.shape[0], -1)).reshape(shape)
-

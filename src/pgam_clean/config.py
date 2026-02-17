@@ -1,7 +1,9 @@
 from contextlib import contextmanager
 
+
 class config:
     DEBUG = False
+
 
 @contextmanager
 def set_debug(value=True):

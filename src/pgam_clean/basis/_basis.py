@@ -1,26 +1,23 @@
 import inspect
 from copy import deepcopy
-
-from nemos.basis._basis import AdditiveBasis, MultiplicativeBasis
-from typing import Optional
-from pynapple import Tsd, TsdFrame, TsdTensor
-from typing import Tuple
-from numpy.typing import NDArray, ArrayLike
-from nemos.typing import FeatureMatrix
-from nemos.type_casting import support_pynapple
+from typing import Optional, Tuple
 
 import numpy as np
+from nemos.basis._basis import AdditiveBasis, MultiplicativeBasis
+from nemos.type_casting import support_pynapple
+from nemos.typing import FeatureMatrix
 from nemos.utils import row_wise_kron
+from numpy.typing import ArrayLike, NDArray
+from pynapple import Tsd, TsdFrame, TsdTensor
+
 
 def has_param(bas, method, param_name="apply_identifiability"):
     attr = getattr(bas, method, None)
     if attr is None:
         return False
     sig = inspect.signature(attr)
-    return param_name in (
-        p.name
-        for p in sig.parameters.values()
-    )
+    return param_name in (p.name for p in sig.parameters.values())
+
 
 def _evaluate_on_grid(bas, *n_samples) -> Tuple[Tuple[NDArray], NDArray]:
     sample_tuple = bas._get_samples(*n_samples)
@@ -52,12 +49,13 @@ class GAMBasisMixin:
     def evaluate_on_grid(self, *n_samples: int) -> Tuple[Tuple[NDArray], NDArray]:
         return _evaluate_on_grid(self, *n_samples)
 
+
 class GAMAtomicBasisMixin(GAMBasisMixin):
 
     def __init__(self, identifiability: bool):
         self._identifiability = int(identifiability)
         # get the attribute or the func
-        self.apply_constraints = lambda x: x[...,:-1] if identifiability else x
+        self.apply_constraints = lambda x: x[..., :-1] if identifiability else x
         # add a basis if the drop column is enabled
         self._n_basis_funcs = self._n_basis_funcs + self._identifiability
         GAMBasisMixin.__init__(self)
@@ -69,15 +67,19 @@ class GAMAtomicBasisMixin(GAMBasisMixin):
     @identifiability.setter
     def identifiability(self, value: bool):
         if not isinstance(value, bool):
-            raise TypeError(f"identifiability must be a boolean. {value} provided instead.")
+            raise TypeError(
+                f"identifiability must be a boolean. {value} provided instead."
+            )
         self._identifiability = int(value)
         if value:
-            self.apply_constraints = lambda x: x[...,:-1]
+            self.apply_constraints = lambda x: x[..., :-1]
         else:
             self.apply_constraints = lambda x: x
 
     def _compute_features(
-        self, sample_pts: ArrayLike | Tsd | TsdFrame | TsdTensor, apply_identifiability: Optional[bool] = None
+        self,
+        sample_pts: ArrayLike | Tsd | TsdFrame | TsdTensor,
+        apply_identifiability: Optional[bool] = None,
     ) -> FeatureMatrix:
         # this gets the compute feature from the inheritance (bspline or similar)
         X = super()._compute_features(sample_pts)
@@ -88,14 +90,16 @@ class GAMAtomicBasisMixin(GAMBasisMixin):
             X = self.apply_constraints(X)
         return X
 
-
-
-
     @property
     def n_basis_funcs(self) -> int:
         return self._n_basis_funcs - getattr(self, "_identifiability", 0)
 
-    def derivative(self, sample_pts: np.ndarray, der: int = 2, apply_identifiability: Optional[bool] = None):
+    def derivative(
+        self,
+        sample_pts: np.ndarray,
+        der: int = 2,
+        apply_identifiability: Optional[bool] = None,
+    ):
         """
         Compute the basis derivative and concatenate output on the second axis.
 
@@ -113,7 +117,7 @@ class GAMAtomicBasisMixin(GAMBasisMixin):
         X = self._derivative(sample_pts, der=der)
         X = X.reshape(X.shape[0], -1)
         if apply_identifiability:
-            X = X[...,:-1]
+            X = X[..., :-1]
         else:
             X = self.apply_constraints(X)
         return X
@@ -129,7 +133,7 @@ class GAMAdditiveBasis(GAMBasisMixin, AdditiveBasis):
     def derivative(self, *xi: ArrayLike):
         return np.hstack(
             self.basis1.derivative(*xi[: self.basis1._n_input_dimensionality]),
-            self.basis2.derivative(*xi[self.basis1._n_input_dimensionality:])
+            self.basis2.derivative(*xi[self.basis1._n_input_dimensionality :]),
         )
 
 
@@ -146,12 +150,11 @@ class GAMMultiplicativeBasis(GAMBasisMixin, MultiplicativeBasis):
         MultiplicativeBasis.__init__(self, basis1, basis2)
         GAMBasisMixin.__init__(self)
 
-
     def derivative(self, *xi: ArrayLike):
         kron = support_pynapple(conv_type="numpy")(row_wise_kron)
 
         return kron(
-                self.basis1.derivative(*xi[: self.basis1._n_input_dimensionality]),
-                self.basis2.derivative(*xi[self.basis1._n_input_dimensionality :]),
-                transpose=False,
+            self.basis1.derivative(*xi[: self.basis1._n_input_dimensionality]),
+            self.basis2.derivative(*xi[self.basis1._n_input_dimensionality :]),
+            transpose=False,
         )

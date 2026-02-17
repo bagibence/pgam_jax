@@ -30,21 +30,20 @@ PGAM algorithm and its components.
 """
 
 import jax
+import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
+import statsmodels.api as sm
 from nemos.observation_models import PoissonObservations
+
+# Original PGAM implementation (for comparison)
+from PGAM.GAM_library import *
 
 # New JAX-based PGAM implementation
 import pgam_clean.penalty_utils as pen_utils
 from pgam_clean.basis import GAMBSplineEval
 from pgam_clean.gcv_compute import gcv_compute_factory
 from pgam_clean.iterative_optim import pql_outer_iteration
-
-# Original PGAM implementation (for comparison)
-from PGAM.GAM_library import *
-import statsmodels.api as sm
-
-import jax.tree_util as jtu
-import jax.numpy as jnp
 
 # =============================================================================
 # Configuration
@@ -240,6 +239,7 @@ opt_coef, opt_pen, niter = pql_outer_iteration(
 # =============================================================================
 
 from nemos.glm import GLM
+
 model = GLM().fit(X, y)
 
 print(f"JAX PGAM converged in {niter} iterations")
