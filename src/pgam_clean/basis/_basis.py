@@ -2,7 +2,7 @@ import inspect
 from copy import deepcopy
 
 import numpy as np
-from nemos.basis._basis import AdditiveBasis, MultiplicativeBasis
+from nemos.basis import AdditiveBasis, MultiplicativeBasis
 from nemos.type_casting import support_pynapple
 from nemos.typing import FeatureMatrix
 from nemos.utils import row_wise_kron
@@ -61,12 +61,19 @@ class GAMAtomicBasisMixin(GAMBasisMixin):
     def identifiability(self):
         return bool(self._identifiability)
 
+    # TODO: Clean up and test these setters
     @identifiability.setter
     def identifiability(self, value: bool):
         if not isinstance(value, bool):
             raise TypeError(
                 f"identifiability must be a boolean. {value} provided instead."
             )
+        # same adjustment as in __init__
+        if not self._identifiability and value:
+            self._n_basis_funcs += 1
+        if self._identifiability and not value:
+            self._n_basis_funcs -= 1
+
         self._identifiability = int(value)
         if value:
             self.apply_constraints = lambda x: x[..., :-1]
@@ -132,6 +139,15 @@ class GAMAdditiveBasis(GAMBasisMixin, AdditiveBasis):
             self.basis2.derivative(*xi[self.basis1._n_input_dimensionality :]),
         )
 
+    @property
+    def identifiability(self):
+        return self.basis1.identifiability and self.basis2.identifiability
+
+    @identifiability.setter
+    def identifiability(self, value: bool):
+        self.basis1.identifiability = value
+        self.basis2.identifiability = value
+
 
 class GAMMultiplicativeBasis(GAMBasisMixin, MultiplicativeBasis):
     def __init__(self, basis1: GAMBasisMixin, basis2: GAMBasisMixin):
@@ -153,3 +169,12 @@ class GAMMultiplicativeBasis(GAMBasisMixin, MultiplicativeBasis):
             self.basis2.derivative(*xi[self.basis1._n_input_dimensionality :]),
             transpose=False,
         )
+
+    @property
+    def identifiability(self):
+        return self.basis1.identifiability and self.basis2.identifiability
+
+    @identifiability.setter
+    def identifiability(self, value: bool):
+        self.basis1.identifiability = value
+        self.basis2.identifiability = value
