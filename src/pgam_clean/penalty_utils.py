@@ -8,9 +8,8 @@ import jax.numpy as jnp
 import numpy as np
 from nemos.tree_utils import pytree_map_and_reduce
 from scipy import sparse
+from nemos.basis import BSplineEval, AdditiveBasis, MultiplicativeBasis
 
-from .basis import GAMBSplineEval
-from .basis._basis import GAMAdditiveBasis, GAMMultiplicativeBasis
 from .config import config
 
 
@@ -441,7 +440,7 @@ def ndim_tensor_product_basis_penalty(*penalty: jnp.ndarray) -> jnp.ndarray:
 
 
 def compute_energy_penalty_tensor_additive_component(
-    basis_component: GAMBSplineEval | GAMMultiplicativeBasis,
+    basis_component: BSplineEval | MultiplicativeBasis,
     n_samples: int = 10**4,
     penalize_null_space: bool = True,
 ) -> jnp.ndarray:
@@ -493,7 +492,7 @@ def compute_energy_penalty_tensor_additive_component(
 
 
 def compute_energy_penalty_tensor(
-    basis: GAMBSplineEval | GAMMultiplicativeBasis | GAMAdditiveBasis,
+    basis: BSplineEval | MultiplicativeBasis | AdditiveBasis,
     n_sample: int = 10**4,
     penalize_null_space: bool = True,
 ) -> list[jnp.ndarray]:
@@ -523,7 +522,7 @@ def compute_energy_penalty_tensor(
 
 
 def compute_penalty_agumented_from_basis(
-    basis: GAMBSplineEval | GAMMultiplicativeBasis | GAMAdditiveBasis,
+    basis: BSplineEval | MultiplicativeBasis | AdditiveBasis,
     reg_strength: float,
     n_samples: int = 10**4,
     penalize_null_space: bool = True,

@@ -1,11 +1,9 @@
-import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
 import numpy as np
 
 from nemos.observation_models import Observations, PoissonObservations
 from nemos.basis._basis import Basis
-from .basis._basis_utils import to_gam_basis
+from ._identifiable_features import compute_features_identifiable
 
 from .iterative_optim import pql_outer_iteration
 from .gcv_compute import gcv_compute_factory
@@ -29,7 +27,7 @@ class GAM:
         tol_update: float = 1e-6,
         tol_optim: float = 1e-10,
     ):
-        self.basis = to_gam_basis(basis, identifiability=True)
+        self.basis = basis
         self.observation_model = observation_model
         self.variance_function = _make_variance_function(self.observation_model)
         self.positive_mon_func_for_lambda = jnp.exp
@@ -65,35 +63,18 @@ class GAM:
         )
 
     def get_penalty_tree(self):
-        # This needs identifiability=False
-        orig_identifiability = self.basis.identifiability
-        self.basis.identifiability = False
-
-        energy_penalty = compute_energy_penalty_tensor(
+        return compute_energy_penalty_tensor(
             self.basis, self.n_simpson_sample, penalize_null_space=True
         )
 
-        # set it back
-        self.basis.identifiability = orig_identifiability
-
-        return energy_penalty
-
     def get_design_matrix(self, inputs):
-        # requires identifiability setter I added to some bases
-        # identifiability=True is needed for compute_features to give the right dimensions
-        orig_identifiability = self.basis.identifiability
-        self.basis.identifiability = True
-
-        X = self.basis.compute_features(*inputs)
+        X = compute_features_identifiable(self.basis, *inputs)
         X = np.array(X)
 
         # original PGAM zeros out nans
         X[np.isnan(X)] = 0.0
         # center columns
         X = X - X.mean(axis=0)
-
-        # set it back
-        self.basis.identifiability = orig_identifiability
 
         return X
 
