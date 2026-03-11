@@ -175,7 +175,7 @@ def pql_outer_iteration(
 
     n_obs = jtu.tree_leaves(X)[0].shape[0]
     leaf_shapes = [leaf.shape[1] for leaf in jtu.tree_leaves(X)]  # dims of each leaf
-    # TODO: Does this loop need to be converted to a jax loop?
+    # TODO: Does this loop need to be converted to a jax loop? Was it even worth it?
     i = 0
     for i in range(max_iter):
         # identifiability constraint drops column by default
