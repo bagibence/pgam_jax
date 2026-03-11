@@ -146,7 +146,11 @@ def pql_outer_iteration(
     -------
 
     """
+    # TODO: compute_sqrt_penalty could be defined here?
+    # TODO: variance_func can be determined based on the observation model?
     inv_link_func = obs_model.default_inverse_link_function
+    # TODO: inner_func comes from gcv_compute_factory. That can be inlined here or in GAM.fit
+    # Using LBFGSB because bounds (defined a few lines down) is passed to solver.run
     solver = LBFGSB(inner_func, tol=tol_optim)
     # make sure everything is float
     reg_strength = jtu.tree_map(lambda x: jnp.asarray(x.astype(float)), reg_strength)
@@ -171,6 +175,7 @@ def pql_outer_iteration(
 
     n_obs = jtu.tree_leaves(X)[0].shape[0]
     leaf_shapes = [leaf.shape[1] for leaf in jtu.tree_leaves(X)]  # dims of each leaf
+    # TODO: Does this loop need to be converted to a jax loop?
     i = 0
     for i in range(max_iter):
         # identifiability constraint drops column by default
@@ -184,6 +189,7 @@ def pql_outer_iteration(
             (jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty)
         ) / jnp.sqrt(n_obs)
 
+        # TODO: Lift this out into an initialization step?
         # initialize coefficients by fitting a GLM
         if i == 0:
             pen = jtu.tree_map(lambda x: x[:, 1:].T.dot(x[:, 1:]), sqrt_penalty)
