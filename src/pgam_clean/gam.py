@@ -30,15 +30,14 @@ class GAM:
         self.basis = basis
         self.observation_model = observation_model
         self.variance_function = _make_variance_function(self.observation_model)
-        self.positive_mon_func_for_lambda = jnp.exp
         self.maxiter = maxiter
         self.tol_update = tol_update
         self.tol_optim = tol_optim
         self.n_simpson_sample = int(1e4)
 
-        # TODO: positive_mon_func_for_lambda should have a setter or _inner_func a property
+        self._positive_mon_func_for_lambda = jnp.exp
         self._inner_func = gcv_compute_factory(
-            self.positive_mon_func_for_lambda,
+            self._positive_mon_func_for_lambda,
             lambda x: x[..., :-1],
             lambda x: x[..., :-1, :-1],
             1.5,
@@ -58,11 +57,11 @@ class GAM:
         return tree_compute_sqrt_penalty(
             *args,
             shift_by=0,
-            positive_mon_func=self.positive_mon_func_for_lambda,
+            positive_mon_func=self._positive_mon_func_for_lambda,
             apply_identifiability=lambda x: x[..., :-1],
         )
 
-    def get_penalty_tree(self):
+    def _get_penalty_tree(self):
         return compute_energy_penalty_tensor(
             self.basis, self.n_simpson_sample, penalize_null_space=True
         )
@@ -94,7 +93,7 @@ class GAM:
             raise TypeError("Inputs xi have to be wrapped in a tuple.")
 
         X = self.get_design_matrix(xi)
-        penalty_tree = self.get_penalty_tree()
+        penalty_tree = self._get_penalty_tree()
 
         # TODO: Pull out the GLM initialization here?
         if init_params is None:
