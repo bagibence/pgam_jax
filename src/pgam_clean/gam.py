@@ -85,6 +85,7 @@ class GAM:
         self.basis.identifiability = True
 
         X = self.basis.compute_features(*inputs)
+        X = np.array(X)
 
         # original PGAM zeros out nans
         X[np.isnan(X)] = 0.0
