@@ -101,7 +101,7 @@ class GAM:
             1.5,
         )
 
-    def init_params(
+    def initialize_params(
         self,
         X: jnp.ndarray,
         y: jnp.ndarray,
@@ -235,7 +235,7 @@ class GAM:
 
         # TODO: Pull out the GLM initialization here?
         if init_params is None:
-            init_params = self.init_params(X, y)
+            init_params = self.initialize_params(X, y)
 
         if init_regularizer_strength is None:
             init_regularizer_strength = self._init_regularizer_strength(penalty_tree)
