@@ -146,10 +146,8 @@ def pql_outer_iteration(
     -------
 
     """
-    # TODO: compute_sqrt_penalty could be defined here?
     # TODO: variance_func can be determined based on the observation model?
     inv_link_func = obs_model.default_inverse_link_function
-    # TODO: inner_func comes from gcv_compute_factory. That can be inlined here or in GAM.fit
     # Using LBFGSB because bounds (defined a few lines down) is passed to solver.run
     solver = LBFGSB(inner_func, tol=tol_optim)
     # make sure everything is float
