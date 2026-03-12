@@ -8,8 +8,9 @@ import pytest
 from jax.tree_util import tree_map, tree_structure, treedef_is_leaf
 
 from pgam_clean import penalty_utils
-from pgam_clean.basis import GAMBSplineEval
 from pgam_clean.config import set_debug
+
+from nemos.basis import BSplineEval
 
 
 @pytest.fixture()
@@ -19,7 +20,6 @@ def script_dir():
 
 @pytest.fixture()
 def _tree_map_list_to_array():
-
     is_leaf = lambda x: treedef_is_leaf(tree_structure(x)) or isinstance(x, list)
 
     def map_list_to_array(params):
@@ -145,7 +145,7 @@ def test_one_dim_bspline_der_2_symmetric_sqrt(one_dim_bspline_penalty):
 def test_one_dim_bspline_der_2_penalty_tensor(one_dim_bspline_penalty):
     bspline_params = one_dim_bspline_penalty["bspline_params"]
     n_basis = bspline_params["knots"].shape[0] - bspline_params["order"]
-    bas = GAMBSplineEval(n_basis, order=bspline_params["order"], identifiability=False)
+    bas = BSplineEval(n_basis, order=bspline_params["order"])
     pen_tensor = penalty_utils.compute_energy_penalty_tensor_additive_component(bas)
     assert np.allclose(pen_tensor[0], one_dim_bspline_penalty["energy_penalty"])
     assert np.allclose(pen_tensor[1], one_dim_bspline_penalty["null_space_penalty"])
@@ -154,7 +154,7 @@ def test_one_dim_bspline_der_2_penalty_tensor(one_dim_bspline_penalty):
 def test_one_dim_bspline_der_2_agumented(one_dim_bspline_penalty):
     bspline_params = one_dim_bspline_penalty["bspline_params"]
     n_basis = bspline_params["knots"].shape[0] - bspline_params["order"]
-    bas = GAMBSplineEval(n_basis, order=bspline_params["order"], identifiability=False)
+    bas = BSplineEval(n_basis, order=bspline_params["order"])
     pen_list = penalty_utils.compute_energy_penalty_tensor(bas)
 
     # the first col of agumented pen in original gam was a column of 0s
@@ -233,10 +233,7 @@ def test_two_dim_bspline_der_2_symmetric_sqrt(two_dim_bspline_penalty):
 def test_two_dim_bspline_der_2_penalty_tensor(two_dim_bspline_penalty):
     bspline_params = two_dim_bspline_penalty["bspline_params"]
     n_basis = bspline_params["knots"].shape[0] - bspline_params["order"]
-    bas = (
-        GAMBSplineEval(n_basis, order=bspline_params["order"], identifiability=False)
-        ** 2
-    )
+    bas = BSplineEval(n_basis, order=bspline_params["order"]) ** 2
     pen_tensor = penalty_utils.compute_energy_penalty_tensor_additive_component(bas)
     s_list = np.concatenate(
         (
@@ -291,9 +288,7 @@ def test_sum_two_one_dim_bspline_penalty_tensor(sum_two_one_dim_bspline_penalty)
     params2 = sum_two_one_dim_bspline_penalty["bspline_2_params"]
     n_basis1 = params1["knots"].shape[0] - params1["order"]
     n_basis2 = params2["knots"].shape[0] - params2["order"]
-    bas = GAMBSplineEval(n_basis1, identifiability=False) + GAMBSplineEval(
-        n_basis2, identifiability=False
-    )
+    bas = BSplineEval(n_basis1) + BSplineEval(n_basis2)
     reg_strength = np.log(sum_two_one_dim_bspline_penalty["reg_strength"])
     with set_debug(True):
         # use Cholesky sqrt
@@ -311,10 +306,7 @@ def test_sum_two_two_dim_bspline_penalty_tensor(sum_of_two_dim_two_dim_bspline_p
     params2 = sum_of_two_dim_two_dim_bspline_penalty["bspline_2_params"]
     n_basis1 = params1["knots"].shape[0] - params1["order"]
     n_basis2 = params2["knots"].shape[0] - params2["order"]
-    bas = (
-        GAMBSplineEval(n_basis1, identifiability=False) ** 2
-        + GAMBSplineEval(n_basis2, identifiability=False) ** 2
-    )
+    bas = BSplineEval(n_basis1) ** 2 + BSplineEval(n_basis2) ** 2
     reg_strength = sum_of_two_dim_two_dim_bspline_penalty["reg_strength"]
     with set_debug(True):
         # use Cholesky sqrt
