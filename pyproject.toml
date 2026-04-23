@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pgam_clean"
+name = "pgam_jax"
 version = "0.1.0a0"
 authors = [
     {name = "Edoardo Balzani"},
@@ -40,7 +40,7 @@ PGAM = { path = "../PGAM", editable = true }
 # Configure package discovery for setuptools
 [tool.setuptools.packages.find]
 where = ["src"]     # The directory where package modules are located
-include = ["pgam_clean", "pgam_clean.*"] # The specific package(s) to include in the distribution
+include = ["pgam_jax", "pgam_jax.*"] # The specific package(s) to include in the distribution
 
 # Define optional dependencies for the project
 [project.optional-dependencies]

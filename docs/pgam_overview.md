@@ -51,7 +51,7 @@ in the basis coefficients!
 
 ```python
 # Example: Creating a B-spline basis with 12 functions
-from pgam_clean.basis import GAMBSplineEval
+from pgam_jax.basis import GAMBSplineEval
 bas = GAMBSplineEval(n_basis_funcs=12, order=4)  # order=4 means cubic splines
 ```
 
@@ -92,7 +92,7 @@ This integral is computed numerically using Simpson's rule in our implementation
 
 ```python
 # Computing the energy penalty matrix
-import pgam_clean.penalty_utils as pen_utils
+import pgam_jax.penalty_utils as pen_utils
 
 # For a single smooth term
 penalty_tensor = pen_utils.compute_energy_penalty_tensor_additive_component(bas)
@@ -186,7 +186,7 @@ the full $n \times n$ hat matrix:
 3. Use SVD tricks to compute $\text{tr}(\mathbf{A})$ efficiently
 
 ```python
-from pgam_clean.gcv_compute import gcv_compute_factory
+from pgam_jax.gcv_compute import gcv_compute_factory
 
 # Create a GCV scoring function with custom VJP for efficient gradients
 gcv_scorer = gcv_compute_factory(

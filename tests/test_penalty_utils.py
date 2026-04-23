@@ -8,8 +8,8 @@ import pytest
 from jax.tree_util import tree_map, tree_structure, treedef_is_leaf
 from nemos.basis import BSplineEval
 
-from pgam_clean import penalty_utils
-from pgam_clean.config import set_debug
+from pgam_jax import penalty_utils
+from pgam_jax.config import set_debug
 
 
 @pytest.fixture()

@@ -4,7 +4,7 @@ PGAM Comparison Script: Original vs JAX Implementation
 
 This script compares three approaches to fitting a Poisson regression model:
 1. Original PGAM implementation (from the PGAM package)
-2. New JAX-based PGAM implementation (pgam_clean)
+2. New JAX-based PGAM implementation (pgam_jax)
 3. Standard GLM without smoothing penalties (nemos)
 
 The goal is to validate that the new JAX implementation produces equivalent
@@ -40,10 +40,10 @@ from nemos.observation_models import PoissonObservations
 from PGAM.GAM_library import *
 
 # New JAX-based PGAM implementation
-import pgam_clean.penalty_utils as pen_utils
-from pgam_clean.basis import GAMBSplineEval
-from pgam_clean.gcv_compute import gcv_compute_factory
-from pgam_clean.iterative_optim import pql_outer_iteration
+import pgam_jax.penalty_utils as pen_utils
+from pgam_jax.basis import GAMBSplineEval
+from pgam_jax.gcv_compute import gcv_compute_factory
+from pgam_jax.iterative_optim import pql_outer_iteration
 
 # =============================================================================
 # Configuration

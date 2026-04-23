@@ -1,6 +1,6 @@
-# pgam_clean
+# pgam_jax
 
-`pgam_clean` is an alpha-stage, JAX-based implementation of the Poisson Generalized Additive Model (P-GAM).
+`pgam_jax` is an alpha-stage, JAX-based implementation of the Poisson Generalized Additive Model (PGAM).
 
 PGAM represents neural responses with B-splines regularized by smoothing penalties.
 
