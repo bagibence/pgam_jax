@@ -1,14 +1,14 @@
 import math
+from collections.abc import Callable
 from functools import partial
 from typing import Any
-from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.tree_utils import pytree_map_and_reduce
 from scipy import sparse
-from nemos.basis import BSplineEval, AdditiveBasis, MultiplicativeBasis
 
 from .config import config
 

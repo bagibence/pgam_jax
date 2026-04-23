@@ -3,16 +3,14 @@ from __future__ import annotations
 from typing import Callable
 
 import jax.numpy as jnp
-import numpy as np
+from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
+from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 
-from nemos.observation_models import Observations, PoissonObservations
-from nemos.basis import BSplineEval, AdditiveBasis, MultiplicativeBasis
 from ._identifiable_features import compute_features_identifiable
-
-from .iterative_optim import pql_outer_iteration
 from .gcv_compute import gcv_compute_factory
-from .penalty_utils import tree_compute_sqrt_penalty, compute_energy_penalty_tensor
+from .iterative_optim import pql_outer_iteration
+from .penalty_utils import compute_energy_penalty_tensor, tree_compute_sqrt_penalty
 
 
 # TODO: Should any other observation model be supported?
@@ -174,7 +172,7 @@ class GAM:
         X = jnp.array(X)
 
         # TODO: Drop rows with NaNs instead?
-        # original PGAM zeros out nans
+        # original PGAM zeros out nans, but nemos drops rows with NaNs
         X = jnp.where(jnp.isnan(X), 0.0, X)
         # center columns
         X = X - X.mean(axis=0)

@@ -176,8 +176,10 @@ exclude = ["src/nemos/_documentation_utils"]
 
 
 [tool.ruff.lint]
-select = ["D"]
-ignore = ["D202"]  # this conflicts with black
+# TODO: Re-enable NumPy docstring rules when public APIs are ready.
+# select = ["D"]
+# ignore = ["D202"]  # this conflicts with black
+select = []
 
 
 [tool.ruff.lint.pydocstyle]

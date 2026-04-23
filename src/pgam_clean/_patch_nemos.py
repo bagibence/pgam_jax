@@ -1,5 +1,5 @@
-import numpy as np
 import nemos as nmo
+import numpy as np
 from nemos.basis._basis import check_transform_input, min_max_rescale_samples
 from nemos.basis._spline_basis import bspline
 from nemos.type_casting import support_pynapple

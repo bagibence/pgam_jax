@@ -26,7 +26,6 @@ def model_constructors_for_weights_and_pseudo_data(
     """
     Compute the IRLS weights and pseudo-data.
 
-
     See Chapter 3, pp. 106–107 of:
 
     Wood, S. N. (2017). *Generalized Additive Models: An Introduction with R* (2nd ed.). CRC Press.
@@ -41,7 +40,6 @@ def model_constructors_for_weights_and_pseudo_data(
     Returns
     -------
         The IRLS weights and pseudo-data computing function.
-
     """
 
     @jax.jit
