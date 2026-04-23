@@ -9,10 +9,22 @@ PGAM represents neural responses with B-splines regularized by smoothing penalti
 This project currently targets Python 3.12, 3.13, and 3.14.
 
 ```bash
+uv sync
+```
+
+For local development and comparisons against the original implementation:
+
+```bash
 uv sync --extra dev
 ```
 
-For local development, run tests with:
+For notebook-based experimentation:
+
+```bash
+uv sync --extra dev --extra notebooks
+```
+
+Run tests with:
 
 ```bash
 uv run pytest tests

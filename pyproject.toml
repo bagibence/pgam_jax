@@ -1,34 +1,36 @@
 [build-system]
-requires = ["setuptools>=42", "wheel", "Cython", "setuptools-scm", "tomli", "scipy"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pgam_clean"
-dynamic = ["version"]
-authors = [{name = "nemos authors"}]
-description = "NEural MOdelS, a statistical modeling framework for neuroscience."
+version = "0.1.0a0"
+authors = [
+    {name = "Edoardo Balzani"},
+    {name = "Bence Bagi"},
+]
+description = "JAX-based Poisson generalized additive models for neuroscience workflows."
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.12,<3.15"
 keywords = ["neuroscience", "PGAM"]
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 classifiers = [
     "Intended Audience :: Science/Research",
     "Natural Language :: English",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13"
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14"
 ]
 
 # Define dependencies for the project
 dependencies = [
-    "nemos",
-    "matplotlib",
+    "jax",
     "jaxopt",
-    "optimistix<0.1.0",
-    # only needed for comparrison with origina implemetation
-    "PGAM",
+    "nemos",
+    "numpy",
+    "scipy",
 ]
 
 
@@ -38,18 +40,13 @@ PGAM = { path = "../PGAM", editable = true }
 # Configure package discovery for setuptools
 [tool.setuptools.packages.find]
 where = ["src"]     # The directory where package modules are located
-include = ["pgam_clean"] # The specific package(s) to include in the distribution
-
-[tool.setuptools_scm]
-version_scheme = 'python-simplified-semver'
-local_scheme = 'no-local-version'
+include = ["pgam_clean", "pgam_clean.*"] # The specific package(s) to include in the distribution
 
 # Define optional dependencies for the project
 [project.optional-dependencies]
 dev = [
     "black",                        # Code formatter
     "isort",                        # Import sorter
-    "pip-tools",                    # Dependency management
     "ruff",                         # Lint docstrings for now, eventually switch to ruff for all linting
     "pytest",                       # Testing framework
     "pytest-xdist",                 # Parallelize pytest
@@ -57,60 +54,19 @@ dev = [
     "coverage",                     # Test coverage measurement
     "pytest-cov",                   # Test coverage plugin for pytest
     "statsmodels",                  # Used to compare model pseudo-r2 in testing
-    "scikit-learn",                 # Testing compatibility with CV & pipelines
-    "matplotlib>=3.7",              # Needed by doctest to run docstrings examples
-    "seaborn",                      # Required by doctest for _documentation_utils module
-    "myst-nb",                      # Test myst_nb utils for glue
+    "matplotlib>=3.7",              # Used by comparison examples
+    "PGAM",                         # Used only for comparisons against the original implementation
     "tox-uv",                       # Run tox with uv for faster installs
+]
+notebooks = [
     "jupyterlab",
     "jupyterlab-vim",
     "jupyterlab-code-formatter",
 ]
-docs = [
-    "numpydoc",
-    "sphinx",
-    "pydata-sphinx-theme",
-    "sphinx-autodoc-typehints",
-    "sphinx-copybutton",
-    "sphinx-design",
-    "sphinx-issues",
-    "sphinxcontrib-apidoc",
-    "sphinxcontrib-bibtex",
-    "sphinx-togglebutton",
-    "sphinx_code_tabs",
-    "sphinxemoji",
-    "myst-parser",
-    "myst-nb",
-    "dandi",
-    "sphinx-autobuild",
-    "sphinx-contributors",
-    "scikit-learn",
-    "dandi",
-    "matplotlib>=3.7",
-    "seaborn",
-    "pooch",
-    "ipywidgets",
-    "ipykernel",
-    "patsy",
-    "tqdm",
-]
-examples = [
-    "scikit-learn",
-    "dandi",
-    "matplotlib>=3.7",
-    "seaborn",
-    "pooch",
-    "fsspec",
-    "patsy",
-    "tqdm",
-]
-jaxopt = [
-    "jaxopt>=0.6",
-]
 
 
 [tool.black]
-target-version = ['py310', 'py311', 'py312', 'py313']
+target-version = ['py312', 'py313', 'py314']
 skip-string-normalization = false
 exclude = '''
 (
@@ -158,22 +114,11 @@ markers = [
 # -s: no capture from pytest (prints will show)
 addopts = ["-s", "--strict-markers"]
 
-[tool.coverage.run]
-omit = [
-    "src/nemos/fetch/*",
-    "src/nemos/_documentation_utils/*",
-]
-
 [tool.coverage.report]
 exclude_lines = [
     "@abc.abstractmethod",
     "if __name__ == .__main__.:"
 ]
-
-
-[tool.ruff]
-exclude = ["src/nemos/_documentation_utils"]
-
 
 [tool.ruff.lint]
 # TODO: Re-enable NumPy docstring rules when public APIs are ready.
