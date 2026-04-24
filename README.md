@@ -53,6 +53,4 @@ The API is still evolving while the package is prepared for early testing.
 
 ## Reference
 
-Balzani, Edoardo, et al. "Efficient estimation of neural tuning during naturalistic behavior." *Advances in Neural Information Processing Systems 33* (2020): 12604-12614.
-
-Paper: https://proceedings.neurips.cc/paper/2020/hash/94d2a3c6dd19337f2511cdf8b4bf907e-Abstract.html
+[Balzani, Edoardo, et al. "Efficient estimation of neural tuning during naturalistic behavior." *Advances in Neural Information Processing Systems 33* (2020): 12604-12614.](https://proceedings.neurips.cc/paper/2020/hash/94d2a3c6dd19337f2511cdf8b4bf907e-Abstract.html)
