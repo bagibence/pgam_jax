@@ -32,6 +32,7 @@ PGAM algorithm and its components.
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import nemos as nmo
 import numpy as np
 import statsmodels.api as sm
 from nemos.observation_models import PoissonObservations
@@ -41,7 +42,6 @@ from PGAM.GAM_library import *
 
 # New JAX-based PGAM implementation
 import pgam_jax.penalty_utils as pen_utils
-from pgam_jax.basis import GAMBSplineEval
 from pgam_jax.gcv_compute import gcv_compute_factory
 from pgam_jax.iterative_optim import pql_outer_iteration
 
@@ -56,10 +56,9 @@ jax.config.update("jax_enable_x64", True)
 # Step 1: Define the basis and penalty structure
 # =============================================================================
 
-# Create a B-spline basis with 12 basis functions.
-# identifiability=False means we keep all basis functions; the identifiability
-# constraint (dropping one column) is applied later in the penalty computation.
-bas = GAMBSplineEval(12, identifiability=False)
+# Create a B-spline basis with 12 basis functions. The current pgam_jax port
+# uses nemos bases directly.
+bas = nmo.basis.BSplineEval(12, bounds=(0.0, 1.0))
 
 # Create an additive model with two smooth terms: f1(x1) + f2(x2)
 # Each smooth uses the same B-spline basis structure
@@ -76,7 +75,8 @@ add = bas + bas
 # penalize_null_space=True adds a penalty on the null space of the main penalty,
 # which for second derivatives means penalizing linear functions (a + bx).
 penalty_tree = pen_utils.compute_energy_penalty_tensor(
-    add, 10**4, penalize_null_space=True)
+    add, 10**4, penalize_null_space=True
+)
 
 # =============================================================================
 # Step 2: Generate synthetic data
@@ -99,15 +99,41 @@ knots = np.linspace(0, 1, 10)
 # - penalty_type="der", der=2: penalize second derivative (curvature)
 # - lam=[1, 2]: initial regularization strengths for the two penalty components
 #   (energy penalty and null space penalty)
-sm_handler.add_smooth("linspace", [x1], knots=[knots], ord=4, is_temporal_kernel=False,
-                      trial_idx=None, is_cyclic=[False], penalty_type="der", der=2, lam=[1, 2],
-                      knots_num=10, kernel_length=None, kernel_direction=None,
-                      time_bin=0.006, knots_percentiles=(0, 100))
+sm_handler.add_smooth(
+    "linspace",
+    [x1],
+    knots=[knots],
+    ord=4,
+    is_temporal_kernel=False,
+    trial_idx=None,
+    is_cyclic=[False],
+    penalty_type="der",
+    der=2,
+    lam=[1, 2],
+    knots_num=10,
+    kernel_length=None,
+    kernel_direction=None,
+    time_bin=0.006,
+    knots_percentiles=(0, 100),
+)
 
-sm_handler.add_smooth("linspace2", [x2], knots=[knots], ord=4, is_temporal_kernel=False,
-                      trial_idx=None, is_cyclic=[False], penalty_type="der", der=2, lam=[1, 2],
-                      knots_num=10, kernel_length=None, kernel_direction=None,
-                      time_bin=0.006, knots_percentiles=(0, 100))
+sm_handler.add_smooth(
+    "linspace2",
+    [x2],
+    knots=[knots],
+    ord=4,
+    is_temporal_kernel=False,
+    trial_idx=None,
+    is_cyclic=[False],
+    penalty_type="der",
+    der=2,
+    lam=[1, 2],
+    knots_num=10,
+    kernel_length=None,
+    kernel_direction=None,
+    time_bin=0.006,
+    knots_percentiles=(0, 100),
+)
 
 # Get the design matrix from the original PGAM.
 # [:, 1:] removes the intercept column (handled separately in our implementation)
@@ -115,8 +141,10 @@ X = jnp.asarray(sm_handler.get_exog_mat_fast(sm_handler.smooths_var)[0])[:, 1:]
 
 # True coefficients: first smooth has non-zero effect, second is zero
 # This tests whether the model correctly shrinks the second smooth to zero
-w = np.hstack([np.random.randn(11), np.zeros(11)])  # 11 = 12 basis - 1 (identifiability)
-intercept = np.array([0.])
+w = np.hstack(
+    [np.random.randn(11), np.zeros(11)]
+)  # 11 = 12 basis - 1 (identifiability)
+intercept = np.array([0.0])
 
 # Generate Poisson-distributed spike counts
 # y ~ Poisson(exp(X @ w + intercept))
@@ -148,7 +176,10 @@ variance_func = lambda x: x
 # classes directly, as it would clutter the API for non-GAM use cases.
 # Instead, handle it at the PGAM/penalty level.
 compute_sqrt_penalty = lambda *args: pen_utils.tree_compute_sqrt_penalty(
-    *args, shift_by=0, positive_mon_func=jax.numpy.exp, apply_identifiability=lambda x: x[..., :-1]
+    *args,
+    shift_by=0,
+    positive_mon_func=jax.numpy.exp,
+    apply_identifiability=lambda x: x[..., :-1],
 )
 
 # Factory function that creates the GCV (Generalized Cross-Validation) scorer.
@@ -172,24 +203,24 @@ inner_func = gcv_compute_factory(
 # Step 4: Fit the ORIGINAL PGAM model
 # =============================================================================
 
-link = sm.genmod.families.links.log()
+link = sm.genmod.families.links.Log()
 poissFam = sm.genmod.families.family.Poisson(link=link)
 
 # Create and fit the original PGAM model
 pgam = general_additive_model(
     sm_handler,
     sm_handler.smooths_var,  # list of covariates to include
-    np.asarray(y),           # response variable (spike counts)
-    poissFam                 # Poisson family with log link
+    np.asarray(y),  # response variable (spike counts)
+    poissFam,  # Poisson family with log link
 )
 
 res = pgam.optim_gam(
     sm_handler.smooths_var,
-    max_iter=10 ** 2,
-    use_dgcv=True,           # use derivative-based GCV optimization
+    max_iter=10**2,
+    use_dgcv=True,  # use derivative-based GCV optimization
     method="L-BFGS-B",
     fit_initial_beta=True,
-    filter_trials=np.ones(len(y), dtype=bool)
+    filter_trials=np.ones(len(y), dtype=bool),
 )
 
 # =============================================================================
@@ -219,8 +250,8 @@ res = pgam.optim_gam(
 # - compute_sqrt_penalty: function to build augmented penalty matrix
 
 opt_coef, opt_pen, niter = pql_outer_iteration(
-    [jax.numpy.log(jax.numpy.array([1., 2.]))] * 2,  # initial log(λ) for each smooth
-    jtu.tree_map(jnp.zeros_like, (w, intercept)),    # initial (coefficients, intercept)
+    [jax.numpy.log(jax.numpy.array([1.0, 2.0]))] * 2,  # initial log(λ) for each smooth
+    jtu.tree_map(jnp.zeros_like, (w, intercept)),  # initial (coefficients, intercept)
     X,
     y,
     penalty_tree,
@@ -230,8 +261,8 @@ opt_coef, opt_pen, niter = pql_outer_iteration(
     compute_sqrt_penalty,
     fisher_scoring=False,  # use observed information, not expected
     max_iter=100,
-    tol_update=10**-6,     # convergence tolerance for coefficient updates
-    tol_optim=10**-10      # tolerance for inner GCV optimization
+    tol_update=10**-6,  # convergence tolerance for coefficient updates
+    tol_optim=10**-10,  # tolerance for inner GCV optimization
 )
 
 # =============================================================================
@@ -250,8 +281,17 @@ print(f"JAX PGAM converged in {niter} iterations")
 
 import matplotlib.pyplot as plt
 
-plt.close('all')
-f, axs = plt.subplots(1, 4, figsize=(10, 3), sharey=True, sharex=True)
+
+def show_or_close():
+    """Avoid GUI/show warnings when the script is run with a non-interactive backend."""
+    if "agg" in plt.get_backend().lower():
+        plt.close("all")
+    else:
+        plt.show()
+
+
+plt.close("all")
+fig, axs = plt.subplots(1, 4, figsize=(10, 3), sharey=True, sharex=True)
 
 # Plot 1: Original PGAM vs JAX PGAM (should lie on diagonal if equivalent)
 axs[0].set_xlabel("orig gam")
@@ -277,14 +317,18 @@ axs[2].set_title("JAX PGAM\nvs Truth")
 
 # Plot 4: True coefficients vs unpenalized GLM
 # The GLM should overfit more since it has no smoothing penalty
-axs[3].scatter(np.hstack((intercept, w)), np.hstack((model.intercept_, model.coef_)), color="orange")
+axs[3].scatter(
+    np.hstack((intercept, w)),
+    np.hstack((model.intercept_, model.coef_)),
+    color="orange",
+)
 axs[3].plot([-3, 3], [-3, 3], "k")
 axs[3].set_xlabel("true")
 axs[3].set_ylabel("GLM")
 axs[3].set_title("GLM (no penalty)\nvs Truth")
 
-plt.tight_layout()
-plt.show()
+fig.tight_layout()
+show_or_close()
 
 # Plot coefficient profiles
 plt.figure()
@@ -296,4 +340,4 @@ plt.xlabel("Coefficient index")
 plt.ylabel("Coefficient value")
 plt.title("Coefficient Recovery Comparison")
 plt.legend()
-plt.show()
+show_or_close()
