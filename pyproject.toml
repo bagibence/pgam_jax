@@ -63,6 +63,7 @@ notebooks = [
     "jupyterlab-code-formatter",
     "jupytext",
     "jupyter-collaboration",
+    "seaborn",
     "plotly",
 ]
 
