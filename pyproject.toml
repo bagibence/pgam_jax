@@ -45,7 +45,7 @@ include = ["pgam_jax", "pgam_jax.*"] # The specific package(s) to include in the
 # Define optional dependencies for the project
 [project.optional-dependencies]
 dev = [
-    "black",                        # Code formatter
+    "black[jupyter]",               # Code formatter, including notebook support
     "isort",                        # Import sorter
     "ruff",                         # Lint docstrings for now, eventually switch to ruff for all linting
     "pytest",                       # Testing framework
@@ -83,11 +83,11 @@ exclude = '''
     | \.txt
     | \.tox
     | \.venv
+    | \.ipynb_checkpoints
     | _build
     | buck-out
     | build
     | dist
-    | examples
     ))'''
 
 # Configure isort
