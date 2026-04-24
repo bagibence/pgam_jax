@@ -29,10 +29,17 @@ uv sync --extra dev --extra notebooks
 The easiest way to try `pgam_jax` is the walkthrough notebook in `examples/quick_start.ipynb`.
 It generates synthetic nonlinear Poisson data, fits a `GAM`, and visualizes the recovered rate surfaces.
 
-Launch Jupyter Lab with:
+Install with the required dependencies, then launch Jupyter Lab:
+```bash
+uv sync --extra dev --extra notebooks
+
+uv run jupyter lab
+```
+
+Or if you don't want to install anything, just launch Jupyter Lab with:
 
 ```bash
-uv run jupyter lab
+uv run --extra dev --extra notebooks jupyter lab
 ```
 
 ## Tests
