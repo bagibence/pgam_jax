@@ -169,6 +169,18 @@ def pql_outer_iteration(
     upper_bnd = jtu.tree_map(lambda x: jnp.full(x.shape, 25.0), reg_strength)
     bounds = (lower_bnd, upper_bnd)
 
+    @jax.jit
+    def _solve_inner(reg_strength, X_inner, Q, R, y_inner):
+        return solver.run(
+            reg_strength,
+            bounds=bounds,
+            penalty_tree=penalty_tree,
+            X=X_inner,
+            Q=Q,
+            R=R,
+            y=y_inner,
+        )
+
     def loss_unp(p):
         return obs_model._negative_log_likelihood(y, inv_link_func(X.dot(p[0]) + p[1]))
 
@@ -231,14 +243,12 @@ def pql_outer_iteration(
         new_intercept = coeffs[0]
 
         # full optimization for regularizer strength
-        new_reg_strength, state = solver.run(
+        new_reg_strength, state = _solve_inner(
             reg_strength,
-            bounds=bounds,
-            penalty_tree=penalty_tree,
-            X=Xw[:n_obs],
-            Q=Q,
-            R=R,
-            y=yw[:n_obs],
+            Xw[:n_obs],
+            Q,
+            R,
+            yw[:n_obs],
         )
 
         # convergence check
