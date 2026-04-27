@@ -9,7 +9,7 @@ Statsmodels terminology:
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
-from jaxopt import LBFGS, LBFGSB
+from jaxopt import LBFGS, LBFGSB, ScipyBoundedMinimize, ScipyMinimize
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
 from functools import wraps
@@ -129,6 +129,7 @@ def pql_outer_iteration(
     max_iter=100,
     tol_optim=10**-10,
     tol_update=10**-6,
+    use_scipy=False,
 ):
     """
 
@@ -150,6 +151,10 @@ def pql_outer_iteration(
         PQL inner loop function
     fisher_scoring
     max_iter
+    use_scipy:
+        If True, use scipy's L-BFGS-B for both the inner GCV minimization
+        and the initial GLM fit instead of jaxopt's. Often faster on CPU.
+        Defaults to False.
 
     Returns
     -------
@@ -158,7 +163,10 @@ def pql_outer_iteration(
     # TODO: variance_func can be determined based on the observation model?
     inv_link_func = obs_model.default_inverse_link_function
     # Using LBFGSB because bounds (defined a few lines down) is passed to solver.run
-    solver = LBFGSB(inner_func, tol=tol_optim)
+    if use_scipy:
+        solver = ScipyBoundedMinimize(method="l-bfgs-b", fun=inner_func, tol=tol_optim)
+    else:
+        solver = LBFGSB(inner_func, tol=tol_optim)
     # make sure everything is float
     reg_strength = jtu.tree_map(lambda x: jnp.asarray(x.astype(float)), reg_strength)
     y = jnp.asarray(y.astype(float))
@@ -169,7 +177,6 @@ def pql_outer_iteration(
     upper_bnd = jtu.tree_map(lambda x: jnp.full(x.shape, 25.0), reg_strength)
     bounds = (lower_bnd, upper_bnd)
 
-    @jax.jit
     def _solve_inner(reg_strength, X_inner, Q, R, y_inner):
         return solver.run(
             reg_strength,
@@ -180,6 +187,14 @@ def pql_outer_iteration(
             R=R,
             y=y_inner,
         )
+
+    # Wrap jaxopt's LBFGSB in our own jit so its `jit(while)` cache hits across
+    # outer iterations (without this it recompiled once per iter). Scipy's path
+    # cannot be jitted: ScipyBoundedMinimize uses custom_vjp internally and then
+    # does np.asarray(...) on its inputs to hand them to host-side Fortran
+    # L-BFGS-B; under jit those inputs are tracers and the conversion errors.
+    if not use_scipy:
+        _solve_inner = jax.jit(_solve_inner)
 
     def loss_unp(p):
         return obs_model._negative_log_likelihood(y, inv_link_func(X.dot(p[0]) + p[1]))
@@ -216,7 +231,11 @@ def pql_outer_iteration(
             def loss(p):
                 return loss_unp(p) + 0.5 * p[0].dot(pen).dot(p[0])
 
-            (coef, intercept), state = LBFGS(loss, tol=10**-8).run(init_pars)
+            if use_scipy:
+                init_solver = ScipyMinimize(method="l-bfgs-b", fun=loss, tol=1e-8)
+            else:
+                init_solver = LBFGS(loss, tol=1e-8)
+            (coef, intercept), state = init_solver.run(init_pars)
 
         # compute weights
         rate = pytree_map_and_reduce(

@@ -62,6 +62,10 @@ class GAM:
         Convergence tolerance on coefficient updates. Default is 1e-6.
     tol_optim :
         Tolerance for the inner GCV optimization (L-BFGS-B). Default is 1e-10.
+    use_scipy :
+        If True, use scipy's L-BFGS-B for both the inner GCV minimization
+        and the initial GLM fit instead of jaxopt's. Often faster on CPU.
+        Default is False.
 
     Attributes
     ----------
@@ -82,6 +86,7 @@ class GAM:
         maxiter: int = 100,
         tol_update: float = 1e-6,
         tol_optim: float = 1e-10,
+        use_scipy: bool = False,
     ) -> None:
         self.basis = basis
         self.observation_model = observation_model
@@ -89,6 +94,7 @@ class GAM:
         self.maxiter = maxiter
         self.tol_update = tol_update
         self.tol_optim = tol_optim
+        self.use_scipy = use_scipy
         self.n_simpson_sample = int(1e4)
 
         self._positive_mon_func_for_lambda = jnp.exp
@@ -252,6 +258,7 @@ class GAM:
             max_iter=self.maxiter,
             tol_update=self.tol_update,  # convergence tolerance for coefficient updates
             tol_optim=self.tol_optim,  # tolerance for inner GCV optimization
+            use_scipy=self.use_scipy,
         )
 
         self.coef_, self.intercept_ = opt_coef
