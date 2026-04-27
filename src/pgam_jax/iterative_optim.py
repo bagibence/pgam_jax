@@ -12,12 +12,24 @@ import jax.tree_util as jtu
 from jaxopt import LBFGS, LBFGSB
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
+from functools import wraps
 
 FLOAT_EPS = jnp.finfo(float).eps
 
 
 def tree_concat(tree1, tree2, axis):
     return jtu.tree_map(lambda x, y: jnp.concatenate([x, y], axis=axis), tree1, tree2)
+
+
+def _elementwise_derivative(f):
+    """Efficient derivative if f(x) is an elementwise function."""
+
+    @wraps(f)
+    def df(x):
+        _, grad = jax.jvp(f, (x,), (jnp.ones_like(x),))
+        return grad
+
+    return df
 
 
 def model_constructors_for_weights_and_pseudo_data(
@@ -42,12 +54,13 @@ def model_constructors_for_weights_and_pseudo_data(
         The IRLS weights and pseudo-data computing function.
     """
 
+    variance_der = _elementwise_derivative(variance_func)
+    link_func_der = _elementwise_derivative(link_func)
+    link_func_der2 = _elementwise_derivative(link_func_der)
+
     @jax.jit
     def compute_alpha(y, rate):
         dy = y - rate
-        variance_der = jax.vmap(jax.grad(variance_func))
-        link_func_der = jax.vmap(jax.grad(link_func))
-        link_func_der2 = jax.vmap(jax.grad(jax.grad(link_func)))
         corr = variance_der(rate) / variance_func(rate) + link_func_der2(
             rate
         ) / link_func_der(rate)
@@ -57,12 +70,10 @@ def model_constructors_for_weights_and_pseudo_data(
     def compute_z(y, rate, alpha):
         rate = jnp.asarray(rate)
         lin_pred = link_func(rate)
-        link_func_der = jax.vmap(jax.grad(link_func))
         return lin_pred + link_func_der(rate) * (y - rate) / alpha
 
     @jax.jit
     def weight_compute(rate, alpha):
-        link_func_der = jax.vmap(jax.grad(link_func))
         dmu_deta = jnp.clip(1.0 / link_func_der(rate), FLOAT_EPS, jnp.inf)
         w = alpha * dmu_deta**2 / variance_func(rate)
         return w
