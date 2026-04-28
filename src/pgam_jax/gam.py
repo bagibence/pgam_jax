@@ -88,6 +88,7 @@ class GAM:
         tol_optim: float = 1e-10,
         use_scipy: bool = False,
     ) -> None:
+        # TODO: Make basis immutable
         self.basis = basis
         self.observation_model = observation_model
         self.variance_function = _make_variance_function(self.observation_model)
