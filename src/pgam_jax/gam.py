@@ -4,6 +4,7 @@ from typing import Callable
 
 import jax.numpy as jnp
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
+from nemos.basis._basis_mixin import ConvBasisMixin
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 
@@ -39,6 +40,21 @@ def _make_variance_function(
         return lambda mu: mu
     else:
         raise NotImplementedError("Currently only Poisson observations are supported.")
+
+
+def _make_identifiability_dropper(basis_component, square: bool):
+    """Per-leaf identifiability function matching ``compute_features_identifiable``.
+
+    Convolutional bases keep all columns (their columns are not linearly dependent),
+    other bases drop the last column.
+    ``square=True`` returns a function that drops both the last row and column for
+    use on penalty matrices.
+    """
+    if isinstance(basis_component, ConvBasisMixin):
+        return lambda x: x
+    if square:
+        return lambda x: x[..., :-1, :-1]
+    return lambda x: x[..., :-1]
 
 
 class GAM:
@@ -99,10 +115,18 @@ class GAM:
         self.n_simpson_sample = int(1e4)
 
         self._positive_mon_func_for_lambda = jnp.exp
+        # Identifiability is applied per basis component to match how the design matrix is built:
+        # BSplineConv leaves keep all columns, other leaves drop the last column.
+        self._apply_identifiability_column = tuple(
+            _make_identifiability_dropper(b, square=False) for b in self.basis
+        )
+        self._apply_identifiability_square = tuple(
+            _make_identifiability_dropper(b, square=True) for b in self.basis
+        )
         self._inner_func = gcv_compute_factory(
             self._positive_mon_func_for_lambda,
-            lambda x: x[..., :-1],
-            lambda x: x[..., :-1, :-1],
+            self._apply_identifiability_column,
+            self._apply_identifiability_square,
             1.5,
         )
 
@@ -147,7 +171,7 @@ class GAM:
             *args,
             shift_by=0,
             positive_mon_func=self._positive_mon_func_for_lambda,
-            apply_identifiability=lambda x: x[..., :-1],
+            apply_identifiability=self._apply_identifiability_column,
         )
 
     def _get_penalty_tree(self) -> list[jnp.ndarray]:

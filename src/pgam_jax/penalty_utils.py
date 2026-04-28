@@ -126,11 +126,11 @@ def tree_compute_sqrt_penalty(
     positive_mon_func :
         Monotonic function to ensure positive weights, default is `jnp.exp`.
     apply_identifiability:
-        A function that matches the identifiability constrain at the level of the penalty matrix.
-        If for example, we dropped a b-spline element, i.e. dropped a column of the design matrix,
-        we should drop the corresponding column of the penalty. Default assumes that we are dropping
-        the last column of the design matrix.
-
+        Either a single function or a tuple of such functions with one entry per leaf of ``tree_penalty``
+        (used when different leaves need different identifiability constraints, e.g. a mix of convolutional and
+        evaluation bases). If for example, dropped a column of the design matrix, we should drop the
+        corresponding column of the penalty.
+        The default assumes that we are dropping the last column.
 
     Returns
     -------
@@ -144,9 +144,16 @@ def tree_compute_sqrt_penalty(
         tree_penalty,
         reg_strength,
     )
-    sqrt_tree = jax.tree_util.tree_map(
-        lambda x: apply_identifiability(symmetric_sqrt(x)), scaled_pen
-    )
+    if isinstance(apply_identifiability, (list, tuple)):
+        sqrt_tree = jax.tree_util.tree_map(
+            lambda fn, x: fn(symmetric_sqrt(x)),
+            list(apply_identifiability),
+            scaled_pen,
+        )
+    else:
+        sqrt_tree = jax.tree_util.tree_map(
+            lambda x: apply_identifiability(symmetric_sqrt(x)), scaled_pen
+        )
     tree_start_row, tree_start_col = compute_start_block(sqrt_tree, shift_by=shift_by)
     tot_shape = (
         pytree_map_and_reduce(lambda x: x.shape[0], sum, sqrt_tree),
@@ -175,9 +182,11 @@ def compute_penalty_blocks(
         that the design matrix must include the intercept, which is not penalized. No penalization
         corresponds to a 1x1 block of 0s.
     apply_identifiability:
-        Function that applies identifiability constraint. Note that here we are not working with
-        square roots, i.e. both rows and columns must be dropped when applied an identifiability
-        constraint.
+        Either a single function that applies the identifiability constraint, or a
+        tuple of such functions with one entry per leaf of ``tree_penalty``
+        (used when different leaves need different identifiability constraints).
+        Note that here we are not working with square roots, i.e. both rows and
+        columns must be dropped when applying an identifiability constraint.
 
     Returns
     -------
@@ -190,7 +199,14 @@ def compute_penalty_blocks(
         a compressed representation for sparse matrices.
 
     """
-    scaled_penalties = jax.tree_util.tree_map(apply_identifiability, tree_penalty)
+    if isinstance(apply_identifiability, (list, tuple)):
+        scaled_penalties = jax.tree_util.tree_map(
+            lambda fn, pen: fn(pen),
+            list(apply_identifiability),
+            tree_penalty,
+        )
+    else:
+        scaled_penalties = jax.tree_util.tree_map(apply_identifiability, tree_penalty)
     tree_start_row, tree_start_col = compute_start_block(
         scaled_penalties, shift_by=shift_by
     )

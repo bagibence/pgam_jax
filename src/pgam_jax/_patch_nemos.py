@@ -53,5 +53,6 @@ def _multiplicative_derivative(self, *xi: ArrayLike):
 
 # apply_identifiability is not required where this is used
 nmo.basis.BSplineEval.derivative = _bspline_derivative
+nmo.basis.BSplineConv.derivative = _bspline_derivative
 nmo.basis.AdditiveBasis.derivative = _additive_derivative
 nmo.basis.MultiplicativeBasis.derivative = _multiplicative_derivative
