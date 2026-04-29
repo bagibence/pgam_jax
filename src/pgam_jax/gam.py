@@ -340,6 +340,8 @@ class GAM:
             Predicted mean response (after applying the inverse link function),
             shape ``(n_samples,)``.
         """
+        # TODO: get_design_matrix centers using the input data's mean, which might be wrong
+        # the training data's mean should be cached and subtracted instead?
         w, b = params
         return self.observation_model.default_inverse_link_function(
             self.get_design_matrix(xi) @ w + b
