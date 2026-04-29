@@ -56,6 +56,7 @@ dev = [
     "statsmodels",                  # Used to compare model pseudo-r2 in testing
     "matplotlib>=3.7",              # Used by comparison examples
     "PGAM",                         # Used only for comparisons against the original implementation
+    "docker",                       # Other way of running the original implementation
     "tox-uv",                       # Run tox with uv for faster installs
 ]
 notebooks = [
