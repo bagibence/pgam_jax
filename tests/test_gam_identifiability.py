@@ -1,7 +1,7 @@
 """Tests for per-leaf identifiability handling in GAM.
 
 The design matrix is built per leaf (``compute_features_identifiable``):
-``BSplineConv`` leaves keep all columns, other leaves drop the last column.
+``BSplineConv`` leaves follow the ``GAM`` constructor flag, other leaves drop the last column.
 The penalty path must drop columns in the same per-leaf pattern, otherwise
 the WLS step inside the PQL outer loop fails with a contracting-dim mismatch.
 """
@@ -26,19 +26,25 @@ def small_inputs():
     return x1, x2, events, y
 
 
-def _expected_n_cols(basis):
+def _expected_n_cols(basis, drop_conv_basis_col):
     """Number of columns the design matrix should have, per the per-leaf rule."""
     n = 0
     for b in basis:
         if isinstance(b, nmo.basis._basis_mixin.ConvBasisMixin):
-            n += b.n_basis_funcs
+            n += b.n_basis_funcs - int(drop_conv_basis_col)
         else:
             n += b.n_basis_funcs - 1
     return n
 
 
 @pytest.mark.parametrize(
+    "drop_conv_basis_col",
+    [True, False],
+    ids=["drop-conv", "keep-conv"],
+)
+@pytest.mark.parametrize(
     "make_basis",
+    # build a fresh basis for each case
     [
         lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4),
         lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
@@ -52,9 +58,15 @@ def _expected_n_cols(basis):
     ],
     ids=["eval", "eval+eval", "conv", "eval+eval+conv", "conv+eval"],
 )
-def test_design_matrix_and_fit_shapes_match(make_basis, small_inputs):
-    """For each supported basis composition, the design matrix width and the
-    fitted coefficient vector must agree, and the outer PQL loop must run."""
+def test_design_matrix_and_fit_shapes_match(
+    make_basis,
+    small_inputs,
+    drop_conv_basis_col,
+):
+    """
+    For each supported basis composition, the design matrix width and the
+    fitted coefficient vector must agree, and the outer PQL loop must run.
+    """
     x1, x2, events, y = small_inputs
     basis = make_basis()
 
@@ -68,11 +80,20 @@ def test_design_matrix_and_fit_shapes_match(make_basis, small_inputs):
             eval_count += 1
     inputs = tuple(inputs)
 
-    expected_cols = _expected_n_cols(basis)
-    X = compute_features_identifiable(basis, *inputs)
+    expected_cols = _expected_n_cols(basis, drop_conv_basis_col)
+    X = compute_features_identifiable(
+        basis,
+        *inputs,
+        drop_conv_basis_col=drop_conv_basis_col,
+    )
     assert X.shape == (len(y), expected_cols)
 
-    gam = GAM(basis, use_scipy=True, maxiter=3)
+    gam = GAM(
+        basis,
+        use_scipy=True,
+        maxiter=3,
+        drop_conv_basis_col=drop_conv_basis_col,
+    )
     gam.fit(inputs, y)
 
     assert gam.coef_.shape == (expected_cols,)
@@ -80,14 +101,27 @@ def test_design_matrix_and_fit_shapes_match(make_basis, small_inputs):
     assert pred.shape == (len(y),)
 
 
-def test_per_leaf_identifiability_is_a_tuple_of_callables():
-    """The per-leaf identifiability containers must be tuples (hashable, so
+@pytest.mark.parametrize(
+    ("drop_conv_basis_col", "expected_conv_cols"),
+    [(True, 9), (False, 10)],
+    ids=["drop-conv", "keep-conv"],
+)
+def test_per_leaf_identifiability_is_a_tuple_of_callables(
+    drop_conv_basis_col,
+    expected_conv_cols,
+):
+    """
+    The per-leaf identifiability containers must be tuples (hashable, so
     they can be used as ``static_argnames`` of jit), with one entry per basis
-    component. Conv components must yield identity functions."""
+    component. Conv components follow the constructor flag.
+    """
     spatial = nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
     temporal = nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
     basis = spatial + temporal
-    gam = GAM(basis)
+    gam = GAM(
+        basis,
+        drop_conv_basis_col=drop_conv_basis_col,
+    )
 
     assert isinstance(gam._apply_identifiability_column, tuple)
     assert isinstance(gam._apply_identifiability_square, tuple)
@@ -103,15 +137,21 @@ def test_per_leaf_identifiability_is_a_tuple_of_callables():
     # eval leaf drops the last column / row+col
     assert gam._apply_identifiability_column[0](arr).shape == (4, 9)
     assert gam._apply_identifiability_square[0](sq).shape == (4, 9, 9)
-    # conv leaf is identity
-    assert gam._apply_identifiability_column[1](arr).shape == (4, 10)
-    assert gam._apply_identifiability_square[1](sq).shape == (4, 10, 10)
+    # conv leaf follows the constructor flag
+    assert gam._apply_identifiability_column[1](arr).shape == (4, expected_conv_cols)
+    assert gam._apply_identifiability_square[1](sq).shape == (
+        4,
+        expected_conv_cols,
+        expected_conv_cols,
+    )
 
 
 def test_tree_compute_sqrt_penalty_accepts_per_leaf_callables():
-    """``tree_compute_sqrt_penalty`` must accept a list/tuple of per-leaf
+    """
+    ``tree_compute_sqrt_penalty`` must accept a list/tuple of per-leaf
     identifiability functions and apply each to its corresponding leaf,
-    instead of the same function to every leaf."""
+    instead of the same function to every leaf.
+    """
     import jax.numpy as jnp
 
     from pgam_jax.penalty_utils import tree_compute_sqrt_penalty
@@ -131,8 +171,10 @@ def test_tree_compute_sqrt_penalty_accepts_per_leaf_callables():
 
 
 def test_compute_penalty_blocks_accepts_per_leaf_callables():
-    """``compute_penalty_blocks`` must likewise accept a tuple of per-leaf
-    identifiability functions."""
+    """
+    ``compute_penalty_blocks`` must likewise accept a tuple of per-leaf
+    identifiability functions.
+    """
     import jax.numpy as jnp
 
     from pgam_jax.penalty_utils import compute_penalty_blocks

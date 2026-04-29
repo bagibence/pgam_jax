@@ -4,11 +4,13 @@ from typing import Callable
 
 import jax.numpy as jnp
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
-from nemos.basis._basis_mixin import ConvBasisMixin
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 
-from ._identifiable_features import compute_features_identifiable
+from ._identifiable_features import (
+    _should_drop_basis_col,
+    compute_features_identifiable,
+)
 from .gcv_compute import gcv_compute_factory
 from .iterative_optim import pql_outer_iteration
 from .penalty_utils import compute_energy_penalty_tensor, tree_compute_sqrt_penalty
@@ -42,15 +44,18 @@ def _make_variance_function(
         raise NotImplementedError("Currently only Poisson observations are supported.")
 
 
-def _make_identifiability_dropper(basis_component, square: bool):
-    """Per-leaf identifiability function matching ``compute_features_identifiable``.
-
-    Convolutional bases keep all columns (their columns are not linearly dependent),
-    other bases drop the last column.
-    ``square=True`` returns a function that drops both the last row and column for
-    use on penalty matrices.
+def _make_identifiability_dropper(
+    basis_component,
+    square: bool,
+    drop_conv_basis_col: bool,
+):
     """
-    if isinstance(basis_component, ConvBasisMixin):
+    Per-leaf identifiability function matching ``compute_features_identifiable``.
+
+    Convolutional bases follow ``drop_conv_basis_col``, other bases drop the last column.
+    ``square=True`` returns a function that drops both the last row and column for use on penalty matrices.
+    """
+    if not _should_drop_basis_col(basis_component, drop_conv_basis_col):
         return lambda x: x
     if square:
         return lambda x: x[..., :-1, :-1]
@@ -82,6 +87,12 @@ class GAM:
         If True, use scipy's L-BFGS-B for both the inner GCV minimization
         and the initial GLM fit instead of jaxopt's. Often faster on CPU.
         Default is False.
+    drop_conv_basis_col :
+        If True, convolutional basis leaves drop their last column for
+        identifiability. If False, convolutional basis leaves keep all columns.
+        Default is False.
+        Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
+        but the option is added for matching the original implementation if required.
 
     Attributes
     ----------
@@ -103,6 +114,7 @@ class GAM:
         tol_update: float = 1e-6,
         tol_optim: float = 1e-10,
         use_scipy: bool = False,
+        drop_conv_basis_col: bool = False,
     ) -> None:
         # TODO: Make basis immutable
         self.basis = basis
@@ -112,16 +124,27 @@ class GAM:
         self.tol_update = tol_update
         self.tol_optim = tol_optim
         self.use_scipy = use_scipy
+        self.drop_conv_basis_col = drop_conv_basis_col
         self.n_simpson_sample = int(1e4)
 
         self._positive_mon_func_for_lambda = jnp.exp
         # Identifiability is applied per basis component to match how the design matrix is built:
-        # BSplineConv leaves keep all columns, other leaves drop the last column.
+        # BSplineConv leaves follow ``drop_conv_basis_col``; other leaves drop the last column.
         self._apply_identifiability_column = tuple(
-            _make_identifiability_dropper(b, square=False) for b in self.basis
+            _make_identifiability_dropper(
+                b,
+                square=False,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+            )
+            for b in self.basis
         )
         self._apply_identifiability_square = tuple(
-            _make_identifiability_dropper(b, square=True) for b in self.basis
+            _make_identifiability_dropper(
+                b,
+                square=True,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+            )
+            for b in self.basis
         )
         self._inner_func = gcv_compute_factory(
             self._positive_mon_func_for_lambda,
@@ -199,7 +222,11 @@ class GAM:
             Design matrix with NaNs zeroed out and columns mean-centered,
             shape ``(n_samples, n_features)``.
         """
-        X = compute_features_identifiable(self.basis, *inputs)
+        X = compute_features_identifiable(
+            self.basis,
+            *inputs,
+            drop_conv_basis_col=self.drop_conv_basis_col,
+        )
         X = jnp.array(X)
 
         # TODO: Drop rows with NaNs instead?
