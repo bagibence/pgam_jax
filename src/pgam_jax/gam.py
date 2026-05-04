@@ -9,6 +9,7 @@ from numpy.typing import ArrayLike
 
 from ._identifiable_features import (
     _should_drop_basis_col,
+    _compute_features_identifiable,
     compute_features_identifiable,
 )
 from .gcv_compute import gcv_compute_factory
@@ -207,35 +208,60 @@ class GAM:
             self.basis, self.n_simpson_sample, penalize_null_space=True
         )
 
-    def get_design_matrix(self, inputs: tuple[ArrayLike, ...]) -> jnp.ndarray:
-        """
-        Build the centered, identifiability-constrained design matrix with NaNs zeroed out.
-
-        Parameters
-        ----------
-        inputs :
-            Input arrays, one per input dimension of the basis.
-
-        Returns
-        -------
-        :
-            Design matrix with NaNs zeroed out and columns mean-centered,
-            shape ``(n_samples, n_features)``.
-        """
-        X = compute_features_identifiable(
-            self.basis,
-            *inputs,
-            drop_conv_basis_col=self.drop_conv_basis_col,
-        )
+    def _compute_uncentered_design_matrix(
+        self,
+        inputs: tuple[ArrayLike, ...],
+        setup_basis: bool,
+    ) -> jnp.ndarray:
+        """Build the identifiability-constrained design matrix before centering."""
+        if setup_basis:
+            X = compute_features_identifiable(
+                self.basis,
+                *inputs,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+            )
+        else:
+            X = _compute_features_identifiable(
+                self.basis,
+                *inputs,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+            )
         X = jnp.array(X)
 
         # TODO: Drop rows with NaNs instead?
         # original PGAM zeros out nans, but nemos drops rows with NaNs
-        X = jnp.where(jnp.isnan(X), 0.0, X)
-        # center columns
-        X = X - X.mean(axis=0)
+        return jnp.where(jnp.isnan(X), 0.0, X)
 
-        return X
+    def _fit_design_matrix(self, inputs: tuple[ArrayLike, ...]) -> jnp.ndarray:
+        """
+        Build the training design matrix and cache its column means.
+
+        This is the only design-matrix path that calls ``basis.setup_basis``.
+        Prediction must reuse this fitted basis state and centering.
+        """
+        X = self._compute_uncentered_design_matrix(inputs, setup_basis=True)
+        self.feature_mean_ = X.mean(axis=0)
+        return X - self.feature_mean_
+
+    def _transform_design_matrix(self, inputs: tuple[ArrayLike, ...]) -> jnp.ndarray:
+        """
+        Build a prediction/evaluation design matrix using fitted centering.
+
+        This intentionally does not call ``basis.setup_basis``: predict should
+        transform new inputs with the basis state learned during fit.
+        """
+        if not hasattr(self, "feature_mean_"):
+            raise AttributeError(
+                "GAM instance is not fitted yet. Call fit before predict."
+            )
+        X = self._compute_uncentered_design_matrix(inputs, setup_basis=False)
+        if X.shape[1] != self.feature_mean_.shape[0]:
+            raise ValueError(
+                "Prediction design matrix has "
+                f"{X.shape[1]} columns, but the fitted model expects "
+                f"{self.feature_mean_.shape[0]} columns."
+            )
+        return X - self.feature_mean_
 
     def _init_regularizer_strength(
         self, penalty_tree: list[jnp.ndarray]
@@ -285,7 +311,7 @@ class GAM:
         if not isinstance(xi, tuple):
             raise TypeError("Inputs xi have to be wrapped in a tuple.")
 
-        X = self.get_design_matrix(xi)
+        X = self._fit_design_matrix(xi)
         penalty_tree = self._get_penalty_tree()
         y = jnp.asarray(y)
 
@@ -340,11 +366,9 @@ class GAM:
             Predicted mean response (after applying the inverse link function),
             shape ``(n_samples,)``.
         """
-        # TODO: get_design_matrix centers using the input data's mean, which might be wrong
-        # the training data's mean should be cached and subtracted instead?
         w, b = params
         return self.observation_model.default_inverse_link_function(
-            self.get_design_matrix(xi) @ w + b
+            self._transform_design_matrix(xi) @ w + b
         )
 
     def predict(self, xi: tuple[ArrayLike, ...]) -> jnp.ndarray:

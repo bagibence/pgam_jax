@@ -146,6 +146,34 @@ def test_per_leaf_identifiability_is_a_tuple_of_callables(
     )
 
 
+def test_predict_reuses_fitted_basis_and_training_centering():
+    """Prediction must transform with fitted basis state and training column means."""
+    rng = np.random.default_rng(1)
+    x = rng.uniform(-1.0, 1.0, size=200)
+    y = rng.poisson(0.1, size=x.shape[0])
+    basis = nmo.basis.BSplineEval(n_basis_funcs=8, order=4, bounds=(-1.0, 1.0))
+    gam = GAM(basis, use_scipy=True, maxiter=2)
+
+    gam.fit((x,), y)
+    feature_mean = np.asarray(gam.feature_mean_)
+    assert feature_mean.shape == (gam.coef_.shape[0],)
+
+    def fail_setup_basis(*_args, **_kwargs):
+        raise AssertionError("predict should not call setup_basis")
+
+    gam.basis.setup_basis = fail_setup_basis
+    x_pred = np.linspace(-0.5, 0.5, 50)
+    pred = gam.predict((x_pred,))
+
+    assert pred.shape == x_pred.shape
+    transformed = gam._transform_design_matrix((x_pred,))
+    uncentered = gam._compute_uncentered_design_matrix((x_pred,), setup_basis=False)
+    np.testing.assert_allclose(
+        np.asarray(transformed),
+        np.asarray(uncentered) - feature_mean,
+    )
+
+
 def test_tree_compute_sqrt_penalty_accepts_per_leaf_callables():
     """
     ``tree_compute_sqrt_penalty`` must accept a list/tuple of per-leaf
