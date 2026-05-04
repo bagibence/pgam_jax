@@ -173,14 +173,10 @@ def pql_outer_iteration(
     X = jtu.tree_map(lambda x: jnp.asarray(x.astype(float)), X)
     init_pars = jtu.tree_map(lambda x: jnp.asarray(x.astype(float)), init_pars)
 
-    lower_bnd = jtu.tree_map(lambda x: jnp.full(x.shape, -12.0), reg_strength)
-    upper_bnd = jtu.tree_map(lambda x: jnp.full(x.shape, 25.0), reg_strength)
-    bounds = (lower_bnd, upper_bnd)
-
     def _solve_inner(reg_strength, X_inner, Q, R, y_inner):
         return solver.run(
             reg_strength,
-            bounds=bounds,
+            bounds=None,
             penalty_tree=penalty_tree,
             X=X_inner,
             Q=Q,
@@ -268,6 +264,10 @@ def pql_outer_iteration(
             Q,
             R,
             yw[:n_obs],
+        )
+        new_reg_strength = jtu.tree_map(
+            lambda x: jnp.clip(x, -25, 30),
+            new_reg_strength,
         )
 
         # convergence check
