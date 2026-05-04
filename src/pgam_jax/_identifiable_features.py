@@ -38,7 +38,7 @@ def _compute_features_identifiable(
     drop_conv_basis_col: bool,
 ):
     if isinstance(basis, nmo.basis.AdditiveBasis):
-        n1 = basis.basis1._n_input_dimensionality
+        n1 = basis.basis1._n_inputs
         x1 = _compute_features_identifiable(
             basis.basis1,
             *inputs[:n1],
