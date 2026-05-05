@@ -24,12 +24,15 @@ def _bspline_derivative(self, sample_pts: np.ndarray, der: int = 2):
     -------
         The derivative at the sample points.
     """
-    sample_pts, _ = min_max_rescale_samples(sample_pts, getattr(self, "bounds", None))
-    # add knots if not passed
+    bounds = getattr(self, "bounds", None)
+    sample_pts, _ = min_max_rescale_samples(sample_pts, bounds)
     knot_locs = self._generate_knots(is_cyclic=False)
     shape = sample_pts.shape
     X = bspline(sample_pts, knot_locs, order=self.order, der=der, outer_ok=False)
     X = X.reshape(*shape, X.shape[1])
+    if bounds is not None:
+        scale = 1 / (bounds[1] - bounds[0])
+        X = X * scale**der
     return X
 
 
