@@ -8,8 +8,8 @@ from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 
 from ._identifiable_features import (
-    _should_drop_basis_col,
     _compute_features_identifiable,
+    _should_drop_basis_col,
     compute_features_identifiable,
 )
 from .gcv_compute import gcv_compute_factory
@@ -43,6 +43,30 @@ def _make_variance_function(
         return lambda mu: mu
     else:
         raise NotImplementedError("Currently only Poisson observations are supported.")
+
+
+def _validate_eval_bases_have_bounds(basis) -> None:
+    """Raise if any eval-mode leaf has ``bounds=None``.
+
+    Without explicit bounds, ``nemos`` rescales each input array to ``[0, 1]``
+    using its own min and max, so the same physical x maps to different
+    normalized coordinates across fit/predict batches.
+    """
+    missing = [
+        leaf
+        for leaf in basis._iterate_over_components()
+        if isinstance(leaf, BSplineEval) and leaf.bounds is None
+    ]
+    if not missing:
+        return
+    types = ", ".join(type(b).__name__ for b in missing)
+    raise ValueError(
+        f"{len(missing)} eval-mode basis component(s) ({types}) were "
+        "constructed without explicit bounds. pgam_jax requires every "
+        "eval-mode basis to be built with bounds=(lo, hi) covering the "
+        "covariate range, so that fit and predict use the same normalized "
+        "coordinates."
+    )
 
 
 def _make_identifiability_dropper(
@@ -118,6 +142,7 @@ class GAM:
         drop_conv_basis_col: bool = False,
     ) -> None:
         # TODO: Make basis immutable
+        _validate_eval_bases_have_bounds(basis)
         self.basis = basis
         self.observation_model = observation_model
         self.variance_function = _make_variance_function(self.observation_model)

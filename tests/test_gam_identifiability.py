@@ -46,15 +46,15 @@ def _expected_n_cols(basis, drop_conv_basis_col):
     "make_basis",
     # build a fresh basis for each case
     [
-        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4),
-        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4),
+        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
+        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
         lambda: nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51),
-        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
+        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
         + nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51),
         lambda: nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4),
+        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
     ],
     ids=["eval", "eval+eval", "conv", "eval+eval+conv", "conv+eval"],
 )
@@ -115,7 +115,7 @@ def test_per_leaf_identifiability_is_a_tuple_of_callables(
     they can be used as ``static_argnames`` of jit), with one entry per basis
     component. Conv components follow the constructor flag.
     """
-    spatial = nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
+    spatial = nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
     temporal = nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
     basis = spatial + temporal
     gam = GAM(
