@@ -31,7 +31,7 @@ import warnings
 import numpy as np
 import jax.numpy as jnp
 from jax import lax
-
+from collections import defaultdict
 
 def _warn_if_not_f64(fname: str) -> None:
     if jnp.finfo(float).dtype != np.dtype("float64"):
@@ -245,6 +245,33 @@ def log_det_slam(rho, S_i_out):
     return log_det
 
 
+def log_det_and_grad_slam(rho, S_i_out):
+    """
+    Compute ``log|S_lam|_+`` and its gradient w.r.t. ``ρ`` in one pass.
+
+    Shares a single ``eigh`` call between the two.
+
+    Parameters
+    ----------
+    rho :
+        Shape (M,) log-smoothing parameters.
+    S_i_out :
+        Shape (M, q, q) output of :func:`transform_slam`.
+
+    Returns
+    -------
+    log_det :
+        Scalar.
+    grad :
+        Shape (M,) gradient vector.
+    """
+    _warn_if_not_f64("log_det_and_grad_slam")
+    lams = jnp.exp(rho)
+    log_det, Sinv = _eigh_log_det_and_inv(S_i_out, lams)
+    grad = lams * jnp.einsum("kl,jlk->j", Sinv, S_i_out)
+    return log_det, grad
+
+
 def grad_log_det_slam(rho, S_i_out):
     """
     Gradient of ``log|S_lam|`` w.r.t. ``ρ``.
@@ -300,3 +327,76 @@ def hes_log_det_slam(rho, S_i_out):
     grad_diag = lams * jnp.einsum("kl,jlk->j", Sinv, S_i_out)
 
     return -jnp.outer(lams, lams) * H_off + jnp.diag(grad_diag)
+
+
+def compute_groups(tensors):
+    groups = defaultdict(list)
+    for i, m in enumerate(tensors):
+        groups[m.shape].append(i)
+    return dict(groups)  # {shape: [original_indices]}
+
+
+def _compute_log_det_slam_factory(penalty_tree):
+    """
+    Generate a compute slam function from a list of penalty trees.
+
+    This function pre-process all penalties in a tree dropping the null-space, then
+    groups the penalties in tensors by shape and applies the transformation facilitating the
+    determinant compute.
+
+    """
+    # Not compilable step: drop null spaces of blocks.
+    import jax
+    frobs = jax.tree_util.tree_map(
+        lambda x: jnp.sqrt(jnp.sum(x ** 2, axis=(1, 2), keepdims=True)), penalty_tree
+    )
+    eig_res = jax.tree_util.tree_map(
+        lambda x, f: jnp.linalg.eigh(jnp.sum(x / f, axis=0)), penalty_tree, frobs
+    )
+    eigenvalues, eigenvectors = zip(*eig_res)
+    _eps = jnp.finfo(float).eps
+    keep = jax.tree_util.tree_map(
+        lambda e: e > e[-1] * (_eps**0.8), eigenvalues
+    )
+    flat, struct = jax.tree_util.tree_flatten(penalty_tree)
+    tl = jax.tree_util.tree_leaves
+
+    # formally full rank S_i
+    full_rank_blocks = jax.tree_util.tree_unflatten(
+        struct, [u[:, k].T @ x @ u[:, k] for (x, u, k) in  zip(flat, tl(eigenvectors), tl(keep))]
+    )
+
+    # compute the groups statically
+    groups = compute_groups(full_rank_blocks)
+
+    _vmap_transform = jax.vmap(transform_slam, in_axes=(0, 0))
+    _vmap_val_grad = jax.vmap(log_det_and_grad_slam, in_axes=(0, 0))
+    _vmap_hess = jax.vmap(hes_log_det_slam, in_axes=(0, 0))
+
+    def _transform_and_stack(rho_tree, indices):
+        stacked_s = jnp.stack([full_rank_blocks[i] for i in indices])
+        stacked_rho = jnp.stack([rho_tree[i] for i in indices])
+        s_out = _vmap_transform(stacked_s, stacked_rho)
+        return stacked_rho, s_out
+
+    def compute_log_det_and_grad(rho_tree):
+        grads = [None] * len(full_rank_blocks)
+        log_dets = [None] * len(full_rank_blocks)
+        for shape, indices in groups.items():
+            stacked_rho, s_out = _transform_and_stack(rho_tree, indices)
+            log_det, grad = _vmap_val_grad(stacked_rho, s_out)
+            for local_i, global_i in enumerate(indices):
+                log_dets[global_i] = log_det[local_i]
+                grads[global_i] = grad[local_i]
+        return log_dets, grads
+
+    def compute_hess(rho_tree):
+        hesses = [None] * len(full_rank_blocks)
+        for shape, indices in groups.items():
+            stacked_rho, s_out = _transform_and_stack(rho_tree, indices)
+            hess = _vmap_hess(stacked_rho, s_out)
+            for local_i, global_i in enumerate(indices):
+                hesses[global_i] = hess[local_i]
+        return hesses
+
+    return compute_log_det_and_grad, compute_hess
