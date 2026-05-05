@@ -14,7 +14,7 @@ Key Notes for nemos Integration
 -------------------------------
 1. **Custom VJP Required**: The GCV gradient computation uses a custom VJP
    (vector-Jacobian product). Standard jax.grad() produces incorrect gradients
-   that fail numerical gradient checks. See gcv_compute.py for the implementation.
+   that fail numerical gradient checks. See _pql_gcv.py for the implementation.
 
 2. **Basis Derivatives**: The penalty computation requires basis function
    derivatives. These should be exposed via nemos basis methods (e.g., a
@@ -42,7 +42,7 @@ from PGAM.GAM_library import *
 
 # New JAX-based PGAM implementation
 import pgam_jax.penalty_utils as pen_utils
-from pgam_jax.gcv_compute import gcv_compute_factory
+from pgam_jax._pql_gcv import gcv_compute_factory
 from pgam_jax.iterative_optim import pql_outer_iteration
 
 # =============================================================================
@@ -187,7 +187,7 @@ compute_sqrt_penalty = lambda *args: pen_utils.tree_compute_sqrt_penalty(
 #
 # IMPORTANT: This uses a custom VJP (vector-Jacobian product) implementation.
 # Standard jax.grad() would fail here - it produces gradients that don't match
-# numerical gradient checks. The custom VJP in gcv_compute.py is carefully
+# numerical gradient checks. The custom VJP in _pql_gcv.py is carefully
 # designed to compute correct gradients through the SVD-based GCV computation.
 #
 # Arguments:

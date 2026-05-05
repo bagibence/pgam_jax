@@ -11,7 +11,7 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
-from .gcv_compute import gcv_compute_factory
+from ._pql_gcv import gcv_compute_factory
 from .iterative_optim import pql_outer_iteration
 from .penalty_utils import compute_energy_penalty_tensor, tree_compute_sqrt_penalty
 
