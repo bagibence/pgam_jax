@@ -162,7 +162,6 @@ def pql_outer_iteration(
     """
     # TODO: variance_func can be determined based on the observation model?
     inv_link_func = obs_model.default_inverse_link_function
-    # Using LBFGSB because bounds (defined a few lines down) is passed to solver.run
     if use_scipy:
         solver = ScipyBoundedMinimize(method="l-bfgs-b", fun=inner_func, tol=tol_optim)
     else:
@@ -192,9 +191,6 @@ def pql_outer_iteration(
     if not use_scipy:
         _solve_inner = jax.jit(_solve_inner)
 
-    def loss_unp(p):
-        return obs_model._negative_log_likelihood(y, inv_link_func(X.dot(p[0]) + p[1]))
-
     link_func = INVERSE_FUNCS[inv_link_func]
     get_pseudo_data_and_weight = model_constructors_for_weights_and_pseudo_data(
         variance_func, link_func, fisher_scoring=fisher_scoring
@@ -205,6 +201,14 @@ def pql_outer_iteration(
 
     n_obs = jtu.tree_leaves(X)[0].shape[0]
     leaf_shapes = [leaf.shape[1] for leaf in jtu.tree_leaves(X)]  # dims of each leaf
+
+    def loss_unp(p):
+        return obs_model._negative_log_likelihood(
+            y,
+            inv_link_func(X.dot(p[0]) + p[1]),
+            aggregate_sample_scores=jnp.sum,
+        )
+
     # TODO: Does this loop need to be converted to a jax loop? Was it even worth it?
     i = 0
     for i in range(max_iter):
@@ -215,9 +219,7 @@ def pql_outer_iteration(
         )
 
         # add a zero corresponding to not-penalizing the intercept
-        sqrt_penalty = jnp.hstack(
-            (jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty)
-        ) / jnp.sqrt(n_obs)
+        sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
 
         # TODO: Lift this out into an initialization step?
         # initialize coefficients by fitting a GLM
