@@ -362,41 +362,45 @@ def _compute_log_det_slam_factory(penalty_tree):
     tl = jax.tree_util.tree_leaves
 
     # formally full rank S_i
-    full_rank_blocks = jax.tree_util.tree_unflatten(
-        struct, [u[:, k].T @ x @ u[:, k] for (x, u, k) in  zip(flat, tl(eigenvectors), tl(keep))]
-    )
+    full_rank_flat = [u[:, k].T @ x @ u[:, k] for (x, u, k) in zip(flat, tl(eigenvectors), tl(keep))]
 
     # compute the groups statically
-    groups = compute_groups(full_rank_blocks)
+    groups = compute_groups(full_rank_flat)
 
     _vmap_transform = jax.vmap(transform_slam, in_axes=(0, 0))
     _vmap_val_grad = jax.vmap(log_det_and_grad_slam, in_axes=(0, 0))
     _vmap_hess = jax.vmap(hes_log_det_slam, in_axes=(0, 0))
 
-    def _transform_and_stack(rho_tree, indices):
-        stacked_s = jnp.stack([full_rank_blocks[i] for i in indices])
-        stacked_rho = jnp.stack([rho_tree[i] for i in indices])
+    def _transform_and_stack(rho_flat, indices):
+        stacked_s = jnp.stack([full_rank_flat[i] for i in indices])
+        stacked_rho = jnp.stack([rho_flat[i] for i in indices])
         s_out = _vmap_transform(stacked_s, stacked_rho)
         return stacked_rho, s_out
 
     def compute_log_det_and_grad(rho_tree):
-        grads = [None] * len(full_rank_blocks)
-        log_dets = [None] * len(full_rank_blocks)
+        rho_flat = tl(rho_tree)
+        n = len(full_rank_flat)
+        grads = [None] * n
+        log_dets = [None] * n
         for shape, indices in groups.items():
-            stacked_rho, s_out = _transform_and_stack(rho_tree, indices)
+            stacked_rho, s_out = _transform_and_stack(rho_flat, indices)
             log_det, grad = _vmap_val_grad(stacked_rho, s_out)
             for local_i, global_i in enumerate(indices):
                 log_dets[global_i] = log_det[local_i]
                 grads[global_i] = grad[local_i]
-        return log_dets, grads
+        return (
+            jax.tree_util.tree_unflatten(struct, log_dets),
+            jax.tree_util.tree_unflatten(struct, grads),
+        )
 
     def compute_hess(rho_tree):
-        hesses = [None] * len(full_rank_blocks)
+        rho_flat = tl(rho_tree)
+        hesses = [None] * len(full_rank_flat)
         for shape, indices in groups.items():
-            stacked_rho, s_out = _transform_and_stack(rho_tree, indices)
+            stacked_rho, s_out = _transform_and_stack(rho_flat, indices)
             hess = _vmap_hess(stacked_rho, s_out)
             for local_i, global_i in enumerate(indices):
                 hesses[global_i] = hess[local_i]
-        return hesses
+        return jax.tree_util.tree_unflatten(struct, hesses)
 
     return compute_log_det_and_grad, compute_hess
