@@ -116,6 +116,51 @@ def weighted_least_squares(X, y, weights):
     return beta, Xw, yw
 
 
+def _tree_max_leaf_l2_delta(tree1, tree2):
+    """Return the max L2 distance across matching leaves of two pytrees."""
+    return pytree_map_and_reduce(lambda x, y: jnp.linalg.norm(x - y), max, tree1, tree2)
+
+
+VALID_CONVERGENCE_CRITERIA = ("coef", "coef_and_reg", "gcv")
+
+
+def check_pql_convergence(
+    criterion: str,
+    iteration: int,
+    tol: float,
+    old_params,
+    new_params,
+    old_reg_strength,
+    new_reg_strength,
+    old_score=None,
+    new_score=None,
+):
+    """Check outer-loop convergence using the requested monitor."""
+    if criterion == "coef":
+        if iteration < 1:
+            return False
+        return _tree_max_leaf_l2_delta(old_params, new_params) < tol
+
+    if criterion == "coef_and_reg":
+        if iteration < 1:
+            return False
+        delta_coef = _tree_max_leaf_l2_delta(old_params, new_params)
+        delta_reg_strength = _tree_max_leaf_l2_delta(old_reg_strength, new_reg_strength)
+        return jnp.maximum(delta_coef, delta_reg_strength) < tol
+
+    if criterion == "gcv":
+        if iteration <= 3:
+            return False
+        if old_score is None or new_score is None:
+            return False
+        return jnp.abs(new_score - old_score) < tol * new_score
+
+    raise ValueError(
+        f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
+        f"got {criterion!r}."
+    )
+
+
 def pql_outer_iteration(
     reg_strength,
     init_pars,
@@ -131,6 +176,7 @@ def pql_outer_iteration(
     tol_optim=10**-10,
     tol_update=10**-6,
     use_scipy=False,
+    convergence_criterion: str = "coef_and_reg",
 ):
     """
 
@@ -156,11 +202,21 @@ def pql_outer_iteration(
         If True, use scipy's L-BFGS-B for both the inner GCV minimization
         and the initial GLM fit instead of jaxopt's. Often faster on CPU.
         Defaults to False.
-
+    convergence_criterion:
+        Outer-loop convergence monitor. ``"coef"`` checks only coefficient
+        movement, ``"coef_and_reg"`` checks both coefficient and log-regularizer
+        movement, and ``"gcv"`` checks relative change in the optimized inner
+        GCV score, matching the legacy PGAM convention most closely.
+        Defaults to ``"coef_and_reg"``.
     Returns
     -------
 
     """
+    if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
+        raise ValueError(
+            f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
+            f"got {convergence_criterion!r}."
+        )
     # TODO: variance_func can be determined based on the observation model?
     inv_link_func = obs_model.default_inverse_link_function
     if use_scipy:
@@ -212,6 +268,7 @@ def pql_outer_iteration(
 
     # TODO: Does this loop need to be converted to a jax loop? Was it even worth it?
     i = 0
+    old_inner_score = None
     for i in range(max_iter):
         # identifiability constraint drops column by default
         sqrt_penalty = compute_sqrt_penalty(
@@ -272,20 +329,27 @@ def pql_outer_iteration(
             lambda x: jnp.clip(x, -25, 30),
             new_reg_strength,
         )
+        new_inner_score = state.fun_val if use_scipy else state.value
 
         # convergence check
-        delta_reg = pytree_map_and_reduce(
-            lambda x, y: jnp.linalg.norm(x - y),
-            max,
-            (coef, intercept),
-            (new_coef, new_intercept),
+        converged = check_pql_convergence(
+            convergence_criterion,
+            iteration=i,
+            tol=tol_update,
+            old_params=(coef, intercept),
+            new_params=(new_coef, new_intercept),
+            old_reg_strength=reg_strength,
+            new_reg_strength=new_reg_strength,
+            old_score=old_inner_score,
+            new_score=new_inner_score,
         )
 
         # update
         reg_strength = new_reg_strength
         coef, intercept = new_coef, new_intercept
+        old_inner_score = new_inner_score
 
-        if delta_reg < tol_update:
+        if converged:
             break
 
     return (coef, intercept), reg_strength, i

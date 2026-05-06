@@ -13,7 +13,7 @@ from ._identifiable_features import (
     compute_features_identifiable,
 )
 from .gcv_compute import gcv_compute_factory
-from .iterative_optim import pql_outer_iteration
+from .iterative_optim import VALID_CONVERGENCE_CRITERIA, pql_outer_iteration
 from .penalty_utils import compute_energy_penalty_tensor, tree_compute_sqrt_penalty
 
 
@@ -105,13 +105,19 @@ class GAM:
     maxiter :
         Maximum number of outer PQL iterations. Default is 100.
     tol_update :
-        Convergence tolerance on coefficient updates. Default is 1e-6.
+        Outer-loop convergence tolerance. Its meaning depends on
+        ``convergence_criterion``. Default is 1e-6.
     tol_optim :
         Tolerance for the inner GCV optimization (L-BFGS-B). Default is 1e-10.
     use_scipy :
         If True, use scipy's L-BFGS-B for both the inner GCV minimization
         and the initial GLM fit instead of jaxopt's. Often faster on CPU.
         Default is False.
+    convergence_criterion :
+        Outer-loop convergence monitor passed to ``pql_outer_iteration``.
+        ``"gcv"`` most closely matches legacy PGAM, while ``"coef"`` and
+        ``"coef_and_reg"`` are fixed-point style monitors.
+        Default is ``"coef_and_reg"``.
     drop_conv_basis_col :
         If True, convolutional basis leaves drop their last column for
         identifiability. If False, convolutional basis leaves keep all columns.
@@ -139,9 +145,15 @@ class GAM:
         tol_update: float = 1e-6,
         tol_optim: float = 1e-10,
         use_scipy: bool = False,
+        convergence_criterion: str = "coef_and_reg",
         drop_conv_basis_col: bool = False,
     ) -> None:
         # TODO: Make basis immutable
+        if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
+            raise ValueError(
+                f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
+                f"got {convergence_criterion!r}."
+            )
         _validate_eval_bases_have_bounds(basis)
         self.basis = basis
         self.observation_model = observation_model
@@ -150,6 +162,7 @@ class GAM:
         self.tol_update = tol_update
         self.tol_optim = tol_optim
         self.use_scipy = use_scipy
+        self.convergence_criterion = convergence_criterion
         self.drop_conv_basis_col = drop_conv_basis_col
         self.n_simpson_sample = int(1e4)
 
@@ -362,6 +375,7 @@ class GAM:
             tol_update=self.tol_update,  # convergence tolerance for coefficient updates
             tol_optim=self.tol_optim,  # tolerance for inner GCV optimization
             use_scipy=self.use_scipy,
+            convergence_criterion=self.convergence_criterion,
         )
 
         self.coef_, self.intercept_ = opt_coef
