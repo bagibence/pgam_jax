@@ -12,24 +12,13 @@ import jax.tree_util as jtu
 from jaxopt import LBFGS, LBFGSB, ScipyBoundedMinimize, ScipyMinimize
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
-from functools import wraps
-
 FLOAT_EPS = jnp.finfo(float).eps
+
+from ._utils import elementwise_derivative as _elementwise_derivative
 
 
 def tree_concat(tree1, tree2, axis):
     return jtu.tree_map(lambda x, y: jnp.concatenate([x, y], axis=axis), tree1, tree2)
-
-
-def _elementwise_derivative(f):
-    """Efficient derivative if f(x) is an elementwise function."""
-
-    @wraps(f)
-    def df(x):
-        _, grad = jax.jvp(f, (x,), (jnp.ones_like(x),))
-        return grad
-
-    return df
 
 
 def model_constructors_for_weights_and_pseudo_data(
