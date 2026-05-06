@@ -29,82 +29,86 @@ def _params(value):
 
 
 def test_check_pql_convergence_coef_triggers_only_on_delta_coef():
-    # delta_params = 1e-4 (below tol). delta_reg_strength is huge but ignored.
+    # 1e-4 relative change in params (below tol). reg_strength changes by a huge
+    # absolute amount but is ignored.
     assert check_pql_convergence(
         "coef",
         iteration=1,
         tol=1e-3,
-        old_params=_params(0.0),
-        new_params=_params(1e-4),
-        old_reg_strength=_params(0.0),
+        old_params=_params(1.0),
+        new_params=_params(1.0 + 1e-4),
+        old_reg_strength=_params(1.0),
         new_reg_strength=_params(1e6),
     )
-    # delta_params = 1e-2 (above tol). Should not converge regardless of reg.
+    # 1e-2 relative change in params (above tol). Should not converge.
     assert not check_pql_convergence(
         "coef",
         iteration=1,
         tol=1e-3,
-        old_params=_params(0.0),
-        new_params=_params(1e-2),
-        old_reg_strength=_params(0.0),
-        new_reg_strength=_params(0.0),
+        old_params=_params(1.0),
+        new_params=_params(1.0 + 1e-2),
+        old_reg_strength=_params(1.0),
+        new_reg_strength=_params(1.0),
     )
 
 
 def test_check_pql_convergence_coef_warmup_skips_iteration_zero():
+    # Identical params would otherwise trigger convergence (delta = 0); warmup
+    # blocks at iteration 0.
     assert not check_pql_convergence(
         "coef",
         iteration=0,
         tol=1e-3,
-        old_params=_params(0.0),
-        new_params=_params(0.0),
-        old_reg_strength=_params(0.0),
-        new_reg_strength=_params(0.0),
+        old_params=_params(1.0),
+        new_params=_params(1.0),
+        old_reg_strength=_params(1.0),
+        new_reg_strength=_params(1.0),
     )
 
 
 def test_check_pql_convergence_coef_and_reg_requires_both_below_tol():
-    # Both deltas below tol: converged.
+    # Both relative deltas below tol: converged.
     assert check_pql_convergence(
         "coef_and_reg",
         iteration=1,
         tol=1e-3,
-        old_params=_params(0.0),
-        new_params=_params(1e-4),
-        old_reg_strength=_params(0.0),
-        new_reg_strength=_params(1e-4),
+        old_params=_params(1.0),
+        new_params=_params(1.0 + 1e-4),
+        old_reg_strength=_params(1.0),
+        new_reg_strength=_params(1.0 + 1e-4),
     )
-    # delta_params too big.
+    # delta_params relative ratio too big.
     assert not check_pql_convergence(
         "coef_and_reg",
         iteration=1,
         tol=1e-3,
-        old_params=_params(0.0),
-        new_params=_params(1e-2),
-        old_reg_strength=_params(0.0),
-        new_reg_strength=_params(1e-4),
+        old_params=_params(1.0),
+        new_params=_params(1.0 + 1e-2),
+        old_reg_strength=_params(1.0),
+        new_reg_strength=_params(1.0 + 1e-4),
     )
-    # delta_reg_strength too big.
+    # delta_reg_strength relative ratio too big.
     assert not check_pql_convergence(
         "coef_and_reg",
         iteration=1,
         tol=1e-3,
-        old_params=_params(0.0),
-        new_params=_params(1e-4),
-        old_reg_strength=_params(0.0),
-        new_reg_strength=_params(1e-2),
+        old_params=_params(1.0),
+        new_params=_params(1.0 + 1e-4),
+        old_reg_strength=_params(1.0),
+        new_reg_strength=_params(1.0 + 1e-2),
     )
 
 
 def test_check_pql_convergence_coef_and_reg_warmup_skips_iteration_zero():
+    # Identical params would otherwise trigger convergence; warmup blocks iter 0.
     assert not check_pql_convergence(
         "coef_and_reg",
         iteration=0,
         tol=1e-3,
-        old_params=_params(0.0),
-        new_params=_params(0.0),
-        old_reg_strength=_params(0.0),
-        new_reg_strength=_params(0.0),
+        old_params=_params(1.0),
+        new_params=_params(1.0),
+        old_reg_strength=_params(1.0),
+        new_reg_strength=_params(1.0),
     )
 
 
@@ -132,6 +136,23 @@ def test_check_pql_convergence_gcv_matches_legacy_min_iteration():
         new_reg_strength=_params(1e6),
         old_score=1.0,
         new_score=1.0,
+    )
+
+
+def test_check_pql_convergence_gcv_handles_negative_scores():
+    # The relative threshold uses |new_score|, so negative scores converge the
+    # same as positive ones. Without the abs the threshold flips sign and
+    # convergence never triggers.
+    assert check_pql_convergence(
+        "gcv",
+        iteration=4,
+        tol=1e-5,
+        old_params=_params(0.0),
+        new_params=_params(0.0),
+        old_reg_strength=_params(0.0),
+        new_reg_strength=_params(0.0),
+        old_score=-1.0,
+        new_score=-1.0,
     )
 
 

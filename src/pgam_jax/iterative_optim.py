@@ -121,6 +121,11 @@ def _tree_max_leaf_l2_delta(tree1, tree2):
     return pytree_map_and_reduce(lambda x, y: jnp.linalg.norm(x - y), max, tree1, tree2)
 
 
+def _tree_max_leaf_l2(tree):
+    """Return the max L2 norm across leaves of a pytree."""
+    return pytree_map_and_reduce(jnp.linalg.norm, max, tree)
+
+
 VALID_CONVERGENCE_CRITERIA = ("coef", "coef_and_reg", "gcv")
 
 
@@ -139,21 +144,22 @@ def check_pql_convergence(
     if criterion == "coef":
         if iteration < 1:
             return False
-        return _tree_max_leaf_l2_delta(old_params, new_params) < tol
+        delta = _tree_max_leaf_l2_delta(old_params, new_params)
+        return delta < tol * _tree_max_leaf_l2(new_params)
 
     if criterion == "coef_and_reg":
         if iteration < 1:
             return False
-        delta_coef = _tree_max_leaf_l2_delta(old_params, new_params)
-        delta_reg_strength = _tree_max_leaf_l2_delta(old_reg_strength, new_reg_strength)
-        return jnp.maximum(delta_coef, delta_reg_strength) < tol
+        coef_ok = _tree_max_leaf_l2_delta(old_params, new_params) < tol * _tree_max_leaf_l2(new_params)
+        reg_ok = _tree_max_leaf_l2_delta(old_reg_strength, new_reg_strength) < tol * _tree_max_leaf_l2(new_reg_strength)
+        return coef_ok & reg_ok
 
     if criterion == "gcv":
         if iteration <= 3:
             return False
         if old_score is None or new_score is None:
             return False
-        return jnp.abs(new_score - old_score) < tol * new_score
+        return jnp.abs(new_score - old_score) < tol * jnp.abs(new_score)
 
     raise ValueError(
         f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
