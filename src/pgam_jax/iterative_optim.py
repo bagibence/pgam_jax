@@ -174,9 +174,9 @@ def pql_outer_iteration(
     fisher_scoring=False,
     max_iter=100,
     tol_optim=10**-10,
-    tol_update=10**-6,
+    tol_update=10**-5,
     use_scipy=False,
-    convergence_criterion: str = "coef_and_reg",
+    convergence_criterion: str = "gcv",
 ):
     """
 
@@ -206,8 +206,8 @@ def pql_outer_iteration(
         Outer-loop convergence monitor. ``"coef"`` checks only coefficient
         movement, ``"coef_and_reg"`` checks both coefficient and log-regularizer
         movement, and ``"gcv"`` checks relative change in the optimized inner
-        GCV score, matching the legacy PGAM convention most closely.
-        Defaults to ``"coef_and_reg"``.
+        GCV score, matching the legacy PGAM convention.
+        Defaults to ``"gcv"``.
     Returns
     -------
 

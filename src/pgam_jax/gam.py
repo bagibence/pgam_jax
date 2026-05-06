@@ -106,7 +106,7 @@ class GAM:
         Maximum number of outer PQL iterations. Default is 100.
     tol_update :
         Outer-loop convergence tolerance. Its meaning depends on
-        ``convergence_criterion``. Default is 1e-6.
+        ``convergence_criterion``. Default is 1e-5.
     tol_optim :
         Tolerance for the inner GCV optimization (L-BFGS-B). Default is 1e-10.
     use_scipy :
@@ -115,9 +115,9 @@ class GAM:
         Default is False.
     convergence_criterion :
         Outer-loop convergence monitor passed to ``pql_outer_iteration``.
-        ``"gcv"`` most closely matches legacy PGAM, while ``"coef"`` and
-        ``"coef_and_reg"`` are fixed-point style monitors.
-        Default is ``"coef_and_reg"``.
+        ``"gcv"`` matches legacy PGAM, while ``"coef"`` and ``"coef_and_reg"``
+        are fixed-point style monitors.
+        Default is ``"gcv"``.
     drop_conv_basis_col :
         If True, convolutional basis leaves drop their last column for
         identifiability. If False, convolutional basis leaves keep all columns.
@@ -142,10 +142,10 @@ class GAM:
         basis: BSplineEval | AdditiveBasis | MultiplicativeBasis,
         observation_model: Observations = PoissonObservations(),
         maxiter: int = 100,
-        tol_update: float = 1e-6,
+        tol_update: float = 1e-5,
         tol_optim: float = 1e-10,
         use_scipy: bool = False,
-        convergence_criterion: str = "coef_and_reg",
+        convergence_criterion: str = "gcv",
         drop_conv_basis_col: bool = False,
     ) -> None:
         # TODO: Make basis immutable
