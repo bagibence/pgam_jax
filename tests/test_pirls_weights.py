@@ -28,7 +28,6 @@ Validation strategy
 
 import numpy as np
 import pytest
-from scipy.optimize import check_grad
 from scipy.optimize._numdiff import approx_derivative
 import statsmodels.genmod.families as smf
 import statsmodels.genmod.families.links as sm_links
