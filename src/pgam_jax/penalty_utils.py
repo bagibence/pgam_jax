@@ -67,7 +67,7 @@ def _symmetric_sqrt_jax(symmetric_matrix):
     eig = jnp.abs(eig)
 
     # crop the eig that are small relative to max
-    eig = eig * (eig > jnp.finfo(jnp.float32).eps * eig.max())
+    eig = eig * (eig > jnp.finfo(float).eps * eig.max())
     # compute the sqrt
     Bx = U * jnp.sqrt(eig)
     return Bx[:, ::-1].T
