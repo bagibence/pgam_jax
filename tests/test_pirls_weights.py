@@ -2,28 +2,36 @@
 
 float64 is enabled globally in conftest.py.
 
+The implementation computes w = −d²ℓ/dη² (observed Hessian), which is the
+correct weight for Laplace-REML.  For canonical links g''V + g'V' = 0, so
+this reduces to the Fisher information 1/(g'²V).  For non-canonical links a
+y-dependent correction survives:
+
+    w = 1/(g'²V) + (y−μ)(g''V + g'V')/(g'³V²)
+
 Validation strategy
 -------------------
-1. Statsmodels analytical ground truth for w, dw/dmu, small_h.
-   All four nemos families use canonical links so alpha = 1 and the
-   formula for w collapses to 1 / (g'(μ)² V(μ)).  statsmodels provides
-   g', g'', V, V' — sufficient for w, dw/dmu, and small_h.
+1a. Statsmodels analytical ground truth for w — ALL link functions.
+    The formula above is computable from statsmodels link/variance objects.
 
-2. scipy.optimize.check_grad for gradient relationships:
-     sum w(η)       gradient wrt η  →  small_h   (h = dw/dη)
-     sum h(η)       gradient wrt η  →  deriv_small_h · (dμ/dη)
+1b. Statsmodels analytical ground truth for dw/dμ and small_h —
+    CANONICAL links only.  The correction's μ-derivatives require g''' and
+    V'' which statsmodels does not expose; for non-canonical links the
+    check_grad tests in section 2 provide gradient-level validation instead.
 
-   d²w/dμ² follows from the quotient-rule combination of already-validated
-   terms (dw/deta, d2w/deta2, dmu/deta, d2mu/deta2), so no separate check
-   is needed beyond the check_grad tests above.
+2.  scipy.optimize.check_grad for gradient relationships — ALL link functions:
+      Σ w(η)     gradient wrt η  →  small_h       (h = dw/dη)
+      Σ h(η)     gradient wrt η  →  deriv_small_h · (dμ/dη)
 
-3. Closed-form ground truths for Poisson and Gaussian.
+3.  Closed-form ground truths for Poisson (log link) and Gaussian (identity).
 """
 
 import numpy as np
 import pytest
 from scipy.optimize import check_grad
+from scipy.optimize._numdiff import approx_derivative
 import statsmodels.genmod.families as smf
+import statsmodels.genmod.families.links as sm_links
 
 import jax.numpy as jnp
 import nemos.observation_models as nmo_obs
@@ -39,132 +47,164 @@ from pgam_jax._pirls_weights import (
 )
 from pgam_jax._utils import elementwise_derivative
 
-# ---------------------------------------------------------------------------
-# Family registry
-# ---------------------------------------------------------------------------
-
 N = 30
-rng = np.random.default_rng(0)
 
-# (nemos obs_model, nemos inv_link, statsmodels family, eta_np, y_np)
-FAMILIES = {
-    "poisson": (
-        nmo_obs.PoissonObservations(),
-        exp,
-        smf.Poisson(),
-        rng.uniform(0.2, 2.0, N),
-        rng.poisson(1.5, N).astype(float),
-    ),
-    "gaussian": (
-        nmo_obs.GaussianObservations(),
-        identity,
-        smf.Gaussian(),
-        rng.uniform(-2.0, 2.0, N),
-        rng.normal(0.0, 1.0, N),
-    ),
-    "gamma": (
-        nmo_obs.GammaObservations(),
-        one_over_x,
-        smf.Gamma(),            # default: reciprocal link — matches nemos
-        rng.uniform(0.5, 3.0, N),
-        rng.gamma(2.0, 0.5, N),
-    ),
-    "bernoulli": (
-        nmo_obs.BernoulliObservations(),
-        logistic,
-        smf.Binomial(),         # default: logit link — matches nemos
-        rng.uniform(-2.0, 2.0, N),
-        rng.integers(0, 2, N).astype(float),
-    ),
-}
+# ---------------------------------------------------------------------------
+# Family/link registry
+#
+# Each raw tuple: (obs_model, inv_link, sm_fam, eta_lo, eta_hi, y_fn, seed)
+# eta_lo/hi: uniform draw range for η, chosen so μ = inv_link(η) stays in
+#            the family's natural domain.
+# y_fn(rng): draws a response vector of length N.
+# seed: fixed per case → tests are deterministic and xdist-safe.
+# ---------------------------------------------------------------------------
+
+def _poisson_y(rng):    return rng.poisson(1.5, N).astype(float)
+def _gaussian_y(rng):   return rng.normal(0.0, 1.0, N)
+def _gamma_y(rng):      return rng.gamma(2.0, 0.5, N)
+def _bernoulli_y(rng):  return rng.integers(0, 2, N).astype(float)
 
 
-def _jax_inputs(name):
-    obs, inv_link, sm_fam, eta_np, y_np = FAMILIES[name]
-    return obs, inv_link, sm_fam, jnp.array(eta_np), jnp.array(y_np)
+# Raw tuples — defined here so analytical tests can reference them directly
+# without duplicating the case definitions.
+_POISSON_LOG      = (nmo_obs.PoissonObservations(),   exp,        smf.Poisson(),                          0.2, 2.0, _poisson_y,   0)
+_POISSON_ID       = (nmo_obs.PoissonObservations(),   identity,   smf.Poisson(link=sm_links.Identity()),   0.8, 2.0, _poisson_y,   1)  # eta_lo=0.8 keeps check_grad gradients tractable
+_GAUSSIAN_ID      = (nmo_obs.GaussianObservations(),  identity,   smf.Gaussian(),                        -2.0, 2.0, _gaussian_y,  2)
+_GAUSSIAN_LOG     = (nmo_obs.GaussianObservations(),  exp,        smf.Gaussian(link=sm_links.Log()),      -2.0, 2.0, _gaussian_y,  3)
+_GAMMA_RECIPROCAL = (nmo_obs.GammaObservations(),     one_over_x, smf.Gamma(),                            0.5, 3.0, _gamma_y,     4)
+_GAMMA_LOG        = (nmo_obs.GammaObservations(),     exp,        smf.Gamma(link=sm_links.Log()),          0.5, 3.0, _gamma_y,     5)
+_BERNOULLI_LOGIT  = (nmo_obs.BernoulliObservations(), logistic,   smf.Binomial(),                        -2.0, 2.0, _bernoulli_y, 6)
+
+# Canonical links satisfy g''V + g'V' = 0, so the observed Hessian equals
+# the Fisher information.  Non-canonical links add a y-dependent correction.
+CANONICAL_CASES = [
+    pytest.param(_POISSON_LOG,      id="poisson-log"),
+    pytest.param(_GAUSSIAN_ID,      id="gaussian-identity"),
+    pytest.param(_GAMMA_RECIPROCAL, id="gamma-reciprocal"),
+    pytest.param(_BERNOULLI_LOGIT,  id="bernoulli-logit"),
+]
+
+ALL_CASES = CANONICAL_CASES + [
+    pytest.param(_POISSON_ID,    id="poisson-identity"),
+    pytest.param(_GAUSSIAN_LOG,  id="gaussian-log"),
+    pytest.param(_GAMMA_LOG,     id="gamma-log"),
+]
+
+
+def _unpack(case):
+    """Return (obs, inv_link, sm_fam, eta_jax, y_jax) with per-case rng."""
+    obs, inv_link, sm_fam, eta_lo, eta_hi, y_fn, seed = case
+    rng = np.random.default_rng(seed)
+    eta = jnp.array(rng.uniform(eta_lo, eta_hi, N))
+    y   = jnp.array(y_fn(rng))
+    return obs, inv_link, sm_fam, eta, y
 
 
 # ---------------------------------------------------------------------------
-# Statsmodels analytical references (canonical link ⇒ alpha = 1)
+# Statsmodels analytical references
 # ---------------------------------------------------------------------------
 
-def _sm_w(mu, sm_fam):
-    gp = sm_fam.link.deriv(mu)
-    return 1.0 / (gp ** 2 * sm_fam.variance(mu))
+def _sm_w(mu, y, sm_fam):
+    """w = −d²ℓ/dη² = Fisher information + non-canonical correction.
 
-
-def _sm_dw_dmu(mu, sm_fam):
+    For canonical links g''V + g'V' = 0 and the correction vanishes.
+    """
     gp  = sm_fam.link.deriv(mu)
     gpp = sm_fam.link.deriv2(mu)
     V   = sm_fam.variance(mu)
     Vp  = sm_fam.variance.deriv(mu)
-    return -(2 * gpp * V + Vp * gp) / (gp ** 3 * V ** 2)
+    fisher     = 1.0 / (gp**2 * V)
+    correction = (y - mu) * (gpp * V + gp * Vp) / (gp**3 * V**2)
+    return fisher + correction
+
+
+def _sm_dw_dmu(mu, sm_fam):
+    """d(Fisher)/dμ — valid only for canonical links where dw/dμ = d(Fisher)/dμ."""
+    gp  = sm_fam.link.deriv(mu)
+    gpp = sm_fam.link.deriv2(mu)
+    V   = sm_fam.variance(mu)
+    Vp  = sm_fam.variance.deriv(mu)
+    return -(2 * gpp * V + Vp * gp) / (gp**3 * V**2)
 
 
 def _sm_small_h(mu, sm_fam):
+    """dw/dη = (dw/dμ) / g′(μ) — valid only for canonical links."""
     return _sm_dw_dmu(mu, sm_fam) / sm_fam.link.deriv(mu)
 
 
 # ---------------------------------------------------------------------------
-# 1. Statsmodels analytical checks — w, dw/dmu, small_h
+# 1a. Analytical reference for w — ALL link functions
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("family", ["poisson", "gaussian", "gamma", "bernoulli"])
-def test_w_vs_statsmodels(family):
-    obs, inv_link, sm_fam, eta_vec, y_vec = _jax_inputs(family)
+@pytest.mark.parametrize("case", ALL_CASES)
+def test_w_vs_statsmodels(case):
+    obs, inv_link, sm_fam, eta_vec, y_vec = _unpack(case)
     mu = np.array(inv_link(eta_vec))
+    y  = np.array(y_vec)
     np.testing.assert_allclose(
-        pirls_weight(eta_vec, y_vec, obs, inv_link), _sm_w(mu, sm_fam), rtol=1e-10)
+        pirls_weight(eta_vec, y_vec, obs, inv_link), _sm_w(mu, y, sm_fam), rtol=1e-10)
 
 
-@pytest.mark.parametrize("family", ["poisson", "gaussian", "gamma", "bernoulli"])
-def test_dw_dmu_vs_statsmodels(family):
-    obs, inv_link, sm_fam, eta_vec, y_vec = _jax_inputs(family)
+# ---------------------------------------------------------------------------
+# 1b. Analytical references for dw/dμ and small_h — CANONICAL links only
+#     (the correction term's μ-derivative requires g''' and V'' which
+#      statsmodels does not expose; non-canonical links are covered by §2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("case", CANONICAL_CASES)
+def test_dw_dmu_vs_statsmodels(case):
+    obs, inv_link, sm_fam, eta_vec, y_vec = _unpack(case)
     mu = np.array(inv_link(eta_vec))
     np.testing.assert_allclose(
         dw_dmu(eta_vec, y_vec, obs, inv_link), _sm_dw_dmu(mu, sm_fam), rtol=1e-10)
 
 
-@pytest.mark.parametrize("family", ["poisson", "gaussian", "gamma", "bernoulli"])
-def test_small_h_vs_statsmodels(family):
-    obs, inv_link, sm_fam, eta_vec, y_vec = _jax_inputs(family)
+@pytest.mark.parametrize("case", CANONICAL_CASES)
+def test_small_h_vs_statsmodels(case):
+    obs, inv_link, sm_fam, eta_vec, y_vec = _unpack(case)
     mu = np.array(inv_link(eta_vec))
     np.testing.assert_allclose(
         small_h(eta_vec, y_vec, obs, inv_link), _sm_small_h(mu, sm_fam), rtol=1e-10)
 
 
 # ---------------------------------------------------------------------------
-# 2. check_grad: gradient relationships in η-space
+# 2. check_grad: gradient relationships in η-space — ALL link functions
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("family", ["poisson", "gaussian", "gamma", "bernoulli"])
-def test_small_h_is_dw_deta(family):
+@pytest.mark.parametrize("case", ALL_CASES)
+def test_small_h_is_dw_deta(case):
     """small_h = dw/dη: gradient of Σ w(η) wrt η."""
-    obs, inv_link, _sm, eta_vec, y_vec = _jax_inputs(family)
-    assert check_grad(
+    obs, inv_link, _sm, eta_vec, y_vec = _unpack(case)
+    grad_fd = approx_derivative(
         lambda eta: jnp.sum(pirls_weight(eta, y_vec, obs, inv_link)),
-        lambda eta: small_h(eta, y_vec, obs, inv_link),
-        np.array(eta_vec),
-    ) < 1e-4
+        eta_vec,
+        method='3-point',
+    )
+    np.testing.assert_allclose(grad_fd, small_h(eta_vec, y_vec, obs, inv_link), atol=1e-7)
 
 
-@pytest.mark.parametrize("family", ["poisson", "gaussian", "gamma", "bernoulli"])
-def test_deriv_small_h_is_d2w_deta2_over_dmu_deta(family):
+@pytest.mark.parametrize("case", ALL_CASES)
+def test_deriv_small_h_is_d2w_deta2_over_dmu_deta(case):
     """deriv_small_h · (dμ/dη) = d²w/dη²: gradient of Σ h(η) wrt η."""
-    obs, inv_link, _sm, eta_vec, y_vec = _jax_inputs(family)
-    assert check_grad(
+    obs, inv_link, _sm, eta_vec, y_vec = _unpack(case)
+    grad_fd = approx_derivative(
         lambda eta: jnp.sum(small_h(eta, y_vec, obs, inv_link)),
-        lambda eta: deriv_small_h(eta, y_vec, obs, inv_link) * elementwise_derivative(inv_link)(eta),
-        np.array(eta_vec),
-    ) < 1e-4
+        eta_vec,
+        method='3-point',
+    )
+    np.testing.assert_allclose(
+        grad_fd,
+        deriv_small_h(eta_vec, y_vec, obs, inv_link) * elementwise_derivative(inv_link)(eta_vec),
+        atol=1e-7,
+    )
 
 
 # ---------------------------------------------------------------------------
-# 3. Closed-form ground truths — Poisson and Gaussian
+# 3. Closed-form ground truths — Poisson (log link) and Gaussian (identity)
 # ---------------------------------------------------------------------------
 
-def test_poisson_analytical():
-    obs, inv_link, _sm, eta_vec, y_vec = _jax_inputs("poisson")
+def test_poisson_log_analytical():
+    obs, inv_link, _sm, eta_vec, y_vec = _unpack(_POISSON_LOG)
     mu = np.array(inv_link(eta_vec))
 
     np.testing.assert_allclose(pirls_weight(eta_vec, y_vec, obs, inv_link),  mu,          rtol=1e-10)
@@ -174,8 +214,8 @@ def test_poisson_analytical():
     np.testing.assert_allclose(deriv_small_h(eta_vec, y_vec, obs, inv_link), np.ones(N),  atol=1e-10)
 
 
-def test_gaussian_analytical():
-    obs, inv_link, _sm, eta_vec, y_vec = _jax_inputs("gaussian")
+def test_gaussian_identity_analytical():
+    obs, inv_link, _sm, eta_vec, y_vec = _unpack(_GAUSSIAN_ID)
 
     np.testing.assert_allclose(pirls_weight(eta_vec, y_vec, obs, inv_link),  np.ones(N),  rtol=1e-10)
     np.testing.assert_allclose(dw_dmu(eta_vec, y_vec, obs, inv_link),        np.zeros(N), atol=1e-10)
