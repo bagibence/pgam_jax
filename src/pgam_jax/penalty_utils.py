@@ -237,7 +237,11 @@ def compute_penalty_blocks(
     )
 
 
-def compute_energy_penalty(n_samples: int, basis_derivative: Callable):
+def compute_energy_penalty(
+    n_samples: int,
+    basis_derivative: Callable,
+    basis_bounds: tuple[float, float],
+):
     """
     Compute the energy penalty for a basis derivative.
 
@@ -253,7 +257,7 @@ def compute_energy_penalty(n_samples: int, basis_derivative: Callable):
     energy_pen:
         Energy penalty matrix of shape (K, K), where K is the number of basis functions.
     """
-    samples = jnp.linspace(0, 1, n_samples)
+    samples = jnp.linspace(*basis_bounds, n_samples)
     eval_bas = jnp.asarray(basis_derivative(samples))
     indices = jnp.triu_indices(eval_bas.shape[1])
     square_bas = eval_bas[:, indices[0]] * eval_bas[:, indices[1]]
@@ -484,7 +488,11 @@ def compute_energy_penalty_tensor_additive_component(
 
     """
     one_dim_pen = (
-        compute_energy_penalty(n_samples, b.derivative)
+        compute_energy_penalty(
+            n_samples,
+            b.derivative,
+            getattr(b, "bounds", None) or (0.0, 1.0),
+        )
         for b in basis_component._iterate_over_components()
     )
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)

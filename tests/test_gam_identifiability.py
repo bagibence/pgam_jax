@@ -46,15 +46,15 @@ def _expected_n_cols(basis, drop_conv_basis_col):
     "make_basis",
     # build a fresh basis for each case
     [
-        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4),
-        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4),
+        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
+        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
         lambda: nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51),
-        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
+        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
         + nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51),
         lambda: nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4),
+        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
     ],
     ids=["eval", "eval+eval", "conv", "eval+eval+conv", "conv+eval"],
 )
@@ -115,7 +115,7 @@ def test_per_leaf_identifiability_is_a_tuple_of_callables(
     they can be used as ``static_argnames`` of jit), with one entry per basis
     component. Conv components follow the constructor flag.
     """
-    spatial = nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
+    spatial = nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
     temporal = nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
     basis = spatial + temporal
     gam = GAM(
@@ -143,6 +143,34 @@ def test_per_leaf_identifiability_is_a_tuple_of_callables(
         4,
         expected_conv_cols,
         expected_conv_cols,
+    )
+
+
+def test_predict_reuses_fitted_basis_and_training_centering():
+    """Prediction must transform with fitted basis state and training column means."""
+    rng = np.random.default_rng(1)
+    x = rng.uniform(-1.0, 1.0, size=200)
+    y = rng.poisson(0.1, size=x.shape[0])
+    basis = nmo.basis.BSplineEval(n_basis_funcs=8, order=4, bounds=(-1.0, 1.0))
+    gam = GAM(basis, use_scipy=True, maxiter=2)
+
+    gam.fit((x,), y)
+    feature_mean = np.asarray(gam.feature_mean_)
+    assert feature_mean.shape == (gam.coef_.shape[0],)
+
+    def fail_setup_basis(*_args, **_kwargs):
+        raise AssertionError("predict should not call setup_basis")
+
+    gam.basis.setup_basis = fail_setup_basis
+    x_pred = np.linspace(-0.5, 0.5, 50)
+    pred = gam.predict((x_pred,))
+
+    assert pred.shape == x_pred.shape
+    transformed = gam._transform_design_matrix((x_pred,))
+    uncentered = gam._compute_uncentered_design_matrix((x_pred,), setup_basis=False)
+    np.testing.assert_allclose(
+        np.asarray(transformed),
+        np.asarray(uncentered) - feature_mean,
     )
 
 

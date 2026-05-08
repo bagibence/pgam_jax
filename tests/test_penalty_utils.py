@@ -100,7 +100,7 @@ def test_one_dim_bspline_der_2_energy_penalty(one_dim_bspline_penalty):
         outer_ok=False,
     )
     pen = penalty_utils.compute_energy_penalty(
-        one_dim_bspline_penalty["n_samples"], der_basis
+        one_dim_bspline_penalty["n_samples"], der_basis, (0, 1)
     )
     assert np.allclose(pen, one_dim_bspline_penalty["energy_penalty"])
 
@@ -116,7 +116,7 @@ def test_one_dim_bspline_der_2_null_space_penalty(one_dim_bspline_penalty):
         outer_ok=False,
     )
     pen = penalty_utils.compute_energy_penalty(
-        one_dim_bspline_penalty["n_samples"], der_basis
+        one_dim_bspline_penalty["n_samples"], der_basis, (0, 1)
     )
     null_pen = penalty_utils.compute_penalty_null_space(pen[None])
     assert np.allclose(null_pen, one_dim_bspline_penalty["null_space_penalty"])
@@ -185,7 +185,7 @@ def test_two_dim_bspline_der_2_energy_penalty(two_dim_bspline_penalty):
         outer_ok=False,
     )
     pen = penalty_utils.compute_energy_penalty(
-        two_dim_bspline_penalty["n_samples"], der_basis
+        two_dim_bspline_penalty["n_samples"], der_basis, (0, 1)
     )
     pen = penalty_utils.ndim_tensor_product_basis_penalty(pen, pen)
     assert np.allclose(pen[0], two_dim_bspline_penalty["energy_penalty_0"])
@@ -203,7 +203,7 @@ def test_two_dim_bspline_der_2_null_space_penalty(two_dim_bspline_penalty):
         outer_ok=False,
     )
     pen = penalty_utils.compute_energy_penalty(
-        two_dim_bspline_penalty["n_samples"], der_basis
+        two_dim_bspline_penalty["n_samples"], der_basis, (0, 1)
     )
     pen = penalty_utils.ndim_tensor_product_basis_penalty(pen, pen)
     null_pen = penalty_utils.compute_penalty_null_space(pen)

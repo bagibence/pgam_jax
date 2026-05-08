@@ -1,5 +1,17 @@
+from dataclasses import dataclass
+
 import nemos as nmo
 import numpy as np
+
+
+@dataclass(frozen=True)
+class BasisComponentInfo:
+    """Slices for one component after identifiability column dropping."""
+
+    index: int
+    basis: object
+    input_slice: slice
+    identifiable_feature_slice: slice
 
 
 def _should_drop_basis_col(
@@ -16,6 +28,38 @@ def _should_drop_basis_col(
     if isinstance(basis, nmo.basis._basis_mixin.ConvBasisMixin):
         return drop_conv_basis_col
     return True
+
+
+def _get_basis_component_infos(
+    basis,
+    *,
+    drop_conv_basis_col: bool,
+) -> list[BasisComponentInfo]:
+    """Return component slices matching the identifiable feature matrix columns."""
+    infos = []
+    input_start = 0
+    out_start = 0
+    for index, component in enumerate(basis):
+        try:
+            n_inputs = component._n_inputs
+        except AttributeError:
+            n_inputs = component._n_input_dimensionality
+
+        n_outputs = component.n_basis_funcs
+        if _should_drop_basis_col(component, drop_conv_basis_col):
+            n_outputs -= 1
+
+        infos.append(
+            BasisComponentInfo(
+                index=index,
+                basis=component,
+                input_slice=slice(input_start, input_start + n_inputs),
+                identifiable_feature_slice=slice(out_start, out_start + n_outputs),
+            )
+        )
+        input_start += n_inputs
+        out_start += n_outputs
+    return infos
 
 
 def compute_features_identifiable(
@@ -38,7 +82,10 @@ def _compute_features_identifiable(
     drop_conv_basis_col: bool,
 ):
     if isinstance(basis, nmo.basis.AdditiveBasis):
-        n1 = basis.basis1._n_inputs
+        try:
+            n1 = basis.basis1._n_inputs
+        except AttributeError:
+            n1 = basis.basis1._n_input_dimensionality
         x1 = _compute_features_identifiable(
             basis.basis1,
             *inputs[:n1],
