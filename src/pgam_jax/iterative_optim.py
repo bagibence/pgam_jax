@@ -235,10 +235,14 @@ def pql_outer_iteration(
     X = jtu.tree_map(lambda x: jnp.asarray(x.astype(float)), X)
     init_pars = jtu.tree_map(lambda x: jnp.asarray(x.astype(float)), init_pars)
 
+    lower_bnd = jtu.tree_map(lambda x: jnp.full(x.shape, -12.0), reg_strength)
+    upper_bnd = jtu.tree_map(lambda x: jnp.full(x.shape, 25.0), reg_strength)
+    bounds = (lower_bnd, upper_bnd)
+
     def _solve_inner(reg_strength, X_inner, Q, R, y_inner):
         return solver.run(
             reg_strength,
-            bounds=None,
+            bounds=bounds,
             penalty_tree=penalty_tree,
             X=X_inner,
             Q=Q,
