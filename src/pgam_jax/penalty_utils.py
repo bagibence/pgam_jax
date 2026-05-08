@@ -313,7 +313,7 @@ def compute_penalty_null_space_jax(penalty):
     :
         Null space projection matrix of shape (K, K).
     """
-    penalty = penalty.mean(axis=0)
+    penalty = (penalty / jnp.sum(penalty**2, axis=(1, 2), keepdims=True)).mean(axis=0)
     eig, U = jnp.linalg.eigh(penalty)
     zero_idx = jnp.abs(eig) < jnp.finfo(float).eps * jnp.max(eig)
     U = U[:, zero_idx]
