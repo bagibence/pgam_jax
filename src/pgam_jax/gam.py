@@ -4,6 +4,7 @@ from typing import Callable
 
 import jax.numpy as jnp
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
+from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 
@@ -13,7 +14,11 @@ from ._identifiable_features import (
     compute_features_identifiable,
 )
 from .gcv_compute import gcv_compute_factory
-from .iterative_optim import VALID_CONVERGENCE_CRITERIA, pql_outer_iteration
+from .iterative_optim import (
+    VALID_CONVERGENCE_CRITERIA,
+    model_constructors_for_weights_and_pseudo_data,
+    pql_outer_iteration,
+)
 from .penalty_utils import compute_energy_penalty_tensor, tree_compute_sqrt_penalty
 
 
@@ -135,6 +140,9 @@ class GAM:
         Log-space regularization strengths for each smooth term (available after ``fit``).
     n_iter_ :
         Number of outer PQL iterations performed (available after ``fit``).
+    cov_beta_ :
+        Posterior covariance of the full coefficient vector ``[intercept, coef_]``
+        treating smoothing parameters as fixed (available after ``fit``).
     """
 
     def __init__(
@@ -308,6 +316,73 @@ class GAM:
         # in the example there was: regularizer_strength = [jnp.log(jnp.array([1.0, 2.0]))] * 2
         return [jnp.zeros(pen.shape[0]) for pen in penalty_tree]
 
+    # TODO: Test against the original implementation
+    def _compute_cov_beta_from_fit_state(
+        self,
+        X: jnp.ndarray,
+        y: jnp.ndarray,
+        params: tuple[jnp.ndarray, jnp.ndarray],
+        regularizer_strength: list[jnp.ndarray],
+        penalty_tree: list[jnp.ndarray],
+        rtol: float = 1e-8,
+    ) -> jnp.ndarray:
+        """
+        Compute posterior covariance of ``[intercept, coef]`` after fitting.
+
+        This mirrors legacy PGAM's final refresh: recompute final IRLS weights
+        from the returned coefficients, form QR(sqrt(W) X), then invert
+        ``X.T W X + S_lambda`` via the SVD of ``[R; sqrt(S_lambda)]``.
+        """
+        # we are calculating the following:
+        #   cov_beta = inv(X^T W X + S_lambda)
+
+        # recompute final IRLS weights needed for X^T W X
+        coef, intercept = params
+        eta = X @ coef + intercept
+        mu = self.observation_model.default_inverse_link_function(eta)
+
+        inverse_link = self.observation_model.default_inverse_link_function
+        link_func = INVERSE_FUNCS[inverse_link]
+        get_pseudo_data_and_weight = model_constructors_for_weights_and_pseudo_data(
+            self.variance_function,
+            link_func,
+            fisher_scoring=False,
+        )
+        _, weights = get_pseudo_data_and_weight(y, mu)
+        weights = jnp.reshape(weights, (-1,))
+
+        if bool(jnp.any(weights < -1e-12)):
+            raise ValueError("Final IRLS weights contain negative values.")
+        weights = jnp.clip(weights, 0.0, jnp.inf)
+
+        # Xw^T Xw = X^T W X
+        X_full = jnp.column_stack((jnp.ones(X.shape[0]), X))
+        Xw = X_full * jnp.sqrt(weights)[:, None]
+        R = jnp.linalg.qr(Xw, mode="r")
+
+        # TODO: how about adding a flag to prepend the zero column?
+        # called B in original implementation
+        # B^T B = S_lambda
+        sqrt_penalty = self._compute_sqrt_penalty(
+            penalty_tree,
+            regularizer_strength,
+        )
+        sqrt_penalty = jnp.column_stack(
+            (jnp.zeros(sqrt_penalty.shape[0]), sqrt_penalty)
+        )
+
+        # A = [R ; B] => A^T A = R^T R + B^T B = X^T W X + S_lambda
+        # cov_beta is the inverse of the precision matrix A^T A
+        # pseudo-inverse is computed from the SVD of A for stability
+        _, singular_values, Vt = jnp.linalg.svd(
+            jnp.vstack((R, sqrt_penalty)),
+            full_matrices=False,
+        )
+        # tiny singular values would blow up 1 / s^2, so discard them
+        keep = singular_values >= rtol * singular_values.max()
+        singular_values_inv = jnp.where(keep, 1.0 / singular_values, 0.0)
+        return (Vt.T * singular_values_inv**2) @ Vt
+
     # TODO: Do we need to take X in fit? or is this fine?
     # TODO: Accept the initial regularizer_strength here or in the constructor?
     # In the constructor it's tricky because it's derived from the penalty_tree, which would have to be calculated there
@@ -381,6 +456,13 @@ class GAM:
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
         self.n_iter_ = n_iter
+        self.cov_beta_ = self._compute_cov_beta_from_fit_state(
+            X,
+            y,
+            opt_coef,
+            opt_pen,
+            penalty_tree,
+        )
 
         return self
 
