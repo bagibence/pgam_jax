@@ -172,6 +172,9 @@ class GAM:
                 f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
                 f"got {convergence_criterion!r}."
             )
+        if method not in ["gcv", "reml"]:
+            raise ValueError('method must be one of ["gcv", "reml"]')
+
         _validate_eval_bases_have_bounds(basis)
         self.basis = basis
         self.method = method
@@ -258,12 +261,15 @@ class GAM:
                 self._apply_identifiability_square,
                 1.5,
             )
-        return reml_compute_factory(
-            penalty_tree,
-            self._positive_mon_func_for_lambda,
-            self._apply_identifiability_column,
-            self._apply_identifiability_square,
-        )
+        if self.method == "reml":
+            return reml_compute_factory(
+                penalty_tree,
+                self._positive_mon_func_for_lambda,
+                self._apply_identifiability_column,
+                self._apply_identifiability_square,
+            )
+
+        raise ValueError('method must be one of ["gcv", "reml"]')
 
     def _get_penalty_tree(self) -> list[jnp.ndarray]:
         """
