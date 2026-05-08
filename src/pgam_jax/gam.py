@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Literal
 
 import jax.numpy as jnp
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
@@ -16,7 +16,9 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
-from .gcv_compute import gcv_compute_factory
+
+from ._pql_gcv import gcv_compute_factory
+from ._pql_reml import reml_compute_factory
 from .iterative_optim import (
     VALID_CONVERGENCE_CRITERIA,
     model_constructors_for_weights_and_pseudo_data,
@@ -132,6 +134,10 @@ class GAM:
         Default is False.
         Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
         but the option is added for matching the original implementation if required.
+    method :
+        Smoothing-parameter selection criterion.  ``"gcv"`` (default) uses
+        Generalized Cross-Validation; ``"reml"`` uses Restricted Maximum
+        Likelihood on the linearized working model.
 
     Attributes
     ----------
@@ -158,6 +164,7 @@ class GAM:
         use_scipy: bool = False,
         convergence_criterion: str = "gcv",
         drop_conv_basis_col: bool = False,
+        method: Literal["gcv", "reml"] = "gcv",
     ) -> None:
         # TODO: Make basis immutable
         if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
@@ -167,6 +174,7 @@ class GAM:
             )
         _validate_eval_bases_have_bounds(basis)
         self.basis = basis
+        self.method = method
         self.observation_model = observation_model
         self.variance_function = _make_variance_function(self.observation_model)
         self.maxiter = maxiter
@@ -195,12 +203,6 @@ class GAM:
                 drop_conv_basis_col=self.drop_conv_basis_col,
             )
             for b in self.basis
-        )
-        self._inner_func = gcv_compute_factory(
-            self._positive_mon_func_for_lambda,
-            self._apply_identifiability_column,
-            self._apply_identifiability_square,
-            1.5,
         )
 
     def initialize_params(
@@ -245,6 +247,22 @@ class GAM:
             shift_by=0,
             positive_mon_func=self._positive_mon_func_for_lambda,
             apply_identifiability=self._apply_identifiability_column,
+        )
+
+    def _make_inner_func(self, penalty_tree):
+        """Build the smoothing-parameter objective for the current ``method``."""
+        if self.method == "gcv":
+            return gcv_compute_factory(
+                self._positive_mon_func_for_lambda,
+                self._apply_identifiability_column,
+                self._apply_identifiability_square,
+                1.5,
+            )
+        return reml_compute_factory(
+            penalty_tree,
+            self._positive_mon_func_for_lambda,
+            self._apply_identifiability_column,
+            self._apply_identifiability_square,
         )
 
     def _get_penalty_tree(self) -> list[jnp.ndarray]:
@@ -469,7 +487,7 @@ class GAM:
             penalty_tree,
             self.observation_model,
             self.variance_function,
-            self._inner_func,
+            self._make_inner_func(penalty_tree),
             self._compute_sqrt_penalty,
             fisher_scoring=False,  # use observed information, not expected
             max_iter=self.maxiter,

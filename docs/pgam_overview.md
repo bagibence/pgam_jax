@@ -186,14 +186,14 @@ the full $n \times n$ hat matrix:
 3. Use SVD tricks to compute $\text{tr}(\mathbf{A})$ efficiently
 
 ```python
-from pgam_jax.gcv_compute import gcv_compute_factory
+from pgam_jax._pql_gcv import gcv_compute_factory
 
 # Create a GCV scoring function with custom VJP for efficient gradients
 gcv_scorer = gcv_compute_factory(
-    positive_mon_func=jnp.exp,           # λ = exp(θ) ensures positivity
-    apply_identifiability_columns=...,    # for sqrt penalty
-    apply_identifiability=...,            # for full penalty
-    gamma=1.5                             # GCV correction factor
+    positive_mon_func=jnp.exp,  # λ = exp(θ) ensures positivity
+    apply_identifiability_columns=...,  # for sqrt penalty
+    apply_identifiability=...,  # for full penalty
+    gamma=1.5  # GCV correction factor
 )
 ```
 
