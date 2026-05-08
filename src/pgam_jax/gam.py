@@ -7,9 +7,12 @@ from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
+from scipy import stats as sts
 
 from ._identifiable_features import (
+    BasisComponentInfo,
     _compute_features_identifiable,
+    _get_basis_component_infos,
     _should_drop_basis_col,
     compute_features_identifiable,
 )
@@ -383,6 +386,29 @@ class GAM:
         singular_values_inv = jnp.where(keep, 1.0 / singular_values, 0.0)
         return (Vt.T * singular_values_inv**2) @ Vt
 
+    def _resolve_basis_component(
+        self,
+        component: int | str,
+    ) -> BasisComponentInfo:
+        """Resolve a component index or basis label to component metadata."""
+        infos = _get_basis_component_infos(
+            self.basis,
+            drop_conv_basis_col=self.drop_conv_basis_col,
+        )
+        if isinstance(component, str):
+            for info in infos:
+                if info.basis.label == component:
+                    return info
+
+            available_labels = ", ".join(repr(info.basis.label) for info in infos)
+            raise ValueError(
+                f"No smooth component with label {component!r} was found. "
+                f"Available labels: {available_labels}."
+            )
+
+        # if component is an index
+        return infos[component]
+
     # TODO: Do we need to take X in fit? or is this fine?
     # TODO: Accept the initial regularizer_strength here or in the constructor?
     # In the constructor it's tricky because it's derived from the penalty_tree, which would have to be calculated there
@@ -508,6 +534,83 @@ class GAM:
         """
         params = (self.coef_, self.intercept_)
         return self._predict(params, xi)
+
+    # TODO: Test against original implementation
+    def smooth_compute(
+        self,
+        xi: tuple[ArrayLike, ...],
+        component_index: int | str,
+        perc: float = 0.95,
+        se_with_mean: bool = True,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """
+        Evaluate one grid-centered smooth and confidence band.
+
+        This mirrors legacy PGAM's ``smooth_compute`` display convention: the
+        selected component is evaluated with the fitted basis state, centered
+        on the supplied grid, and combined with the matching coefficient block.
+        It is intentionally separate from ``predict``, which uses training
+        centering.
+        """
+        if not hasattr(self, "cov_beta_"):
+            raise AttributeError("GAM instance is not fitted yet. Call fit first.")
+        if not isinstance(xi, tuple):
+            xi = (xi,)
+
+        info = self._resolve_basis_component(component_index)
+
+        if len(xi) != info.input_slice.stop - info.input_slice.start:
+            raise ValueError(
+                f"component_index {component_index} expects "
+                f"{info.input_slice.stop - info.input_slice.start} input array(s), "
+                f"got {len(xi)}."
+            )
+        fX = _compute_features_identifiable(
+            info.basis,
+            *xi,
+            drop_conv_basis_col=self.drop_conv_basis_col,
+        )
+        fX = jnp.asarray(fX)
+
+        nan_filter = jnp.asarray(
+            jnp.sum(jnp.isnan(jnp.asarray(xi)), axis=0),
+            dtype=bool,
+        )
+        nan_filter = nan_filter | jnp.any(jnp.isnan(fX), axis=1)
+        if not bool(jnp.any(~nan_filter)):
+            raise ValueError(
+                "No valid rows remain after evaluating the selected smooth. "
+                "For convolutional smooths, pass an input longer than the "
+                "basis window so at least one row is not NaN-padded."
+            )
+
+        center = jnp.mean(fX[~nan_filter], axis=0)
+
+        fX = jnp.where(jnp.isnan(fX), 0.0, fX)
+        fX = fX - center
+        fX = fX.at[nan_filter, :].set(0.0)
+
+        mean_y = fX @ self.coef_[info.identifiable_feature_slice]
+
+        coef_idx = (
+            jnp.arange(
+                info.identifiable_feature_slice.start,
+                info.identifiable_feature_slice.stop,
+            )
+            + 1
+        )
+        if se_with_mean:
+            X_se = jnp.column_stack((jnp.ones(fX.shape[0]), fX))
+            cov_idx = jnp.concatenate((jnp.array([0]), coef_idx))
+        else:
+            X_se = fX
+            cov_idx = coef_idx
+
+        cov = self.cov_beta_[cov_idx[:, None], cov_idx[None, :]]
+        sigma2 = jnp.sum((X_se @ cov) * X_se, axis=1)
+        se_y = jnp.sqrt(jnp.clip(sigma2, 0.0, jnp.inf))
+        delta = se_y * sts.norm().ppf(1 - (1 - perc) * 0.5)
+        return mean_y, mean_y - delta, mean_y + delta
 
     def score(
         self,
