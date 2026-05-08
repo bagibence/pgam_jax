@@ -38,10 +38,10 @@ from nemos.inverse_link_function_utils import exp, identity, logistic
 from nemos.utils import one_over_x
 
 from pgam_jax._pirls_weights import (
+    _make_w_fn,
     d2w_dmu2,
     deriv_small_h,
     dw_dmu,
-    pirls_weight,
     small_h,
 )
 from pgam_jax._utils import elementwise_derivative
@@ -140,8 +140,9 @@ def test_w_vs_statsmodels(case):
     obs, inv_link, sm_fam, eta_vec, y_vec = _unpack(case)
     mu = np.array(inv_link(eta_vec))
     y  = np.array(y_vec)
+    w_fn = _make_w_fn(y_vec, obs, inv_link)
     np.testing.assert_allclose(
-        pirls_weight(eta_vec, y_vec, obs, inv_link), _sm_w(mu, y, sm_fam), rtol=1e-10)
+        w_fn(eta_vec), _sm_w(mu, y, sm_fam), rtol=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -174,8 +175,9 @@ def test_small_h_vs_statsmodels(case):
 def test_small_h_is_dw_deta(case):
     """small_h = dw/dη: gradient of Σ w(η) wrt η."""
     obs, inv_link, _sm, eta_vec, y_vec = _unpack(case)
+    w_fn = _make_w_fn(y_vec, obs, inv_link)
     grad_fd = approx_derivative(
-        lambda eta: jnp.sum(pirls_weight(eta, y_vec, obs, inv_link)),
+        lambda eta: jnp.sum(w_fn(eta)),
         eta_vec,
         method='3-point',
     )
@@ -205,8 +207,9 @@ def test_deriv_small_h_is_d2w_deta2_over_dmu_deta(case):
 def test_poisson_log_analytical():
     obs, inv_link, _sm, eta_vec, y_vec = _unpack(_POISSON_LOG)
     mu = np.array(inv_link(eta_vec))
+    w_fn = _make_w_fn(y_vec, obs, inv_link)
 
-    np.testing.assert_allclose(pirls_weight(eta_vec, y_vec, obs, inv_link),  mu,          rtol=1e-10)
+    np.testing.assert_allclose(w_fn(eta_vec),                                mu,          rtol=1e-10)
     np.testing.assert_allclose(dw_dmu(eta_vec, y_vec, obs, inv_link),        np.ones(N),  atol=1e-10)
     np.testing.assert_allclose(d2w_dmu2(eta_vec, y_vec, obs, inv_link),      np.zeros(N), atol=1e-10)
     np.testing.assert_allclose(small_h(eta_vec, y_vec, obs, inv_link),       mu,          rtol=1e-10)
@@ -215,8 +218,9 @@ def test_poisson_log_analytical():
 
 def test_gaussian_identity_analytical():
     obs, inv_link, _sm, eta_vec, y_vec = _unpack(_GAUSSIAN_ID)
+    w_fn = _make_w_fn(y_vec, obs, inv_link)
 
-    np.testing.assert_allclose(pirls_weight(eta_vec, y_vec, obs, inv_link),  np.ones(N),  rtol=1e-10)
+    np.testing.assert_allclose(w_fn(eta_vec),                                np.ones(N),  rtol=1e-10)
     np.testing.assert_allclose(dw_dmu(eta_vec, y_vec, obs, inv_link),        np.zeros(N), atol=1e-10)
     np.testing.assert_allclose(d2w_dmu2(eta_vec, y_vec, obs, inv_link),      np.zeros(N), atol=1e-10)
     np.testing.assert_allclose(small_h(eta_vec, y_vec, obs, inv_link),       np.zeros(N), atol=1e-10)
