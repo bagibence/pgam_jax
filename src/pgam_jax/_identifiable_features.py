@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import nemos as nmo
 import numpy as np
 
+from ._nemos_compat import get_n_inputs
+
 
 @dataclass(frozen=True)
 class BasisComponentInfo:
@@ -40,10 +42,7 @@ def _get_basis_component_infos(
     input_start = 0
     out_start = 0
     for index, component in enumerate(basis):
-        try:
-            n_inputs = component._n_inputs
-        except AttributeError:
-            n_inputs = component._n_input_dimensionality
+        n_inputs = get_n_inputs(component)
 
         n_outputs = component.n_basis_funcs
         if _should_drop_basis_col(component, drop_conv_basis_col):
@@ -82,10 +81,7 @@ def _compute_features_identifiable(
     drop_conv_basis_col: bool,
 ):
     if isinstance(basis, nmo.basis.AdditiveBasis):
-        try:
-            n1 = basis.basis1._n_inputs
-        except AttributeError:
-            n1 = basis.basis1._n_input_dimensionality
+        n1 = get_n_inputs(basis.basis1)
         x1 = _compute_features_identifiable(
             basis.basis1,
             *inputs[:n1],
