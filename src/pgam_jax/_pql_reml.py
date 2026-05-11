@@ -8,13 +8,17 @@ import jax.tree_util as jtu
 from numpy.typing import NDArray
 
 from . import penalty_utils
-from ._pql_gcv import FLOAT_EPS, _vmap_where, _vmap_symm_mult, _vmap_trace
+from ._pql_gcv import FLOAT_EPS, _vmap_symm_mult, _vmap_trace, _vmap_where
 from ._slam_compute import _compute_log_det_slam_factory
 
 
 @partial(
     jax.jit,
-    static_argnames=("compute_log_det_and_grad", "positive_mon_func", "apply_identifiability"),
+    static_argnames=(
+        "compute_log_det_and_grad",
+        "positive_mon_func",
+        "apply_identifiability",
+    ),
 )
 def _compute_reml_and_states(
     regularization_strength: Any,
@@ -103,8 +107,8 @@ def _compute_reml_and_states(
 
     # --- REML RSS = ||y||^2 - ||U1^T Q^T y||^2 ---
     y_obs = y[:n_obs].reshape(n_obs, -1)
-    y1 = U1.T @ (Q.T @ y_obs)              # (k, 1)
-    RSS_reml = jnp.sum(y_obs ** 2) - jnp.sum(y1 ** 2)
+    y1 = U1.T @ (Q.T @ y_obs)  # (k, 1)
+    RSS_reml = jnp.sum(y_obs**2) - jnp.sum(y1**2)
 
     # --- log|X'X + S_lam| = 2 * sum log(s_k) over positive singular values ---
     log_s_safe = jnp.where(low_vals, 0.0, jnp.log(jnp.where(low_vals, 1.0, s)))
@@ -145,8 +149,8 @@ def _reml_grad_compute_from_states(
 
     where comp = V_T^T * s_inv  and  Mj = comp^T Sj comp.
     """
-    comp = V_T.T * s_inv           # (n_features, k)
-    comp_y1 = comp @ y1.ravel()   # (n_features,)
+    comp = V_T.T * s_inv  # (n_features, k)
+    comp_y1 = comp @ y1.ravel()  # (n_features,)
 
     blocks = penalty_utils.compute_penalty_blocks(
         penalty_tree,
@@ -159,18 +163,22 @@ def _reml_grad_compute_from_states(
     # lam_j * (comp @ y1)^T Sj (comp @ y1)
     rss_grad = jtu.tree_map(
         lambda s_block, lam: lam * _vmap_symm_mult(s_block, comp_y1),
-        blocks, lams,
+        blocks,
+        lams,
     )
 
     # lam_j * tr(Mj) = lam_j * tr(comp^T Sj comp)
     logdet_xtx_grad = jtu.tree_map(
         lambda s_block, lam: lam * _vmap_trace(_vmap_symm_mult(s_block, comp)),
-        blocks, lams,
+        blocks,
+        lams,
     )
 
     return jtu.tree_map(
         lambda rss_g, ld_xtx_g, ld_sl_g: 0.5 * rss_g + 0.5 * ld_xtx_g - 0.5 * ld_sl_g,
-        rss_grad, logdet_xtx_grad, log_det_sl_grads,
+        rss_grad,
+        logdet_xtx_grad,
+        log_det_sl_grads,
     )
 
 
@@ -215,7 +223,10 @@ def reml_compute_factory(
         return _compute_reml_and_states(
             regularization_strength,
             penalty_tree,
-            X, Q, R, y,
+            X,
+            Q,
+            R,
+            y,
             compute_log_det_and_grad=compute_log_det_and_grad,
             positive_mon_func=positive_mon_func,
             apply_identifiability=apply_identifiability_columns,
@@ -226,7 +237,10 @@ def reml_compute_factory(
             _compute_reml_and_states(
                 regularization_strength,
                 penalty_tree,
-                X, Q, R, y,
+                X,
+                Q,
+                R,
+                y,
                 compute_log_det_and_grad=compute_log_det_and_grad,
                 positive_mon_func=positive_mon_func,
                 apply_identifiability=apply_identifiability_columns,

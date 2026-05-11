@@ -16,7 +16,6 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
-
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
 from .iterative_optim import (

@@ -28,10 +28,12 @@ Public API
 """
 
 import warnings
-import numpy as np
-import jax.numpy as jnp
-from jax import lax
 from collections import defaultdict
+
+import jax.numpy as jnp
+import numpy as np
+from jax import lax
+
 
 def _warn_if_not_f64(fname: str) -> None:
     if jnp.finfo(float).dtype != np.dtype("float64"):
@@ -347,22 +349,23 @@ def _compute_log_det_slam_factory(penalty_tree):
     """
     # Not compilable step: drop null spaces of blocks.
     import jax
+
     frobs = jax.tree_util.tree_map(
-        lambda x: jnp.sqrt(jnp.sum(x ** 2, axis=(1, 2), keepdims=True)), penalty_tree
+        lambda x: jnp.sqrt(jnp.sum(x**2, axis=(1, 2), keepdims=True)), penalty_tree
     )
     eig_res = jax.tree_util.tree_map(
         lambda x, f: jnp.linalg.eigh(jnp.sum(x / f, axis=0)), penalty_tree, frobs
     )
     eigenvalues, eigenvectors = zip(*eig_res)
     _eps = jnp.finfo(float).eps
-    keep = jax.tree_util.tree_map(
-        lambda e: e > e[-1] * (_eps**0.8), eigenvalues
-    )
+    keep = jax.tree_util.tree_map(lambda e: e > e[-1] * (_eps**0.8), eigenvalues)
     flat, struct = jax.tree_util.tree_flatten(penalty_tree)
     tl = jax.tree_util.tree_leaves
 
     # formally full rank S_i
-    full_rank_flat = [u[:, k].T @ x @ u[:, k] for (x, u, k) in zip(flat, tl(eigenvectors), tl(keep))]
+    full_rank_flat = [
+        u[:, k].T @ x @ u[:, k] for (x, u, k) in zip(flat, tl(eigenvectors), tl(keep))
+    ]
 
     # compute the groups statically
     groups = compute_groups(full_rank_flat)
