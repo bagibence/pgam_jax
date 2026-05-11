@@ -2,12 +2,11 @@ import enum
 import jax.numpy as jnp
 import jax
 from collections import defaultdict
-from typing import Any, Callable
-
-from nemos.basis import MultiplicativeBasis
-
+from typing import Callable
 from functools import reduce
-from .penalty_utils import compute_energy_penalty, ndim_tensor_product_basis_penalty, compute_penalty_null_space
+
+from ._slam_compute import transform_slam_with_Q
+
 
 class SqrtMethod(enum.Enum):
     SINGLE = 0
@@ -30,122 +29,106 @@ def _preprocess_kron(S):
 
 class PenaltyHandler:
 
-    def __init__(self, n_samples: int=10**4, non_linearity: Callable=jnp.exp):
-        self._n_samples = n_samples
-        self._groups = defaultdict(list)
-        self._penalty_tensors = []
-        self._cache: list[dict[SqrtMethod, Any]] = []
+    def __init__(self, non_linearity: Callable = jnp.exp):
+        self._groups: dict = defaultdict(list)
+        self._n_penalties: int = 0
+        self._cache: list[dict] = []
         self._non_linearity = non_linearity
 
-    def _energy_penalty(self, basis) -> list[jax.Array]:
-        return [
-            compute_energy_penalty(
-            self._n_samples,
-            b.derivative,
-            getattr(b, "bounds", None) or (0.0, 1.0),
-        )
-        for b in basis._iterate_over_components()
-    ]
-
-    @staticmethod
-    def _get_sqrt_method(n_penalties: int, has_null:bool) -> SqrtMethod:
-        # if len(penalty_list) == 1, then it is single penalty
-        if n_penalties == 1 and has_null:
-            method = SqrtMethod.SINGLE_WITH_NULL
-        elif n_penalties == 1 and not has_null:
-            method = SqrtMethod.SINGLE
-        elif n_penalties > 1 and has_null:
-            method = SqrtMethod.KRONECKER_WITH_NULL
-        elif n_penalties > 1 and not has_null:
-            method = SqrtMethod.KRONECKER
-        else:
-            # should never happen
-            raise ValueError("Empty penalty list.")
-        return method
-
-    def add(self, basis, penalize_null_space: bool=True):
+    def add(self, S_tensor, penalize_null_space: bool = True):
         """
-
         Parameters
         ----------
-        penalty_tensor :
-            Shape (M, q, q).
+        S_tensor :
+            Shape (k, q, q) or (q, q) stacked penalty matrices.  The penalty
+            is ``sum_j lambda_j * S_tensor[j]``.
         penalize_null_space :
-           True if null space should be penalized.
-
+            Only relevant when k == 1.  For k > 1 the GENERAL method removes
+            the null space implicitly via the full-rank precompute projection.
         """
-        if basis._n_inputs > 1 and not isinstance(basis, MultiplicativeBasis):
-            raise ValueError("PenaltyHandler 1D bases or products of 1D basis.")
+        S_tensor = jnp.asarray(S_tensor)
+        if S_tensor.ndim == 2:
+            S_tensor = S_tensor[None]
 
-        penalty_list = self._energy_penalty(basis)
+        if S_tensor.shape[0] == 1:
+            cache, method = self._compute_cache(S_tensor[0], penalize_null_space)
+        else:
+            cache, method = self._compute_cache(S_tensor, penalize_null_space)
 
-        # compute kron product for multi-dimensional bases
-        penalty_tensor = ndim_tensor_product_basis_penalty(*penalty_list)
-        n_penalties = len(penalty_tensor)
+        self._groups[(method, S_tensor.shape)].append(self._n_penalties)
+        self._n_penalties += 1
+        self._cache.append(cache)
 
-        null_pen = None
-        has_null = False
-        if penalize_null_space:
-            _null = compute_penalty_null_space(penalty_tensor)
-            if ~jnp.all(_null == 0):
-                null_pen = _null
-                penalty_tensor = jnp.concatenate((penalty_tensor, null_pen[None]), axis=0)
-                has_null = True
-
-        method = self._get_sqrt_method(n_penalties, has_null)
-
-        # assign group and store penalty
-        self._groups[(method, penalty_tensor.shape)].append(len(self._penalty_tensors))
-        self._penalty_tensors.append(penalty_tensor)
-        self._cache.append(self._compute_cache(penalty_list, null_pen, method))
-
-
-    @staticmethod
-    def _compute_cache(penalty_list: list, null_pen, method) -> dict:
+    def add_kron(self, factor_list, penalize_null_space: bool = True):
         """
         Parameters
         ----------
-        penalty_list :
-            1-D factor penalties, one (q_k, q_k) matrix per factor dimension.
-            Single-element list for 1-D bases; one entry per factor for
-            multiplicative bases.
-        null_pen :
-            Full (prod_q, prod_q) null-space penalty matrix, or None when the
-            null space is empty / not penalized.  null_pen need not be
-            decomposed: compute_penalty_null_space projects onto the null
-            eigenvectors of S_energy, so U_energy simultaneously diagonalises
-            both S_energy and null_pen.  The null penalty has all active
-            eigenvalues equal to 1, so only rank_null is needed for log-det.
-        method :
-            Algebraic structure label.
+        factor_list :
+            List of (q_i, q_i) 1D factor penalty matrices.  Exploits the
+            Kronecker-sum structure to compute the sqrt via per-factor
+            eigendecompositions, avoiding the full (prod_q, prod_q) eigh.
+        penalize_null_space :
+            If True and every factor individually has a null space, the null
+            space of the Kronecker sum is penalized via a separate lambda.
         """
-        match method:
-            case SqrtMethod.SINGLE:
-                eig, U, rank = _preprocess_kron(penalty_list[0])
-                log_det_S = jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
-                return {"eig": eig, "U": U, "rank": rank, "log_det_S": log_det_S}
+        cache, method = self._compute_cache(factor_list, penalize_null_space)
+        q = reduce(lambda a, b: a * b, [S.shape[0] for S in factor_list])
+        shape = (len(factor_list), q, q)
+        self._groups[(method, shape)].append(self._n_penalties)
+        self._n_penalties += 1
+        self._cache.append(cache)
 
-            case SqrtMethod.SINGLE_WITH_NULL:
-                eig, U, rank = _preprocess_kron(penalty_list[0])
-                log_det_S = jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
-                rank_null = eig.shape[0] - rank   # null_pen eigenvalues are 1, no decomposition needed
-                return {"eig": eig, "U": U, "rank": rank, "rank_null": rank_null, "log_det_S": log_det_S}
+    @staticmethod
+    def _compute_cache(data, penalize_null_space: bool = True) -> tuple[dict, SqrtMethod]:
+        """
+        Compute the precomputed cache and select the sqrt method in a single pass.
 
-            case SqrtMethod.KRONECKER | SqrtMethod.KRONECKER_WITH_NULL:
-                results   = [_preprocess_kron(S) for S in penalty_list]
-                eigs      = [eig  for eig, _, _    in results]
-                Us        = [U    for _,   U, _    in results]
-                ranks     = [rank for _,   _, rank in results]
-                log_det_S = [jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
-                             for eig in eigs]
-                kron_U    = reduce(jnp.kron, Us)
-                return {"eigs": eigs, "kron_U": kron_U, "ranks": ranks, "log_det_S": log_det_S}
+        Parameters
+        ----------
+        data :
+            - 2-D array (q, q)     → SINGLE / SINGLE_WITH_NULL
+            - list of 2-D arrays   → KRONECKER / KRONECKER_WITH_NULL
+            - 3-D array (k, q, q)  → GENERAL
+        penalize_null_space :
+            Ignored for GENERAL (null space dropped by the precompute projection).
+        """
+        if isinstance(data, list):
+            # KRONECKER
+            results   = [_preprocess_kron(S) for S in data]
+            eigs      = [eig  for eig, _, _    in results]
+            Us        = [U    for _,   U, _    in results]
+            ranks     = [rank for _,   _, rank in results]
+            # Kronecker-sum null space exists iff every factor has its own null space.
+            has_null  = penalize_null_space and all(
+                bool(rank < S.shape[0]) for rank, S in zip(ranks, data)
+            )
+            method    = SqrtMethod.KRONECKER_WITH_NULL if has_null else SqrtMethod.KRONECKER
+            log_det_S = [jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
+                         for eig in eigs]
+            kron_U    = reduce(jnp.kron, Us)
+            return {"eigs": eigs, "kron_U": kron_U, "ranks": ranks, "log_det_S": log_det_S}, method
 
-            case SqrtMethod.GENERAL:
-                # not yet implemented; must use the runtime S_lam
-                return {}
+        if data.ndim == 2:
+            # SINGLE
+            eig, U, rank = _preprocess_kron(data)
+            has_null  = penalize_null_space and bool(rank < data.shape[0])
+            method    = SqrtMethod.SINGLE_WITH_NULL if has_null else SqrtMethod.SINGLE
+            log_det_S = jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
+            cache     = {"eig": eig, "U": U, "rank": rank, "log_det_S": log_det_S}
+            if method is SqrtMethod.SINGLE_WITH_NULL:
+                cache["rank_null"] = data.shape[0] - rank
+            return cache, method
 
-        raise ValueError(f"Unrecognized penalty method ``{method}``.")
+        # GENERAL (ndim == 3)
+        S        = data
+        frobs    = jnp.sqrt(jnp.sum(S**2, axis=(1, 2), keepdims=True))
+        norm_avg = jnp.sum(S / frobs, axis=0)
+        ev, U    = jnp.linalg.eigh(norm_avg)
+        eps      = float(jnp.finfo(float).eps**0.8)
+        keep     = ev > ev[-1] * eps          # eager boolean index — precompute only
+        U_keep   = U[:, keep]                 # (q, r)
+        full_rank_S = U_keep.T[None] @ S @ U_keep[None]  # (k, r, r)
+        return {"U_keep": U_keep, "full_rank_S": full_rank_S}, SqrtMethod.GENERAL
 
     def _sqrt(self, method, cache, lams):
         match method:
@@ -173,16 +156,26 @@ class PenaltyHandler:
                 sqrt_d = jnp.where(combined > 0, jnp.sqrt(combined), jnp.sqrt(lams[-1]))
                 return sqrt_d[:, None] * cache["kron_U"].T                     # (prod_q, prod_q)
 
+            case SqrtMethod.GENERAL:
+                U_keep      = cache["U_keep"]           # (q, r)
+                full_rank_S = cache["full_rank_S"]      # (k, r, r) — formally full rank
+                lams_arr    = jnp.stack(lams)           # (k,)
+                S_i_out, Q_s = transform_slam_with_Q(full_rank_S, lams_arr)
+                S_full = jnp.einsum('i,ijk->jk', lams_arr, S_i_out)  # (r, r) stable
+                S_full = 0.5 * (S_full + S_full.T)
+                ev, U   = jnp.linalg.eigh(S_full)
+                safe_ev = jnp.where(ev > 0, ev, 1.0)
+                sqrt_d  = jnp.where(ev > 0, jnp.sqrt(safe_ev), 0.0)
+                B_rot   = sqrt_d[:, None] * U.T         # (r, r) — sqrt in rotated basis
+                return (B_rot @ Q_s.T) @ U_keep.T       # (r, q) — back to original basis
+
             case _:
                 raise NotImplementedError(f"_sqrt not implemented for {method}.")
 
     def compute_sqrt(self, rhos) -> list:
         lams = jax.tree_util.tree_map(self._non_linearity, rhos)
-        # for now, just loop over members
-        # for the future, stack all cache and vmap
-        out = [None] * len(self._penalty_tensors)
+        out = [None] * self._n_penalties
         for (method, _), members in self._groups.items():
             for idx in members:
                 out[idx] = self._sqrt(method, self._cache[idx], lams[idx])
         return out
-

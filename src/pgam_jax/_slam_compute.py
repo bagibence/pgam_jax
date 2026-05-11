@@ -69,10 +69,11 @@ def _make_scan_body(lams, q):
     :
         A callable ``body(state, _) -> (state, None)`` suitable for
         ``lax.scan``.  State tuple is
-        ``(S_bar, S_i_out, gamma_mask, K)``:
+        ``(S_bar, S_i_out, Q_s, gamma_mask, K)``:
 
         - ``S_bar``      : (M, q, q) working matrices; active block is [K:, K:]
         - ``S_i_out``    : (M, q, q) individually transformed output matrices
+        - ``Q_s``        : (q, q) accumulated rotation; S_full = Q_s.T @ S_lam @ Q_s
         - ``gamma_mask`` : (M,) bool — True for indices still in gamma
         - ``K``          : () int32 — accumulated block offset
     """
@@ -87,7 +88,7 @@ def _make_scan_body(lams, q):
     outer = jnp.arange(q, dtype=jnp.int32)
 
     def body(state, _):
-        S_bar, S_i_out, gamma_mask, K = state
+        S_bar, S_i_out, Q_s, gamma_mask, K = state
 
         act2d = (outer[:, None] >= K) & (outer[None, :] >= K)
         S_bar_act = S_bar * act2d[None, :, :]
@@ -132,8 +133,9 @@ def _make_scan_body(lams, q):
         S_bar_out = jnp.where(terminate, S_bar, S_bar_new)
         K_out = jnp.where(terminate, K, K + r)
         gm_out = jnp.where(terminate, jnp.zeros(M, dtype=bool), gamma_prime)
+        Q_s_out = jnp.where(terminate, Q_s, Q_s @ V)
 
-        return (S_bar_out, S_i_out_out, gm_out, K_out), None
+        return (S_bar_out, S_i_out_out, Q_s_out, gm_out, K_out), None
 
     return body
 
@@ -170,11 +172,51 @@ def transform_slam(S_tensor, rho):
     init = (
         S_tensor,
         S_tensor,
+        jnp.eye(q),
         jnp.ones(M, dtype=bool),
         jnp.zeros((), dtype=jnp.int32),
     )
-    (_, S_i_out, _, _), _ = lax.scan(body, init, None, length=q)
+    (_, S_i_out, _, _, _), _ = lax.scan(body, init, None, length=q)
     return S_i_out
+
+
+def transform_slam_with_Q(S_tensor, lams):
+    """
+    Same block-diagonal transform as :func:`transform_slam` but also returns
+    the accumulated orthogonal rotation Q such that
+    ``sum_i lams[i] * S_i_out[i] == Q.T @ (sum_i lams[i] * S_tensor[i]) @ Q``.
+
+    Unlike :func:`transform_slam` this function takes *lams* (smoothing
+    parameters, not log-scale) so the caller can avoid a log/exp round-trip.
+
+    Parameters
+    ----------
+    S_tensor :
+        Shape (M, q, q) positive semi-definite penalty matrices.
+    lams :
+        Shape (M,) smoothing parameters (> 0, not log-scale).
+
+    Returns
+    -------
+    S_i_out :
+        Shape (M, q, q) individually-transformed matrices with disjoint block
+        support.
+    Q_s :
+        Shape (q, q) accumulated rotation.
+    """
+    _warn_if_not_f64("transform_slam_with_Q")
+    M, q = S_tensor.shape[0], S_tensor.shape[1]
+
+    body = _make_scan_body(lams, q)
+    init = (
+        S_tensor,
+        S_tensor,
+        jnp.eye(q),
+        jnp.ones(M, dtype=bool),
+        jnp.zeros((), dtype=jnp.int32),
+    )
+    (_, S_i_out, Q_s, _, _), _ = lax.scan(body, init, None, length=q)
+    return S_i_out, Q_s
 
 
 # ===========================================================================
