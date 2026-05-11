@@ -151,6 +151,16 @@ class GAM:
     cov_beta_ :
         Posterior covariance of the full coefficient vector ``[intercept, coef_]``
         treating smoothing parameters as fixed (available after ``fit``).
+        Includes the dispersion factor: ``φ̂ · (X'WX + S_λ)⁻¹``.
+    scale_ :
+        Estimated dispersion parameter φ̂ (available after ``fit``).
+        Poisson/Bernoulli models always return 1.0; Gaussian/Gamma models
+        estimate φ̂ from Pearson residuals divided by residual degrees of freedom.
+    edf_ :
+        Effective degrees of freedom — Wood's ``edf1 = 2·tr(F) − tr(F²)``
+        (available after ``fit``).
+    dof_resid_ :
+        Residual degrees of freedom ``n_obs − edf_`` (available after ``fit``).
     """
 
     def __init__(
@@ -351,19 +361,25 @@ class GAM:
         regularizer_strength: list[jnp.ndarray],
         penalty_tree: list[jnp.ndarray],
         rtol: float = 1e-8,
-    ) -> jnp.ndarray:
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
-        Compute posterior covariance of ``[intercept, coef]`` after fitting.
+        Compute posterior covariance, EDF, and dispersion scale after fitting.
 
         This mirrors legacy PGAM's final refresh: recompute final IRLS weights
         from the returned coefficients, form QR(sqrt(W) X), then invert
         ``X.T W X + S_lambda`` via the SVD of ``[R; sqrt(S_lambda)]``.
-        """
-        # we are calculating the following:
-        #   cov_beta = inv(X^T W X + S_lambda)
 
-        # recompute final IRLS weights needed for X^T W X
+        Returns
+        -------
+        cov_beta :
+            Posterior covariance ``φ · (X'WX + S_λ)⁻¹``, shape ``(p+1, p+1)``.
+        edf :
+            Effective degrees of freedom — Wood's ``edf1 = 2·tr(F) − tr(F²)``.
+        scale :
+            Estimated dispersion φ̂ from ``observation_model.estimate_scale``.
+        """
         coef, intercept = params
+        n_obs = X.shape[0]
         eta = X @ coef + intercept
         mu = self.observation_model.default_inverse_link_function(eta)
 
@@ -382,32 +398,37 @@ class GAM:
         weights = jnp.clip(weights, 0.0, jnp.inf)
 
         # Xw^T Xw = X^T W X
-        X_full = jnp.column_stack((jnp.ones(X.shape[0]), X))
+        X_full = jnp.column_stack((jnp.ones(n_obs), X))
         Xw = X_full * jnp.sqrt(weights)[:, None]
         R = jnp.linalg.qr(Xw, mode="r")
 
-        # TODO: how about adding a flag to prepend the zero column?
-        # called B in original implementation
         # B^T B = S_lambda
-        sqrt_penalty = self._compute_sqrt_penalty(
-            penalty_tree,
-            regularizer_strength,
-        )
+        sqrt_penalty = self._compute_sqrt_penalty(penalty_tree, regularizer_strength)
         sqrt_penalty = jnp.column_stack(
             (jnp.zeros(sqrt_penalty.shape[0]), sqrt_penalty)
         )
 
-        # A = [R ; B] => A^T A = R^T R + B^T B = X^T W X + S_lambda
-        # cov_beta is the inverse of the precision matrix A^T A
-        # pseudo-inverse is computed from the SVD of A for stability
-        _, singular_values, Vt = jnp.linalg.svd(
+        # SVD of A = [R; B],  A^T A = X^T W X + S_lambda
+        # U1 = U[:k] (first k=R.shape[0] rows) encodes the hat matrix via A = Q_xw U1 U1' Q_xw'
+        U_svd, singular_values, Vt = jnp.linalg.svd(
             jnp.vstack((R, sqrt_penalty)),
             full_matrices=False,
         )
+        U1 = U_svd[: R.shape[0], :]  # (k, k) where k = p + 1
+
+        # EDF: edf1 = 2·tr(F) − tr(F²) where F = (X'WX + S_λ)⁻¹ X'WX
+        # Expressed via U1: tr(F) = ‖U1‖²_F,  tr(F²) = ‖U1'U1‖²_F  (Wood 2017 eq. 6.13)
+        edf = jnp.sum(U1 ** 2)
+        edf1 = 2.0 * edf - jnp.sum((U1.T @ U1) ** 2)
+
+        # dispersion: Poisson → 1.0; Gaussian/Gamma → Pearson χ²/dof
+        scale = self.observation_model.estimate_scale(y, mu, dof_resid=n_obs - edf1)
+
         # tiny singular values would blow up 1 / s^2, so discard them
         keep = singular_values >= rtol * singular_values.max()
         singular_values_inv = jnp.where(keep, 1.0 / singular_values, 0.0)
-        return (Vt.T * singular_values_inv**2) @ Vt
+        cov_beta = scale * (Vt.T * singular_values_inv**2) @ Vt
+        return cov_beta, edf1, scale
 
     def _resolve_basis_component(
         self,
@@ -505,13 +526,14 @@ class GAM:
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
         self.n_iter_ = n_iter
-        self.cov_beta_ = self._compute_cov_beta_from_fit_state(
+        self.cov_beta_, self.edf_, self.scale_ = self._compute_cov_beta_from_fit_state(
             X,
             y,
             opt_coef,
             opt_pen,
             penalty_tree,
         )
+        self.dof_resid_ = X.shape[0] - self.edf_
 
         return self
 
@@ -662,6 +684,6 @@ class GAM:
         return self.observation_model.log_likelihood(
             y,
             self._predict(params, xi),
-            # scale = 1.0,
+            scale=self.scale_,
             aggregate_sample_scores=aggregate_sample_scores,
         )
