@@ -6,6 +6,8 @@ PGAM represents neural responses with B-splines regularized by smoothing penalti
 
 ## Installation
 
+### Fresh install
+
 This project currently targets Python 3.12, 3.13, and 3.14.
 
 ```bash
@@ -22,6 +24,20 @@ For notebook-based experimentation:
 
 ```bash
 uv sync --extra dev --extra notebooks
+```
+
+### Existing environment
+
+If you'd rather install into an existing environment:
+
+```bash
+pip install -e .
+```
+
+To include the development and notebook extras:
+
+```bash
+pip install -e ".[dev,notebooks]"
 ```
 
 ## Quick Start
@@ -43,6 +59,8 @@ Or if you don't want to install anything, just launch Jupyter Lab with:
 ```bash
 uv run --extra dev --extra notebooks jupyter lab
 ```
+
+The Quick Start commands assume `uv`. If you installed with `pip`, run `jupyter lab` (and `pytest`) directly in your environment instead.
 
 ## Tests
 Run tests with:
