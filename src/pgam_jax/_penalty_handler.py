@@ -159,9 +159,8 @@ class PenaltyHandler:
             case SqrtMethod.GENERAL:
                 U_keep      = cache["U_keep"]           # (q, r)
                 full_rank_S = cache["full_rank_S"]      # (k, r, r) — formally full rank
-                lams_arr    = jnp.stack(lams)           # (k,)
-                S_i_out, Q_s = transform_slam_with_Q(full_rank_S, lams_arr)
-                S_full = jnp.einsum('i,ijk->jk', lams_arr, S_i_out)  # (r, r) stable
+                S_i_out, Q_s = transform_slam_with_Q(full_rank_S, lams)
+                S_full = jnp.einsum('i,ijk->jk', lams, S_i_out)      # (r, r) stable
                 S_full = 0.5 * (S_full + S_full.T)
                 ev, U   = jnp.linalg.eigh(S_full)
                 safe_ev = jnp.where(ev > 0, ev, 1.0)
