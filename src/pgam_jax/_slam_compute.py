@@ -107,34 +107,37 @@ def _make_scan_body(lams, q):
 
         terminate = r == q - K
 
-        S_lam_alpha = jnp.einsum("ijk,i->jk", S_bar_act, jnp.where(alpha, lams, 0.0))
-        S_eigh = S_lam_alpha - _big * jnp.diag((outer < K).astype(lams.dtype))
-        _, U = jnp.linalg.eigh(S_eigh)
-        U = U[:, ::-1]
+        def no_op(_):
+            return S_bar, S_i_out, Q_s, gamma_mask, K
 
-        V = jnp.where(act2d, U, I_q)
+        def step(_):
+            S_lam_alpha = jnp.einsum("ijk,i->jk", S_bar_act, jnp.where(alpha, lams, 0.0))
+            S_eigh = S_lam_alpha - _big * jnp.diag((outer < K).astype(lams.dtype))
+            _, U = jnp.linalg.eigh(S_eigh)
+            U = U[:, ::-1]
 
-        keep = outer < K + r
-        T_alpha = jnp.where(keep[None, :], V, 0.0)
-        S_from_alpha = T_alpha.T[None] @ S_i_out @ T_alpha[None]
-        S_from_gamma = V.T[None] @ S_i_out @ V[None]
-        S_i_out_new = jnp.where(
-            alpha[:, None, None],
-            S_from_alpha,
-            jnp.where(gamma_prime[:, None, None], S_from_gamma, S_i_out),
+            V = jnp.where(act2d, U, I_q)
+
+            keep = outer < K + r
+            T_alpha = jnp.where(keep[None, :], V, 0.0)
+            S_from_alpha = T_alpha.T[None] @ S_i_out @ T_alpha[None]
+            S_from_gamma = V.T[None] @ S_i_out @ V[None]
+            S_i_out_new = jnp.where(
+                alpha[:, None, None],
+                S_from_alpha,
+                jnp.where(gamma_prime[:, None, None], S_from_gamma, S_i_out),
+            )
+
+            dom_cols = (outer >= K) & (outer < K + r)
+            V_n = jnp.where(dom_cols[None, :], I_q, V)
+            S_bar_gp = V_n.T[None] @ S_bar @ V_n[None]
+            S_bar_new = jnp.where(gamma_prime[:, None, None], S_bar_gp, S_bar)
+
+            return S_bar_new, S_i_out_new, Q_s @ V, gamma_prime, K + r
+
+        S_bar_out, S_i_out_out, Q_s_out, gm_out, K_out = lax.cond(
+            terminate, no_op, step, None
         )
-
-        dom_cols = (outer >= K) & (outer < K + r)
-        V_n = jnp.where(dom_cols[None, :], I_q, V)
-        S_bar_gp = V_n.T[None] @ S_bar @ V_n[None]
-        S_bar_new = jnp.where(gamma_prime[:, None, None], S_bar_gp, S_bar)
-
-        S_i_out_out = jnp.where(terminate, S_i_out, S_i_out_new)
-        S_bar_out = jnp.where(terminate, S_bar, S_bar_new)
-        K_out = jnp.where(terminate, K, K + r)
-        gm_out = jnp.where(terminate, jnp.zeros(M, dtype=bool), gamma_prime)
-        Q_s_out = jnp.where(terminate, Q_s, Q_s @ V)
-
         return (S_bar_out, S_i_out_out, Q_s_out, gm_out, K_out), None
 
     return body
