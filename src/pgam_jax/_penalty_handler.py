@@ -144,8 +144,10 @@ class PenaltyHandler:
                 return sqrt_d[:, None] * cache["U"].T                          # (q, q)
 
             case SqrtMethod.KRONECKER:
-                combined = reduce(jnp.add.outer,
-                                  [lam * eig for lam, eig in zip(lams, cache["eigs"])]).ravel()
+                combined = reduce(
+                    jnp.add.outer,
+                    [lam * eig for lam, eig in zip(lams, cache["eigs"])]
+                ).ravel()
                 return jnp.sqrt(combined)[:, None] * cache["kron_U"].T        # (prod_q, prod_q)
 
             case SqrtMethod.KRONECKER_WITH_NULL:
