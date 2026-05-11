@@ -90,8 +90,8 @@ def _compute_reml_and_states(
         shift_by=0,
         positive_mon_func=positive_mon_func,
         apply_identifiability=apply_identifiability,
+        prepend_zeros_for_intercept=True,
     )
-    sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
 
     n_obs = X.shape[0]
     U, s, V_T = jnp.linalg.svd(jnp.vstack((R, sqrt_penalty)), full_matrices=False)

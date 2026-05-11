@@ -288,10 +288,8 @@ def pql_outer_iteration(
         sqrt_penalty = compute_sqrt_penalty(
             penalty_tree,
             reg_strength,
+            prepend_zeros_for_intercept=True,
         )
-
-        # add a zero corresponding to not-penalizing the intercept
-        sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
 
         # TODO: Lift this out into an initialization step?
         # initialize coefficients by fitting a GLM

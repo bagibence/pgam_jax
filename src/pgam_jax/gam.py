@@ -246,7 +246,12 @@ class GAM:
         return (coef, intercept)
 
     # TODO: Move these into a WiggleRegularizer class or something?
-    def _compute_sqrt_penalty(self, *args):
+    def _compute_sqrt_penalty(
+        self,
+        penalty_tree: list[jnp.ndarray],
+        regularizer_strength: list[jnp.ndarray],
+        prepend_zeros_for_intercept: bool = False,
+    ):
         """
         Compute the square-root of the penalty matrix.
 
@@ -255,10 +260,12 @@ class GAM:
         (drops last column/row per smooth) and the exp parameterization for lambda.
         """
         return tree_compute_sqrt_penalty(
-            *args,
+            penalty_tree,
+            regularizer_strength,
             shift_by=0,
             positive_mon_func=self._positive_mon_func_for_lambda,
             apply_identifiability=self._apply_identifiability_column,
+            prepend_zeros_for_intercept=prepend_zeros_for_intercept,
         )
 
     def _make_inner_func(self, penalty_tree):
@@ -403,9 +410,10 @@ class GAM:
         R = jnp.linalg.qr(Xw, mode="r")
 
         # B^T B = S_lambda
-        sqrt_penalty = self._compute_sqrt_penalty(penalty_tree, regularizer_strength)
-        sqrt_penalty = jnp.column_stack(
-            (jnp.zeros(sqrt_penalty.shape[0]), sqrt_penalty)
+        sqrt_penalty = self._compute_sqrt_penalty(
+            penalty_tree,
+            regularizer_strength,
+            prepend_zeros_for_intercept=True,
         )
 
         # SVD of A = [R; B],  A^T A = X^T W X + S_lambda
