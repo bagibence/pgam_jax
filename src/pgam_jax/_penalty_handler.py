@@ -6,16 +6,15 @@ from typing import Any, Callable
 
 from nemos.basis import MultiplicativeBasis
 
-from .penalty_utils import sym_sqrt
 from functools import reduce
 from .penalty_utils import compute_energy_penalty, ndim_tensor_product_basis_penalty, compute_penalty_null_space
 
 class SqrtMethod(enum.Enum):
-    SINGLE = "single"
-    ORTHOGONAL = "orthogonal"
-    KRONECKER = "kronecker"
-    KRONECKER_WITH_NULL = "kronecker_with_null"
-    GENERAL = "general"
+    SINGLE = 0
+    SINGLE_WITH_NULL = 1
+    KRONECKER = 2
+    KRONECKER_WITH_NULL = 3
+    GENERAL = 4
 
 
 def _preprocess_kron(S):
@@ -52,7 +51,7 @@ class PenaltyHandler:
     def _get_sqrt_method(n_penalties: int, has_null:bool) -> SqrtMethod:
         # if len(penalty_list) == 1, then it is single penalty
         if n_penalties == 1 and has_null:
-            method = SqrtMethod.ORTHOGONAL
+            method = SqrtMethod.SINGLE_WITH_NULL
         elif n_penalties == 1 and not has_null:
             method = SqrtMethod.SINGLE
         elif n_penalties > 1 and has_null:
@@ -108,49 +107,39 @@ class PenaltyHandler:
         ----------
         penalty_list :
             1-D factor penalties, one (q_k, q_k) matrix per factor dimension.
-            For 1-D bases this is a single-element list; for multiplicative bases
-            it has one entry per multiplicative component.
+            Single-element list for 1-D bases; one entry per factor for
+            multiplicative bases.
         null_pen :
             Full (prod_q, prod_q) null-space penalty matrix, or None when the
-            null space is empty / not penalized.
+            null space is empty / not penalized.  null_pen need not be
+            decomposed: compute_penalty_null_space projects onto the null
+            eigenvectors of S_energy, so U_energy simultaneously diagonalises
+            both S_energy and null_pen.  The null penalty has all active
+            eigenvalues equal to 1, so only rank_null is needed for log-det.
         method :
             Algebraic structure label.
         """
         match method:
             case SqrtMethod.SINGLE:
-                B, rank, log_det_S = sym_sqrt(penalty_list[0])
-                return {"B": B, "rank": rank, "log_det_S": log_det_S}
+                eig, U, rank = _preprocess_kron(penalty_list[0])
+                log_det_S = jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
+                return {"eig": eig, "U": U, "rank": rank, "log_det_S": log_det_S}
 
-            case SqrtMethod.ORTHOGONAL:
-                # Stack the 1-D energy penalty with the null penalty so that both
-                # are processed in a single vmapped call (same q, same shape).
-                stacked = jnp.stack([penalty_list[0], null_pen])
-                B, rank, log_det_S = jax.vmap(sym_sqrt)(stacked)
-                return {"B": B, "rank": rank, "log_det_S": log_det_S}
+            case SqrtMethod.SINGLE_WITH_NULL:
+                eig, U, rank = _preprocess_kron(penalty_list[0])
+                log_det_S = jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
+                rank_null = eig.shape[0] - rank   # null_pen eigenvalues are 1, no decomposition needed
+                return {"eig": eig, "U": U, "rank": rank, "rank_null": rank_null, "log_det_S": log_det_S}
 
-            case SqrtMethod.KRONECKER:
-                # Decompose each 1-D factor independently (Python loop: factors can
-                # have different sizes so vmap is not applicable in general).
-                results = [_preprocess_kron(S) for S in penalty_list]
-                eigs  = [eig  for eig, _, _    in results]  # list of (q_k,) arrays
-                Us    = [U    for _,   U, _    in results]  # list of (q_k, q_k) arrays
-                ranks = [rank for _,   _, rank in results]  # list of scalars
-                # (U_1 ⊗ U_2 ⊗ ...) precomputed; shape (prod_q, prod_q).
-                # At sqrt time: B = diag(sqrt(outer_eig)) @ kron_U.T
-                kron_U = reduce(jnp.kron, Us)
-                return {"eigs": eigs, "kron_U": kron_U, "ranks": ranks}
-
-            case SqrtMethod.KRONECKER_WITH_NULL:
-                results = [_preprocess_kron(S) for S in penalty_list]
-                eigs  = [eig  for eig, _, _    in results]
-                Us    = [U    for _,   U, _    in results]
-                ranks = [rank for _,   _, rank in results]
-                kron_U = reduce(jnp.kron, Us)
-                B, rank, log_det_S = sym_sqrt(null_pen)
-                return {
-                    "kron": {"eigs": eigs, "kron_U": kron_U, "ranks": ranks},
-                    "null": {"B": B, "rank": rank, "log_det_S": log_det_S},
-                }
+            case SqrtMethod.KRONECKER | SqrtMethod.KRONECKER_WITH_NULL:
+                results   = [_preprocess_kron(S) for S in penalty_list]
+                eigs      = [eig  for eig, _, _    in results]
+                Us        = [U    for _,   U, _    in results]
+                ranks     = [rank for _,   _, rank in results]
+                log_det_S = [jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
+                             for eig in eigs]
+                kron_U    = reduce(jnp.kron, Us)
+                return {"eigs": eigs, "kron_U": kron_U, "ranks": ranks, "log_det_S": log_det_S}
 
             case SqrtMethod.GENERAL:
                 # not yet implemented; must use the runtime S_lam
@@ -158,41 +147,42 @@ class PenaltyHandler:
 
         raise ValueError(f"Unrecognized penalty method ``{method}``.")
 
-    @staticmethod
-    def _kron_sqrt(eigs, kron_U, lams):
-        # Outer sum: combined[i_1,...,i_n] = sum_k lams[k] * eigs[k][i_k]
-        combined = reduce(jnp.add.outer, [lam * eig for lam, eig in zip(lams, eigs)])
-        combined = combined.ravel()                       # (prod_q,)
-        # B s.t. B.T @ B = sum_k lams[k] * S_k(kron); zero rows for null modes.
-        return jnp.sqrt(combined)[:, None] * kron_U.T    # (prod_q, prod_q)
-
     def _sqrt(self, method, cache, lams):
         match method:
             case SqrtMethod.SINGLE:
-                return jnp.sqrt(lams[0]) * cache["B"]
+                sqrt_d = jnp.sqrt(lams[0] * cache["eig"])
+                return sqrt_d[:, None] * cache["U"].T                          # (q, q)
 
-            case SqrtMethod.ORTHOGONAL:
-                B = cache["B"]                              # (2, q, q)
-                sqrt_lams = jnp.sqrt(lams)                 # (2,)
-                return (sqrt_lams[:, None, None] * B).reshape(-1, B.shape[-1])
+            case SqrtMethod.SINGLE_WITH_NULL:
+                eig    = cache["eig"]
+                sqrt_d = jnp.where(eig > 0,
+                                   jnp.sqrt(lams[0] * eig),
+                                   jnp.sqrt(lams[1]))
+                return sqrt_d[:, None] * cache["U"].T                          # (q, q)
 
             case SqrtMethod.KRONECKER:
-                return self._kron_sqrt(cache["eigs"], cache["kron_U"], lams)
+                combined = reduce(jnp.add.outer,
+                                  [lam * eig for lam, eig in zip(lams, cache["eigs"])]).ravel()
+                return jnp.sqrt(combined)[:, None] * cache["kron_U"].T        # (prod_q, prod_q)
 
             case SqrtMethod.KRONECKER_WITH_NULL:
-                B_kron = self._kron_sqrt(
-                    cache["kron"]["eigs"], cache["kron"]["kron_U"], lams[:-1]
-                )
-                B_null = jnp.sqrt(lams[-1]) * cache["null"]["B"]
-                return jnp.concatenate([B_kron, B_null], axis=0)
+                combined = reduce(
+                    jnp.add.outer,
+                    [lam * eig for lam, eig in zip(lams[:-1], cache["eigs"])]
+                ).ravel()
+                sqrt_d = jnp.where(combined > 0, jnp.sqrt(combined), jnp.sqrt(lams[-1]))
+                return sqrt_d[:, None] * cache["kron_U"].T                     # (prod_q, prod_q)
 
             case _:
                 raise NotImplementedError(f"_sqrt not implemented for {method}.")
 
-    def compute_sqrt(self, rhos):
+    def compute_sqrt(self, rhos) -> list:
         lams = jax.tree_util.tree_map(self._non_linearity, rhos)
         # for now, just loop over members
         # for the future, stack all cache and vmap
+        out = [None] * len(self._penalty_tensors)
         for (method, _), members in self._groups.items():
             for idx in members:
-                self._sqrt(method, self._cache[idx], lams[idx])
+                out[idx] = self._sqrt(method, self._cache[idx], lams[idx])
+        return out
+
