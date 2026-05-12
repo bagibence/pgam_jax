@@ -5,8 +5,10 @@ from collections import defaultdict
 from typing import Callable
 from functools import reduce
 
+from nemos.inverse_link_function_utils import identity
 from ._slam_compute import transform_slam_with_Q
 from jax.scipy.linalg import block_diag
+
 
 class SqrtMethod(enum.Enum):
     SINGLE = 0
@@ -14,6 +16,10 @@ class SqrtMethod(enum.Enum):
     KRONECKER = 2
     KRONECKER_WITH_NULL = 3
     GENERAL = 4
+
+
+def _drop_last_col(x):
+    return x[..., :-1]
 
 
 def _preprocess_kron(S):
@@ -36,7 +42,7 @@ class PenaltyHandler:
         self._non_linearity = non_linearity
         self._rho_len = []
 
-    def add(self, S_tensor, penalize_null_space: bool = True, identifiability_fn: Callable = lambda x: x):
+    def add(self, S_tensor, penalize_null_space: bool = True, identifiability_fn: Callable = identity):
         """
         Parameters
         ----------
@@ -46,21 +52,26 @@ class PenaltyHandler:
         penalize_null_space :
             Only relevant when k == 1.  For k > 1 the GENERAL method removes
             the null space implicitly via the full-rank precompute projection.
+        identifiability_fn :
+            Must be a module-level callable (not a lambda) so that object
+            identity is stable and can be used as a group key for vmap batching.
+            Use ``identity`` (no-op) or ``_drop_last_col``, or define your own
+            at module level.
         """
         S_tensor = jnp.asarray(S_tensor)
         if S_tensor.ndim == 2:
             S_tensor = S_tensor[None]
 
         if S_tensor.shape[0] == 1:
-            cache, method = self._compute_cache(S_tensor[0], penalize_null_space, identifiability_fn=identifiability_fn)
+            cache, method = self._compute_cache(S_tensor[0], penalize_null_space)
         else:
-            cache, method = self._compute_cache(S_tensor, penalize_null_space, identifiability_fn=identifiability_fn)
+            cache, method = self._compute_cache(S_tensor, penalize_null_space)
 
-        self._groups[(method, S_tensor.shape)].append(self._n_penalties)
+        self._groups[(method, S_tensor.shape, identifiability_fn)].append(self._n_penalties)
         self._n_penalties += 1
         self._cache.append(cache)
 
-    def add_kron(self, factor_list, penalize_null_space: bool = True, identifiability_fn: Callable = lambda x: x):
+    def add_kron(self, factor_list, penalize_null_space: bool = True, identifiability_fn: Callable = identity):
         """
         Parameters
         ----------
@@ -71,15 +82,17 @@ class PenaltyHandler:
         penalize_null_space :
             If True and every factor individually has a null space, the null
             space of the Kronecker sum is penalized via a separate lambda.
+        identifiability_fn :
+            See ``add``.
         """
-        cache, method = self._compute_cache(factor_list, penalize_null_space, identifiability_fn=identifiability_fn)
+        cache, method = self._compute_cache(factor_list, penalize_null_space)
         q = reduce(lambda a, b: a * b, [S.shape[0] for S in factor_list])
         shape = (len(factor_list), q, q)
-        self._groups[(method, shape)].append(self._n_penalties)
+        self._groups[(method, shape, identifiability_fn)].append(self._n_penalties)
         self._n_penalties += 1
         self._cache.append(cache)
 
-    def _compute_cache(self, data, penalize_null_space: bool = True, identifiability_fn: Callable = lambda x:x) -> tuple[dict, SqrtMethod]:
+    def _compute_cache(self, data, penalize_null_space: bool = True) -> tuple[dict, SqrtMethod]:
         """
         Compute the precomputed cache and select the sqrt method in a single pass.
 
@@ -107,7 +120,7 @@ class PenaltyHandler:
                          for eig in eigs]
             kron_U    = reduce(jnp.kron, Us)
             self._rho_len.append(len(eigs) + has_null)
-            return {"eigs": eigs, "kron_U": kron_U, "ranks": ranks, "log_det_S": log_det_S, "identifiability_fn": identifiability_fn}, method
+            return {"eigs": eigs, "kron_U": kron_U, "ranks": ranks, "log_det_S": log_det_S}, method
 
         if data.ndim == 2:
             # SINGLE
@@ -115,7 +128,7 @@ class PenaltyHandler:
             has_null  = penalize_null_space and bool(rank < data.shape[0])
             method    = SqrtMethod.SINGLE_WITH_NULL if has_null else SqrtMethod.SINGLE
             log_det_S = jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
-            cache     = {"eig": eig, "U": U, "rank": rank, "log_det_S": log_det_S, "identifiability_fn": identifiability_fn}
+            cache     = {"eig": eig, "U": U, "rank": rank, "log_det_S": log_det_S}
             if method is SqrtMethod.SINGLE_WITH_NULL:
                 cache["rank_null"] = data.shape[0] - rank
             self._rho_len.append(1 + has_null)
@@ -131,28 +144,27 @@ class PenaltyHandler:
         U_keep   = U[:, keep]                 # (q, r)
         full_rank_S = U_keep.T[None] @ S @ U_keep[None]  # (k, r, r)
         self._rho_len.append(full_rank_S.shape[0])
-        return {"U_keep": U_keep, "full_rank_S": full_rank_S, "identifiability_fn": identifiability_fn}, SqrtMethod.GENERAL
+        return {"U_keep": U_keep, "full_rank_S": full_rank_S}, SqrtMethod.GENERAL
 
-    def _sqrt(self, method, cache, lams):
-        identifiability_fn = cache["identifiability_fn"]
+    def _sqrt(self, method, cache, lams, id_fn):
         match method:
             case SqrtMethod.SINGLE:
                 sqrt_d = jnp.sqrt(lams[0] * cache["eig"])
-                return sqrt_d[:, None] * identifiability_fn(cache["U"].T)  # (q, q)
+                return sqrt_d[:, None] * id_fn(cache["U"].T)  # (q, q)
 
             case SqrtMethod.SINGLE_WITH_NULL:
                 eig    = cache["eig"]
                 sqrt_d = jnp.where(eig > 0,
                                    jnp.sqrt(lams[0] * eig),
                                    jnp.sqrt(lams[1]))
-                return sqrt_d[:, None] * identifiability_fn(cache["U"].T) # (q, q)
+                return sqrt_d[:, None] * id_fn(cache["U"].T)  # (q, q)
 
             case SqrtMethod.KRONECKER:
                 combined = reduce(
                     jnp.add.outer,
                     [lam * eig for lam, eig in zip(lams, cache["eigs"])]
                 ).ravel()
-                return jnp.sqrt(combined)[:, None] * identifiability_fn(cache["kron_U"].T)        # (prod_q, prod_q)
+                return jnp.sqrt(combined)[:, None] * id_fn(cache["kron_U"].T)  # (prod_q, prod_q)
 
             case SqrtMethod.KRONECKER_WITH_NULL:
                 combined = reduce(
@@ -160,19 +172,19 @@ class PenaltyHandler:
                     [lam * eig for lam, eig in zip(lams[:-1], cache["eigs"])]
                 ).ravel()
                 sqrt_d = jnp.where(combined > 0, jnp.sqrt(combined), jnp.sqrt(lams[-1]))
-                return sqrt_d[:, None] * identifiability_fn(cache["kron_U"].T)                  # (prod_q, prod_q)
+                return sqrt_d[:, None] * id_fn(cache["kron_U"].T)  # (prod_q, prod_q)
 
             case SqrtMethod.GENERAL:
                 U_keep      = cache["U_keep"]           # (q, r)
                 full_rank_S = cache["full_rank_S"]      # (k, r, r) — formally full rank
                 S_i_out, Q_s = transform_slam_with_Q(full_rank_S, lams)
-                S_full = jnp.einsum('i,ijk->jk', lams, S_i_out)      # (r, r) stable
+                S_full = jnp.einsum('i,ijk->jk', lams, S_i_out)  # (r, r) stable
                 S_full = 0.5 * (S_full + S_full.T)
                 ev, U   = jnp.linalg.eigh(S_full)
                 safe_ev = jnp.where(ev > 0, ev, 1.0)
                 sqrt_d  = jnp.where(ev > 0, jnp.sqrt(safe_ev), 0.0)
-                B_rot   = sqrt_d[:, None] * U.T         # (r, r) — sqrt in rotated basis
-                return (B_rot @ Q_s.T) @ identifiability_fn(U_keep.T)    # (r, q) — back to original basis
+                B_rot   = sqrt_d[:, None] * U.T          # (r, r) — sqrt in rotated basis
+                return (B_rot @ Q_s.T) @ id_fn(U_keep.T) # (r, q) — back to original basis
 
             case _:
                 raise NotImplementedError(f"_sqrt not implemented for {method}.")
@@ -180,9 +192,21 @@ class PenaltyHandler:
     def compute_sqrt(self, rhos: list[jnp.ndarray]) -> jnp.ndarray:
         lams = jax.tree_util.tree_map(self._non_linearity, rhos)
         out = [None] * self._n_penalties
-        for (method, _), members in self._groups.items():
-            for idx in members:
-                out[idx] = self._sqrt(method, self._cache[idx], lams[idx])
+        for (method, _, id_fn), members in self._groups.items():
+            if len(members) == 1:
+                idx = members[0]
+                out[idx] = self._sqrt(method, self._cache[idx], lams[idx], id_fn)
+            else:
+                # All members share method, shape, and id_fn → batch with vmap.
+                batched_cache = jax.tree_util.tree_map(
+                    lambda *a: jnp.stack(a), *[self._cache[i] for i in members]
+                )
+                batched_lams = jnp.stack([lams[i] for i in members])
+                batched_out = jax.vmap(
+                    lambda c, l: self._sqrt(method, c, l, id_fn)
+                )(batched_cache, batched_lams)
+                for k, idx in enumerate(members):
+                    out[idx] = batched_out[k]
         return block_diag(*out)
 
     def __len__(self):
