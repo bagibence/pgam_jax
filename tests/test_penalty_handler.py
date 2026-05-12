@@ -529,3 +529,94 @@ class TestLogDetAndGrad:
             ld, g = ph.compute_log_det_and_grad([rho])
             np.testing.assert_allclose(float(lds_g[k]), float(ld[0]), atol=ATOL)
             np.testing.assert_allclose(np.array(gs_g[k]), np.array(g[0]), atol=ATOL)
+
+
+# ---------------------------------------------------------------------------
+# build() — pre-built closures
+# ---------------------------------------------------------------------------
+
+class TestBuild:
+    """build() returns callables equivalent to compute_sqrt / compute_log_det_and_grad."""
+
+    def _make_mixed_ph(self, S1, S_kron):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False)
+        ph.add(S1, penalize_null_space=True)
+        ph.add_kron([S1, S1], penalize_null_space=False)
+        ph.add_kron([S1, S1], penalize_null_space=True)
+        ph.add(S_kron)
+        return ph
+
+    def _mixed_rhos(self):
+        return [
+            jnp.array([0.5]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([0.5, -0.5, 0.0]),
+            jnp.array([0.5, -0.5]),
+        ]
+
+    def test_compute_sqrt_matches_method(self, S1, S_kron):
+        ph = self._make_mixed_ph(S1, S_kron)
+        rhos = self._mixed_rhos()
+        compute_sqrt, _ = ph.build()
+        B_built = compute_sqrt(rhos)
+        B_method = ph.compute_sqrt(rhos)
+        np.testing.assert_allclose(
+            np.array(B_built.T @ B_built), np.array(B_method.T @ B_method), atol=ATOL
+        )
+
+    def test_compute_log_det_matches_method(self, S1, S_kron):
+        ph = self._make_mixed_ph(S1, S_kron)
+        rhos = self._mixed_rhos()
+        _, compute_ld = ph.build()
+        lds_built, gs_built = compute_ld(rhos)
+        lds_method, gs_method = ph.compute_log_det_and_grad(rhos)
+        for ld_b, ld_m in zip(lds_built, lds_method):
+            np.testing.assert_allclose(float(ld_b), float(ld_m), atol=ATOL)
+        for g_b, g_m in zip(gs_built, gs_method):
+            np.testing.assert_allclose(np.array(g_b), np.array(g_m), atol=ATOL)
+
+    def test_compute_sqrt_jittable(self, S1, S_kron):
+        ph = self._make_mixed_ph(S1, S_kron)
+        rhos = self._mixed_rhos()
+        compute_sqrt, _ = ph.build()
+        B_eager = compute_sqrt(rhos)
+        B_jit = jax.jit(compute_sqrt)(rhos)
+        np.testing.assert_allclose(
+            np.array(B_jit.T @ B_jit), np.array(B_eager.T @ B_eager), atol=ATOL
+        )
+
+    def test_compute_log_det_jittable(self, S1, S_kron):
+        ph = self._make_mixed_ph(S1, S_kron)
+        rhos = self._mixed_rhos()
+        _, compute_ld = ph.build()
+        lds_e, gs_e = compute_ld(rhos)
+        lds_j, gs_j = jax.jit(compute_ld)(rhos)
+        for ld_e, ld_j in zip(lds_e, lds_j):
+            np.testing.assert_allclose(float(ld_j), float(ld_e), atol=ATOL)
+        for g_e, g_j in zip(gs_e, gs_j):
+            np.testing.assert_allclose(np.array(g_j), np.array(g_e), atol=ATOL)
+
+    def test_vmap_group_sqrt_matches_singleton(self, S1):
+        """build() vmap path matches per-singleton results."""
+        rho_a, rho_b = jnp.array([0.5]), jnp.array([-0.3])
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False)
+        ph.add(S1, penalize_null_space=False)
+        compute_sqrt, _ = ph.build()
+        B_full = compute_sqrt([rho_a, rho_b])
+        q = S1.shape[0]
+        B0 = B_full[:q, :q]
+        B1 = B_full[q:, q:]
+
+        ph0 = PenaltyHandler()
+        ph0.add(S1, penalize_null_space=False)
+        ph1 = PenaltyHandler()
+        ph1.add(S1, penalize_null_space=False)
+        np.testing.assert_allclose(
+            np.array(B0.T @ B0), np.array(ph0.compute_sqrt([rho_a]).T @ ph0.compute_sqrt([rho_a])), atol=ATOL
+        )
+        np.testing.assert_allclose(
+            np.array(B1.T @ B1), np.array(ph1.compute_sqrt([rho_b]).T @ ph1.compute_sqrt([rho_b])), atol=ATOL
+        )

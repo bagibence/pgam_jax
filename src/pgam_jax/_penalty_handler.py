@@ -306,6 +306,82 @@ class PenaltyHandler:
                     out[idx] = batched_out[k]
         return block_diag(*out)
 
+    def build(self) -> tuple:
+        """
+        Snapshot the handler into two pure callables.
+
+        Returns
+        -------
+        compute_sqrt : callable
+            ``compute_sqrt(rhos) -> (total_pen_rows, n_params)`` block-diagonal matrix.
+        compute_log_det_and_grad : callable
+            ``compute_log_det_and_grad(rhos) -> (list[scalar], list[array])``
+        """
+        n = self._n_penalties
+        nl = self._non_linearity
+        caches = list(self._cache)
+        _sqrt_fn = self._sqrt
+        _ld_fn = self._log_det_and_grad
+
+        group_data = []
+        for (method, _shape, id_fn), members in self._groups.items():
+            if len(members) == 1:
+                group_data.append({
+                    "singleton": True,
+                    "method": method,
+                    "id_fn": id_fn,
+                    "idx": members[0],
+                    "cache": caches[members[0]],
+                })
+            else:
+                stacked = jax.tree_util.tree_map(
+                    lambda *a: jnp.stack(a), *[caches[i] for i in members]
+                )
+                group_data.append({
+                    "singleton": False,
+                    "method": method,
+                    "id_fn": id_fn,
+                    "members": members,
+                    "stacked_cache": stacked,
+                    "vmapped_sqrt": jax.vmap(
+                        lambda c, l, _m=method, _f=id_fn: _sqrt_fn(_m, c, l, _f)
+                    ),
+                    "vmapped_ld": jax.vmap(
+                        lambda c, r, _m=method: _ld_fn(_m, c, r)
+                    ),
+                })
+
+        def compute_sqrt(rhos):
+            lams = [nl(r) for r in rhos]
+            out = [None] * n
+            for g in group_data:
+                if g["singleton"]:
+                    out[g["idx"]] = _sqrt_fn(g["method"], g["cache"], lams[g["idx"]], g["id_fn"])
+                else:
+                    batched_lams = jnp.stack([lams[i] for i in g["members"]])
+                    batched_out = g["vmapped_sqrt"](g["stacked_cache"], batched_lams)
+                    for k, idx in enumerate(g["members"]):
+                        out[idx] = batched_out[k]
+            return block_diag(*out)
+
+        def compute_log_det_and_grad(rhos):
+            log_dets = [None] * n
+            grads = [None] * n
+            for g in group_data:
+                if g["singleton"]:
+                    ld, gr = _ld_fn(g["method"], g["cache"], rhos[g["idx"]])
+                    log_dets[g["idx"]] = ld
+                    grads[g["idx"]] = gr
+                else:
+                    batched_rhos = jnp.stack([rhos[i] for i in g["members"]])
+                    batched_ld, batched_g = g["vmapped_ld"](g["stacked_cache"], batched_rhos)
+                    for k, idx in enumerate(g["members"]):
+                        log_dets[idx] = batched_ld[k]
+                        grads[idx] = batched_g[k]
+            return log_dets, grads
+
+        return compute_sqrt, compute_log_det_and_grad
+
     def __len__(self):
         return self._n_penalties
 

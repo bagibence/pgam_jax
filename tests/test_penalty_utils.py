@@ -145,7 +145,7 @@ def test_one_dim_bspline_der_2_penalty_tensor(one_dim_bspline_penalty):
     bspline_params = one_dim_bspline_penalty["bspline_params"]
     n_basis = bspline_params["knots"].shape[0] - bspline_params["order"]
     bas = BSplineEval(n_basis, order=bspline_params["order"])
-    pen_tensor = penalty_utils.compute_energy_penalty_tensor_additive_component(bas)
+    pen_tensor, _ = penalty_utils.compute_energy_penalty_tensor_additive_component(bas)
     assert np.allclose(pen_tensor[0], one_dim_bspline_penalty["energy_penalty"])
     assert np.allclose(pen_tensor[1], one_dim_bspline_penalty["null_space_penalty"])
 
@@ -154,7 +154,7 @@ def test_one_dim_bspline_der_2_agumented(one_dim_bspline_penalty):
     bspline_params = one_dim_bspline_penalty["bspline_params"]
     n_basis = bspline_params["knots"].shape[0] - bspline_params["order"]
     bas = BSplineEval(n_basis, order=bspline_params["order"])
-    pen_list = penalty_utils.compute_energy_penalty_tensor(bas)
+    pen_list, _ = penalty_utils.compute_energy_penalty_tensor(bas)
 
     # the first col of agumented pen in original gam was a column of 0s
     # since the intercept term was treated as a column of 1s in
