@@ -6,7 +6,7 @@ from typing import Callable
 from functools import reduce
 
 from ._slam_compute import transform_slam_with_Q
-
+from jax.scipy.linalg import block_diag
 
 class SqrtMethod(enum.Enum):
     SINGLE = 0
@@ -174,10 +174,10 @@ class PenaltyHandler:
             case _:
                 raise NotImplementedError(f"_sqrt not implemented for {method}.")
 
-    def compute_sqrt(self, rhos) -> list:
+    def compute_sqrt(self, rhos) -> jnp.ndarray:
         lams = jax.tree_util.tree_map(self._non_linearity, rhos)
         out = [None] * self._n_penalties
         for (method, _), members in self._groups.items():
             for idx in members:
                 out[idx] = self._sqrt(method, self._cache[idx], lams[idx])
-        return out
+        return block_diag(*out)
