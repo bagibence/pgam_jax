@@ -277,10 +277,9 @@ class GAM:
 
         Delegatest to ``compute_energy_penalty_tensor``.
         """
-        penalty_tree, _ = compute_energy_penalty_tensor(
+        return compute_energy_penalty_tensor(
             self.basis, self.n_simpson_sample, penalize_null_space=True
         )
-        return penalty_tree
 
     def _compute_uncentered_design_matrix(
         self,

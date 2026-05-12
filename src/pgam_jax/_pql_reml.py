@@ -17,7 +17,6 @@ from ._pql_gcv import FLOAT_EPS, _vmap_where, _vmap_symm_mult, _vmap_trace
 )
 def _compute_reml_and_states(
     regularization_strength: Any,
-    penalty_tree: Any,
     X: NDArray,
     Q: NDArray,
     R: NDArray,
@@ -203,7 +202,6 @@ def reml_compute_factory(
     ):
         return _compute_reml_and_states(
             regularization_strength,
-            penalty_tree,
             X, Q, R, y,
             compute_log_det_and_grad=compute_log_det_and_grad,
             compute_sqrt=compute_sqrt,
@@ -213,7 +211,6 @@ def reml_compute_factory(
         reml_val, RSS_reml, log_det_XtXpSl, y1, s_inv, V_T, log_det_sl_grads, n_obs = (
             _compute_reml_and_states(
                 regularization_strength,
-                penalty_tree,
                 X, Q, R, y,
                 compute_log_det_and_grad=compute_log_det_and_grad,
                 compute_sqrt=compute_sqrt,

@@ -1,4 +1,3 @@
-import enum
 import math
 from collections.abc import Callable
 from functools import partial
@@ -12,80 +11,6 @@ from nemos.tree_utils import pytree_map_and_reduce
 from scipy import sparse
 
 from .config import config
-
-
-class SqrtMethod(enum.Enum):
-    SINGLE = "single"
-    ORTHOGONAL = "orthogonal"
-    KRONECKER = "kronecker"
-    KRONECKER_WITH_NULL = "kronecker_with_null"
-    GENERAL = "general"
-
-
-def sym_sqrt(S):
-    """
-    Symmetric square root via eigh, masking near-zero eigenvalues.
-
-    Safe for penalty matrices whose null space is algebraically determined
-    (e.g. 2nd-derivative penalties).  The threshold eps^0.7 * max_eig is
-    calibrated for the active float precision; with float64 the safe
-    eigenvalue ratio is ~1e10.
-
-    Parameters
-    ----------
-    S :
-        Symmetric positive-semidefinite matrix, shape (q, q).
-
-    Returns
-    -------
-    B :
-        Shape (q, q). B.T @ B = S up to the null space; zero rows for null modes.
-    rank :
-        Number of positive eigenvalues.
-    log_det_S :
-        log|S|_+.
-    """
-    S = 0.5 * (S + S.T)
-    eig, U = jnp.linalg.eigh(S)
-    thresh = jnp.finfo(float).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
-    pos = eig > thresh
-    rank = jnp.sum(pos)
-    log_det_S = jnp.sum(jnp.where(pos, jnp.log(jnp.where(pos, eig, 1.0)), 0.0))
-    sqrt_eig = jnp.where(pos, jnp.sqrt(jnp.maximum(eig, 0.0)), 0.0)
-    B = (U * sqrt_eig).T
-    return B, rank, log_det_S
-
-
-def _precompute_single(penalty_tensor):
-    B, rank, log_det_S = sym_sqrt(penalty_tensor[0])
-    return {"B": B, "rank": rank, "log_det_S": log_det_S}
-
-
-def _make_single_fns(precomputed, apply_id, positive_mon_func):
-    """
-    Build SINGLE-case sqrt and sqrt+logdet callables.
-
-    Returns
-    -------
-    sqrt_fn :
-        rho (1,) -> B_scaled
-    sqrt_logdet_fn :
-        rho (1,) -> (B_scaled, log_det, grad)
-    """
-    B_pre = precomputed["B"]
-    rank = precomputed["rank"]
-    log_det_S = precomputed["log_det_S"]
-
-    def sqrt_fn(rho):
-        return apply_id(jnp.sqrt(positive_mon_func(rho[0])) * B_pre)
-
-    def sqrt_logdet_fn(rho):
-        B_scaled = apply_id(jnp.sqrt(positive_mon_func(rho[0])) * B_pre)
-        log_det = rank * rho[0] + log_det_S
-        grad = jnp.array([rank], dtype=float)
-        return B_scaled, log_det, grad
-
-    return sqrt_fn, sqrt_logdet_fn
 
 
 def symmetric_sqrt(symmetric_matrix):
@@ -531,9 +456,9 @@ def compute_energy_penalty_tensor_additive_component(
     basis_component: BSplineEval | MultiplicativeBasis,
     n_samples: int = 10**4,
     penalize_null_space: bool = True,
-) -> tuple[jnp.ndarray, SqrtMethod]:
+) -> jnp.ndarray:
     r"""
-    Define a penalty tensor for an additive component and label its structure.
+    Define a penalty tensor for an additive component.
 
     Parameters
     ----------
@@ -542,14 +467,13 @@ def compute_energy_penalty_tensor_additive_component(
     n_samples:
         Number of samples for the numerical approximation of the integral.
     penalize_null_space:
-        If True, append a penalty on the null space of the derivative penalty.
+        Boolean, if true penalize the null space of every energy penalty component.
+
 
     Returns
     -------
     tensor :
         Shape (M, q, q).
-    method :
-        SqrtMethod label describing the algebraic structure of this block.
 
     Notes
     -----
@@ -577,29 +501,32 @@ def compute_energy_penalty_tensor_additive_component(
         for b in basis_component._iterate_over_components()
     )
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)
-    has_null = False
     if penalize_null_space:
+        # In GAMs one penalizes the null space of a linear combinations of positive-semidefinite
+        # matrices with positive coefficients (a convex cone). The null space of any matrix in the interior
+        # of the cone is the intersection of the null space of individual matrix.
+        # Example, take two positive-semidef matrices A, B and positive constant a,b>0, then
+        # 0 = v.T * (a * A + b * B) v = a * (v.T * A * v) + b * (v.T * B * v) which is true iif
+        # (v.T * A * v) = (v.T * B * v) = 0, since A and B are positive semidef. I.e. v is in null(A) intersect
+        # null(B). For this reason we can compute the null-space of the sum of the penality matrices and penalize that.
+        # In the original code the sum was used, however, the mean is more stable when summing many matrices.
         null_pen = compute_penalty_null_space(out)
-        if ~np.all(null_pen == 0):
-            out = jnp.concatenate((out, null_pen[None]), axis=0)
-            has_null = True
-        # if null_pen is zero there is nothing to penalize, skip silently
-
-    if isinstance(basis_component, MultiplicativeBasis):
-        method = SqrtMethod.KRONECKER_WITH_NULL if has_null else SqrtMethod.KRONECKER
-    else:
-        method = SqrtMethod.ORTHOGONAL if has_null else SqrtMethod.SINGLE
-
-    return out, method
+        full_rank = (
+            null_pen[None]
+            if ~np.all(null_pen == 0)
+            else jnp.zeros((0, *null_pen.shape))
+        )
+        out = jnp.concatenate((out, full_rank), axis=0)
+    return out
 
 
 def compute_energy_penalty_tensor(
     basis: BSplineEval | MultiplicativeBasis | AdditiveBasis,
     n_sample: int = 10**4,
     penalize_null_space: bool = True,
-) -> tuple[list[jnp.ndarray], list[SqrtMethod]]:
+) -> list[jnp.ndarray]:
     """
-    Create a labeled penalty tensor for each additive component.
+    Create an energy penalty for each additive component.
 
     Parameters
     ----------
@@ -608,22 +535,19 @@ def compute_energy_penalty_tensor(
     n_sample:
         Number of samples for the numerical approximation of the integral.
     penalize_null_space:
-        If True, append a null-space penalty for each component.
+        Boolean, if true penalize the null space of every energy penalty component.
 
     Returns
     -------
     penalty_tree :
         List of (M_i, q_i, q_i) tensors, one per additive component.
-    sqrt_methods :
-        Parallel list of SqrtMethod labels, one per additive component.
     """
-    results = [
+    return [
         compute_energy_penalty_tensor_additive_component(
             bas, n_sample, penalize_null_space=penalize_null_space
         )
         for bas in basis
     ]
-    return [t for t, _ in results], [m for _, m in results]
 
 
 def compute_penalty_agumented_from_basis(
@@ -664,7 +588,7 @@ def compute_penalty_agumented_from_basis(
     Block-diagonal penalization matrix.
 
     """
-    penalty_tree, _ = compute_energy_penalty_tensor(
+    penalty_tree = compute_energy_penalty_tensor(
         basis, n_samples, penalize_null_space=penalize_null_space
     )
     return tree_compute_sqrt_penalty(
