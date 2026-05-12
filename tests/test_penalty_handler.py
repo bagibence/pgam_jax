@@ -14,7 +14,7 @@ from pgam_jax.penalty_utils import (
 
 jax.config.update("jax_enable_x64", True)
 
-ATOL = 1e-9
+ATOL = 1e-12
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ class TestSINGLE:
         ph_id.add(S1, penalize_null_space=False, identifiability_fn=lambda x: x[..., :-1])
         B_id = ph_id.compute_sqrt([jnp.array([1.0])])
 
-        np.testing.assert_allclose(np.array(B_id), np.array(B_full[:, :-1]), atol=1e-12)
+        np.testing.assert_allclose(np.array(B_id), np.array(B_full[:, :-1]), atol=ATOL)
 
 
 # ---------------------------------------------------------------------------
