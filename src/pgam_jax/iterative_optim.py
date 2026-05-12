@@ -180,7 +180,7 @@ def pql_outer_iteration(
     obs_model,
     variance_func,
     inner_func,
-    compute_sqrt_penalty,
+    compute_sqrt,
     fisher_scoring=False,
     max_iter=100,
     tol_optim=10**-10,
@@ -284,12 +284,10 @@ def pql_outer_iteration(
     i = 0
     old_inner_score = None
     for i in range(max_iter):
-        # identifiability constraint drops column by default
-        sqrt_penalty = compute_sqrt_penalty(
-            penalty_tree,
-            reg_strength,
-            prepend_zeros_for_intercept=True,
-        )
+        sqrt_penalty = compute_sqrt(reg_strength)
+
+        # add a zero corresponding to not-penalizing the intercept
+        sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
 
         # TODO: Lift this out into an initialization step?
         # initialize coefficients by fitting a GLM

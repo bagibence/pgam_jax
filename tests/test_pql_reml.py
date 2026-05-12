@@ -15,14 +15,29 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pql_reml import reml_compute_factory
+from nemos.inverse_link_function_utils import identity as _identity
 
 DATA_DIR = Path(__file__).parent / "data"
 
 
-# module-level identity — stable object identity for JIT static-arg caching
-def _identity(x):
-    return x
+def _build_ph_and_factory(penalty_tree):
+    """Construct PenaltyHandler from a list of (k, q, q) tensors and return reml_fn."""
+    n_smooths = len(penalty_tree)
+    ph = PenaltyHandler(non_linearity=jnp.exp)
+    for S in penalty_tree:
+        ph.add(S, penalize_null_space=False, identifiability_fn=_identity)
+    compute_sqrt, compute_log_det_and_grad = ph.build()
+
+    id_fns = tuple(_identity for _ in range(n_smooths))
+    return reml_compute_factory(
+        compute_sqrt=compute_sqrt,
+        compute_log_det_and_grad=compute_log_det_and_grad,
+        positive_mon_func=jnp.exp,
+        apply_identifiability_columns=id_fns,
+        apply_identifiability=id_fns,
+    ), compute_sqrt, compute_log_det_and_grad
 
 
 def _load_and_run(filename):
@@ -36,13 +51,7 @@ def _load_and_run(filename):
     penalty_tree = [jnp.array(b["S"]) for b in data["penalty_blocks"]]
     reg_strength = [jnp.array(b["rho"]) for b in data["penalty_blocks"]]
 
-    n_smooths = len(penalty_tree)
-    reml_fn = reml_compute_factory(
-        penalty_tree=penalty_tree,
-        positive_mon_func=jnp.exp,
-        apply_identifiability_columns=tuple(_identity for _ in range(n_smooths)),
-        apply_identifiability=tuple(_identity for _ in range(n_smooths)),
-    )
+    reml_fn, _, _ = _build_ph_and_factory(penalty_tree)
 
     f, g_tree = jax.value_and_grad(reml_fn)(
         reg_strength,
@@ -88,13 +97,7 @@ def _load_inputs(filename):
     penalty_tree = [jnp.array(b["S"]) for b in data["penalty_blocks"]]
     reg_strength = [jnp.array(b["rho"]) for b in data["penalty_blocks"]]
 
-    n_smooths = len(penalty_tree)
-    reml_fn = reml_compute_factory(
-        penalty_tree=penalty_tree,
-        positive_mon_func=jnp.exp,
-        apply_identifiability_columns=tuple(_identity for _ in range(n_smooths)),
-        apply_identifiability=tuple(_identity for _ in range(n_smooths)),
-    )
+    reml_fn, _, _ = _build_ph_and_factory(penalty_tree)
     return reml_fn, reg_strength, penalty_tree, sqrt_w_X, Q, R, sqrt_w_y
 
 

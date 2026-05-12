@@ -16,7 +16,7 @@ _vmap_where = jax.vmap(jnp.where, (None, None, 0), out_axes=0)
 
 
 @partial(
-    jax.jit, static_argnames=("positive_mon_func", "apply_identifiability", "gamma")
+    jax.jit, static_argnames=("compute_sqrt", "gamma")
 )
 def _compute_gcv_and_states(
     regularization_strength: Any,
@@ -25,19 +25,13 @@ def _compute_gcv_and_states(
     Q: NDArray,
     R: NDArray,
     y: NDArray,
-    positive_mon_func: Callable[[jnp.ndarray], jnp.ndarray] = jnp.exp,
-    apply_identifiability: Callable | None = None,
+    compute_sqrt: Callable,
     gamma=1.5,
 ):
-    # identifiability constraint drops column by default
-    sqrt_penalty = penalty_utils.tree_compute_sqrt_penalty(
-        penalty_tree,
-        regularization_strength,
-        shift_by=0,
-        positive_mon_func=positive_mon_func,
-        apply_identifiability=apply_identifiability,
-        prepend_zeros_for_intercept=True,
-    )
+    sqrt_penalty = compute_sqrt(regularization_strength)
+
+    # add a zero corresponding to not-penalizing the intercept
+    sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
 
     n_obs = X.shape[0]
     U, s, V_T = jnp.linalg.svd(jnp.vstack((R, sqrt_penalty)), full_matrices=False)
@@ -128,7 +122,7 @@ def _gcv_grad_compute_from_states(
 
 
 def gcv_compute_factory(
-    positive_mon_func, apply_identifiability_columns, apply_identifiability, gamma
+    compute_sqrt, positive_mon_func, apply_identifiability_columns, apply_identifiability, gamma
 ):
     @jax.custom_vjp
     def _gcv_compute(
@@ -139,30 +133,6 @@ def gcv_compute_factory(
         R: NDArray,
         y: NDArray,
     ):
-        """
-        Compute the Generalized Cross-validation score.
-
-        Parameters
-        ----------
-        regularization_strength:
-            Pytree containing the current penalization strengths
-        penalty_tree:
-            Pytree with the same struct as regularization_strength, containing the penalization matrices.
-        X:
-            Predictors
-        Q:
-            Q matrix of the QR decomposition of `np.vstack((X, penalty))`
-        R:
-            R matrix of the QR decomposition of `np.vstack((X, penalty))`
-        y:
-            Neural activity
-
-        Returns
-        -------
-        :
-            The GCV score
-
-        """
         gcv = _compute_gcv_and_states(
             regularization_strength,
             penalty_tree,
@@ -170,8 +140,7 @@ def gcv_compute_factory(
             Q,
             R,
             y,
-            positive_mon_func=positive_mon_func,
-            apply_identifiability=apply_identifiability_columns,
+            compute_sqrt=compute_sqrt,
             gamma=gamma,
         )[0]
         return gcv
@@ -184,7 +153,6 @@ def gcv_compute_factory(
         R,
         y,
     ):
-        # Compute and return GCV + intermediates for backward
         gcv, alpha, delta, n_obs, U1, V_T, Q_, trA, Ay, s_inv, square_s_inv = (
             _compute_gcv_and_states(
                 regularization_strength,
@@ -193,8 +161,7 @@ def gcv_compute_factory(
                 Q,
                 R,
                 y,
-                positive_mon_func=positive_mon_func,
-                apply_identifiability=apply_identifiability_columns,
+                compute_sqrt=compute_sqrt,
                 gamma=gamma,
             )
         )

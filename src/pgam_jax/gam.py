@@ -16,6 +16,8 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
+
+from ._penalty_handler import PenaltyHandler, _drop_last_col
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
 from .iterative_optim import (
@@ -23,7 +25,8 @@ from .iterative_optim import (
     model_constructors_for_weights_and_pseudo_data,
     pql_outer_iteration,
 )
-from .penalty_utils import compute_energy_penalty_tensor, tree_compute_sqrt_penalty
+from .penalty_utils import compute_energy_penalty_tensor
+from nemos.inverse_link_function_utils import identity as _id_no_drop
 
 
 # TODO: Should any other observation model be supported?
@@ -245,33 +248,23 @@ class GAM:
 
         return (coef, intercept)
 
-    # TODO: Move these into a WiggleRegularizer class or something?
-    def _compute_sqrt_penalty(
-        self,
-        penalty_tree: list[jnp.ndarray],
-        regularizer_strength: list[jnp.ndarray],
-        prepend_zeros_for_intercept: bool = False,
-    ):
-        """
-        Compute the square-root of the penalty matrix.
+    def _build_penalty_handler(self, penalty_tree: list) -> PenaltyHandler:
+        """Construct a PenaltyHandler from the penalty tensor list."""
+        ph = PenaltyHandler(non_linearity=self._positive_mon_func_for_lambda)
+        id_fns = [
+            _drop_last_col if _should_drop_basis_col(b, self.drop_conv_basis_col) else _id_no_drop
+            for b in self.basis
+        ]
+        for S_tensor, id_fn in zip(penalty_tree, id_fns):
+            # null-space penalty already incorporated into S_tensor by compute_energy_penalty_tensor
+            ph.add(S_tensor, penalize_null_space=False, identifiability_fn=id_fn)
+        return ph
 
-        Passed to ``pql_outer_iteration``.
-        Delegates to ``tree_compute_sqrt_penalty`` with identifiability constraints
-        (drops last column/row per smooth) and the exp parameterization for lambda.
-        """
-        return tree_compute_sqrt_penalty(
-            penalty_tree,
-            regularizer_strength,
-            shift_by=0,
-            positive_mon_func=self._positive_mon_func_for_lambda,
-            apply_identifiability=self._apply_identifiability_column,
-            prepend_zeros_for_intercept=prepend_zeros_for_intercept,
-        )
-
-    def _make_inner_func(self, penalty_tree):
+    def _make_inner_func(self, penalty_tree, compute_sqrt, compute_log_det_and_grad):
         """Build the smoothing-parameter objective for the current ``method``."""
         if self.method == "gcv":
             return gcv_compute_factory(
+                compute_sqrt,
                 self._positive_mon_func_for_lambda,
                 self._apply_identifiability_column,
                 self._apply_identifiability_square,
@@ -279,7 +272,8 @@ class GAM:
             )
         if self.method == "reml":
             return reml_compute_factory(
-                penalty_tree,
+                compute_sqrt,
+                compute_log_det_and_grad,
                 self._positive_mon_func_for_lambda,
                 self._apply_identifiability_column,
                 self._apply_identifiability_square,
@@ -366,7 +360,7 @@ class GAM:
         y: jnp.ndarray,
         params: tuple[jnp.ndarray, jnp.ndarray],
         regularizer_strength: list[jnp.ndarray],
-        penalty_tree: list[jnp.ndarray],
+        compute_sqrt,
         rtol: float = 1e-8,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
@@ -409,11 +403,9 @@ class GAM:
         Xw = X_full * jnp.sqrt(weights)[:, None]
         R = jnp.linalg.qr(Xw, mode="r")
 
-        # B^T B = S_lambda
-        sqrt_penalty = self._compute_sqrt_penalty(
-            penalty_tree,
-            regularizer_strength,
-            prepend_zeros_for_intercept=True,
+        sqrt_penalty = compute_sqrt(regularizer_strength)
+        sqrt_penalty = jnp.column_stack(
+            (jnp.zeros(sqrt_penalty.shape[0]), sqrt_penalty)
         )
 
         # SVD of A = [R; B],  A^T A = X^T W X + S_lambda
@@ -506,6 +498,9 @@ class GAM:
         penalty_tree = self._get_penalty_tree()
         y = jnp.asarray(y)
 
+        ph = self._build_penalty_handler(penalty_tree)
+        compute_sqrt, compute_log_det_and_grad = ph.build()
+
         # TODO: Pull out the GLM initialization here?
         if init_params is None:
             init_params = self.initialize_params(X, y)
@@ -521,8 +516,8 @@ class GAM:
             penalty_tree,
             self.observation_model,
             self.variance_function,
-            self._make_inner_func(penalty_tree),
-            self._compute_sqrt_penalty,
+            self._make_inner_func(penalty_tree, compute_sqrt, compute_log_det_and_grad),
+            compute_sqrt,
             fisher_scoring=False,  # use observed information, not expected
             max_iter=self.maxiter,
             tol_update=self.tol_update,  # convergence tolerance for coefficient updates
@@ -539,7 +534,7 @@ class GAM:
             y,
             opt_coef,
             opt_pen,
-            penalty_tree,
+            compute_sqrt,
         )
         self.dof_resid_ = X.shape[0] - self.edf_
 

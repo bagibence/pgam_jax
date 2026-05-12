@@ -45,7 +45,7 @@ def _symmetric_sqrt_numpy(symmetric_matrix):
 @jax.jit
 def _symmetric_sqrt_jax(symmetric_matrix):
     """
-    Compute the square root of a symmetric matrix, truncating eigenvalues at float32 precision.
+    Compute the square root of a symmetric matrix.
 
     Parameters
     ----------
@@ -55,22 +55,15 @@ def _symmetric_sqrt_jax(symmetric_matrix):
     Returns
     -------
     :
-        The square root of the input matrix.
+        B of shape (N, N) such that B.T @ B = symmetric_matrix.
+        Rows corresponding to null-space modes are zero.
     """
     eig, U = jnp.linalg.eigh(symmetric_matrix)
-    sort_col = jnp.argsort(eig)
-    eig = eig[sort_col]
-    U = U[:, sort_col]
-
-    # matrix is sym should be positive
-    # numerical error can make some value small and negative, so pass through an abs.
+    # numerical noise can produce small negatives; abs before masking
     eig = jnp.abs(eig)
-
-    # crop the eig that are small relative to max
-    eig = eig * (eig > jnp.finfo(jnp.float32).eps * eig.max())
-    # compute the sqrt
-    Bx = U * jnp.sqrt(eig)
-    return Bx[:, ::-1].T
+    # mask eigenvalues below sqrt(eps_f64) * max — uses active float precision
+    eig = eig * (eig > jnp.finfo(float).eps ** 0.5 * eig.max())
+    return (U * jnp.sqrt(eig)).T
 
 
 def compute_start_block(tree_penalty: Any, shift_by=0):
@@ -330,7 +323,7 @@ def compute_penalty_null_space_jax(penalty):
     :
         Null space projection matrix of shape (K, K).
     """
-    penalty = penalty.mean(axis=0)
+    penalty = (penalty / jnp.sum(penalty**2, axis=(1, 2), keepdims=True)).mean(axis=0)
     eig, U = jnp.linalg.eigh(penalty)
     zero_idx = jnp.abs(eig) < jnp.finfo(float).eps * jnp.max(eig)
     U = U[:, zero_idx]
@@ -496,6 +489,8 @@ def compute_energy_penalty_tensor_additive_component(
 
     Returns
     -------
+    tensor :
+        Shape (M, q, q).
 
     Notes
     -----
@@ -504,6 +499,16 @@ def compute_energy_penalty_tensor_additive_component(
     - For 2-dimensional predictors, it adds a penalty to ..math:`a + b \cdot x + c \cdot y + d \cdot xy`.
 
     """
+    if isinstance(basis_component, MultiplicativeBasis):
+        components = list(basis_component._iterate_over_components())
+        bad = [c for c in components if c._n_inputs != 1]
+        if bad:
+            raise ValueError(
+                f"MultiplicativeBasis contains {len(bad)} factor(s) with _n_inputs != 1 "
+                f"({[type(c).__name__ for c in bad]}). "
+                "The Kronecker stable sqrt requires every factor to be a 1-D basis."
+            )
+
     one_dim_pen = (
         compute_energy_penalty(
             n_samples,
@@ -551,8 +556,8 @@ def compute_energy_penalty_tensor(
 
     Returns
     -------
-        A list with the penalty tensors for each component.
-
+    penalty_tree :
+        List of (M_i, q_i, q_i) tensors, one per additive component.
     """
     return [
         compute_energy_penalty_tensor_additive_component(
