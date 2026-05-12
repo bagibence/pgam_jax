@@ -44,23 +44,29 @@ def _load_and_run(filename):
     data = json.loads((DATA_DIR / filename).read_text())
 
     sqrt_w_X = jnp.array(data["sqrt_w_X"])
-    Q        = jnp.array(data["Q"])
-    R        = jnp.array(data["R"])
+    Q = jnp.array(data["Q"])
+    R = jnp.array(data["R"])
     sqrt_w_y = jnp.array(data["sqrt_w_y"])
 
-    penalty_tree = [jnp.array(b["S"])   for b in data["penalty_blocks"]]
+    penalty_tree = [jnp.array(b["S"]) for b in data["penalty_blocks"]]
     reg_strength = [jnp.array(b["rho"]) for b in data["penalty_blocks"]]
 
     reml_fn, _, _ = _build_ph_and_factory(penalty_tree)
 
     f, g_tree = jax.value_and_grad(reml_fn)(
-        reg_strength, penalty_tree, sqrt_w_X, Q, R, sqrt_w_y,
+        reg_strength,
+        penalty_tree,
+        sqrt_w_X,
+        Q,
+        R,
+        sqrt_w_y,
     )
     g_flat = np.concatenate([np.array(g) for g in g_tree])
     return float(f), g_flat, data["reml_val"], np.array(data["reml_grad"])
 
 
 # ---------------------------------------------------------------------------
+
 
 def test_reml_1d_smooths():
     f_jax, g_jax, f_ref, g_ref = _load_and_run("reml_1d_smooths.json")
@@ -78,16 +84,17 @@ def test_reml_1d_and_2d_smooth():
 # Helpers shared by the numerical-gradient tests
 # ---------------------------------------------------------------------------
 
+
 def _load_inputs(filename):
     """Return (reml_fn, reg_strength, penalty_tree, sqrt_w_X, Q, R, sqrt_w_y)."""
     data = json.loads((DATA_DIR / filename).read_text())
 
     sqrt_w_X = jnp.array(data["sqrt_w_X"])
-    Q        = jnp.array(data["Q"])
-    R        = jnp.array(data["R"])
+    Q = jnp.array(data["Q"])
+    R = jnp.array(data["R"])
     sqrt_w_y = jnp.array(data["sqrt_w_y"])
 
-    penalty_tree = [jnp.array(b["S"])   for b in data["penalty_blocks"]]
+    penalty_tree = [jnp.array(b["S"]) for b in data["penalty_blocks"]]
     reg_strength = [jnp.array(b["rho"]) for b in data["penalty_blocks"]]
 
     reml_fn, _, _ = _build_ph_and_factory(penalty_tree)
@@ -98,23 +105,29 @@ def _load_inputs(filename):
 # Val consistency: bare call == value from value_and_grad
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("filename", ["reml_1d_smooths.json", "reml_1d_and_2d_smooth.json"])
+
+@pytest.mark.parametrize(
+    "filename", ["reml_1d_smooths.json", "reml_1d_and_2d_smooth.json"]
+)
 def test_val_equals_val_from_value_and_grad(filename):
     reml_fn, reg_strength, penalty_tree, X, Q, R, y = _load_inputs(filename)
 
     f_direct = float(reml_fn(reg_strength, penalty_tree, X, Q, R, y))
     f_vg, _ = jax.value_and_grad(reml_fn)(reg_strength, penalty_tree, X, Q, R, y)
 
-    assert abs(f_direct - float(f_vg)) < 1e-12, (
-        f"{filename}: val mismatch = {abs(f_direct - float(f_vg)):.2e}"
-    )
+    assert (
+        abs(f_direct - float(f_vg)) < 1e-12
+    ), f"{filename}: val mismatch = {abs(f_direct - float(f_vg)):.2e}"
 
 
 # ---------------------------------------------------------------------------
 # Gradient finite-difference check
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("filename", ["reml_1d_smooths.json", "reml_1d_and_2d_smooth.json"])
+
+@pytest.mark.parametrize(
+    "filename", ["reml_1d_smooths.json", "reml_1d_and_2d_smooth.json"]
+)
 def test_gradient_finite_diff(filename):
     reml_fn, reg_strength, penalty_tree, X, Q, R, y = _load_inputs(filename)
 
@@ -134,9 +147,16 @@ def test_gradient_finite_diff(filename):
     h = 1e-5
     g_fd = np.zeros_like(rho_flat)
     for j in range(len(rho_flat)):
-        rp = rho_flat.copy(); rp[j] += h
-        rm = rho_flat.copy(); rm[j] -= h
+        rp = rho_flat.copy()
+        rp[j] += h
+        rm = rho_flat.copy()
+        rm[j] -= h
         g_fd[j] = (_reml_from_flat(rp) - _reml_from_flat(rm)) / (2 * h)
 
-    np.testing.assert_allclose(g_analytic, g_fd, rtol=1e-5, atol=1e-8,
-                                err_msg=f"{filename}: analytic vs FD gradient mismatch")
+    np.testing.assert_allclose(
+        g_analytic,
+        g_fd,
+        rtol=1e-5,
+        atol=1e-8,
+        err_msg=f"{filename}: analytic vs FD gradient mismatch",
+    )

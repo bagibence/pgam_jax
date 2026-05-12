@@ -150,8 +150,12 @@ def check_pql_convergence(
     if criterion == "coef_and_reg":
         if iteration < 1:
             return False
-        coef_ok = _tree_max_leaf_l2_delta(old_params, new_params) < tol * _tree_max_leaf_l2(new_params)
-        reg_ok = _tree_max_leaf_l2_delta(old_reg_strength, new_reg_strength) < tol * _tree_max_leaf_l2(new_reg_strength)
+        coef_ok = _tree_max_leaf_l2_delta(
+            old_params, new_params
+        ) < tol * _tree_max_leaf_l2(new_params)
+        reg_ok = _tree_max_leaf_l2_delta(
+            old_reg_strength, new_reg_strength
+        ) < tol * _tree_max_leaf_l2(new_reg_strength)
         return coef_ok & reg_ok
 
     if criterion == "gcv":

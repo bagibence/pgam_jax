@@ -30,6 +30,7 @@ dependencies = [
     "jaxopt",
     "nemos",
     "numpy",
+    "packaging",
     "scipy",
 ]
 
@@ -64,6 +65,8 @@ notebooks = [
     "jupyterlab-code-formatter",
     "jupytext",
     "jupyter-collaboration",
+    "pandas",
+    "pynapple",
     "seaborn",
     "plotly",
 ]
@@ -103,6 +106,7 @@ skip_glob = ["*/.ipynb_checkpoints/*"]
 # Configure pytest
 [tool.pytest.ini_options]
 testpaths = ["tests"]             # Specify the directory where test files are located
+pythonpath = ["."]
 filterwarnings = [
     # note the use of single quote below to denote "raw" strings in TOML
     # this is raised whenever one imports the plotting utils

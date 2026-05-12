@@ -103,6 +103,7 @@ def tree_compute_sqrt_penalty(
     shift_by: int | None = 0,
     positive_mon_func: Callable = jnp.exp,
     apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
+    prepend_zeros_for_intercept: bool = False,
 ):
     """
     Compute the square root of penalties in a pytree and apply weighting.
@@ -124,6 +125,9 @@ def tree_compute_sqrt_penalty(
         evaluation bases). If for example, dropped a column of the design matrix, we should drop the
         corresponding column of the penalty.
         The default assumes that we are dropping the last column.
+    prepend_zeros_for_intercept :
+        If True, prepend a column of zeros so the square-root penalty is aligned
+        with a design matrix whose first column is an unpenalized intercept.
 
     Returns
     -------
@@ -152,7 +156,20 @@ def tree_compute_sqrt_penalty(
         pytree_map_and_reduce(lambda x: x.shape[0], sum, sqrt_tree),
         pytree_map_and_reduce(lambda x: x.shape[1], sum, sqrt_tree),
     )
-    return tree_create_block(sqrt_tree, tree_start_row, tree_start_col, tot_shape)
+    sqrt_penalty = tree_create_block(
+        sqrt_tree,
+        tree_start_row,
+        tree_start_col,
+        tot_shape,
+    )
+    if prepend_zeros_for_intercept:
+        sqrt_penalty = jnp.hstack(
+            (
+                jnp.zeros((sqrt_penalty.shape[0], 1), dtype=sqrt_penalty.dtype),
+                sqrt_penalty,
+            )
+        )
+    return sqrt_penalty
 
 
 @partial(jax.jit, static_argnums=(1, 2))

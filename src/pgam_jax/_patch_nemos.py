@@ -6,6 +6,8 @@ from nemos.type_casting import support_pynapple
 from nemos.utils import row_wise_kron
 from numpy.typing import ArrayLike
 
+from ._nemos_compat import get_n_inputs
+
 
 @support_pynapple(conv_type="numpy")
 @check_transform_input
@@ -38,18 +40,20 @@ def _bspline_derivative(self, sample_pts: np.ndarray, der: int = 2):
 
 @support_pynapple("numpy")
 def _additive_derivative(self, *xi: ArrayLike):
+    n1 = get_n_inputs(self.basis1)
     return np.hstack(
-        self.basis1.derivative(*xi[: self.basis1._n_input_dimensionality]),
-        self.basis2.derivative(*xi[self.basis1._n_input_dimensionality :]),
+        self.basis1.derivative(*xi[:n1]),
+        self.basis2.derivative(*xi[n1:]),
     )
 
 
 def _multiplicative_derivative(self, *xi: ArrayLike):
     kron = support_pynapple(conv_type="numpy")(row_wise_kron)
 
+    n1 = get_n_inputs(self.basis1)
     return kron(
-        self.basis1.derivative(*xi[: self.basis1._n_input_dimensionality]),
-        self.basis2.derivative(*xi[self.basis1._n_input_dimensionality :]),
+        self.basis1.derivative(*xi[:n1]),
+        self.basis2.derivative(*xi[n1:]),
         transpose=False,
     )
 
