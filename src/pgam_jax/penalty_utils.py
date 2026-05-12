@@ -664,7 +664,7 @@ def compute_penalty_agumented_from_basis(
     Block-diagonal penalization matrix.
 
     """
-    penalty_tree = compute_energy_penalty_tensor(
+    penalty_tree, _ = compute_energy_penalty_tensor(
         basis, n_samples, penalize_null_space=penalize_null_space
     )
     return tree_compute_sqrt_penalty(
