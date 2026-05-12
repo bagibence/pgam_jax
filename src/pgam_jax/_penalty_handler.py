@@ -6,7 +6,7 @@ from typing import Callable
 from functools import reduce
 
 from nemos.inverse_link_function_utils import identity
-from ._slam_compute import transform_slam_with_Q
+from ._slam_compute import transform_slam_with_Q, transform_slam, log_det_and_grad_slam
 from jax.scipy.linalg import block_diag
 
 
@@ -188,6 +188,103 @@ class PenaltyHandler:
 
             case _:
                 raise NotImplementedError(f"_sqrt not implemented for {method}.")
+
+    @staticmethod
+    def _kron_log_det_factor_grads(lams, eigs):
+        """
+        Shared core for KRONECKER* log-det.
+
+        Returns
+        -------
+        log_det_pos : scalar
+            log|S_lam|_+ restricted to the positive-eigenvalue subspace.
+        factor_grads : list[scalar]
+            d log_det_pos / d rho[j] for each factor j.
+        n_pos : scalar
+            Number of positive eigenvalues (= total - null-space dim).
+        """
+        combined_nd = reduce(
+            jnp.add.outer,
+            [lam * eig for lam, eig in zip(lams, eigs)]
+        )
+        pos = combined_nd > 0
+        safe = jnp.where(pos, combined_nd, 1.0)
+        log_det_pos = jnp.sum(jnp.where(pos, jnp.log(safe), 0.0))
+        # d/drho[j] = lam_j * sum_{pos} eig_j[i_j] / combined[multi-index]
+        ndim = len(eigs)
+        factor_grads = []
+        for j, (lam, eig) in enumerate(zip(lams, eigs)):
+            shape = [1] * ndim
+            shape[j] = -1
+            factor_grads.append(lam * jnp.sum(jnp.where(pos, eig.reshape(shape) / safe, 0.0)))
+        return log_det_pos, factor_grads, jnp.sum(pos)
+
+    def _log_det_and_grad(self, method, cache, rho):
+        """Return (log|S_lam|_+, d log|S_lam|_+ / d rho) for one penalty."""
+        match method:
+            case SqrtMethod.SINGLE:
+                # log|lam*S|_+ = rank*rho + log_det_S,  grad = rank
+                rank = cache["rank"]
+                log_det = rank * rho[0] + cache["log_det_S"]
+                return log_det, jnp.full_like(rho, rank)
+
+            case SqrtMethod.SINGLE_WITH_NULL:
+                # log|lam0*S + lam1*P_null|_+ = rank*rho0 + log_det_S + rank_null*rho1
+                rank, rank_null = cache["rank"], cache["rank_null"]
+                log_det = rank * rho[0] + cache["log_det_S"] + rank_null * rho[1]
+                return log_det, jnp.stack([rank, rank_null]).astype(rho.dtype)
+
+            case SqrtMethod.KRONECKER:
+                lams = self._non_linearity(rho)
+                log_det, factor_grads, _ = self._kron_log_det_factor_grads(lams, cache["eigs"])
+                return log_det, jnp.stack(factor_grads)
+
+            case SqrtMethod.KRONECKER_WITH_NULL:
+                lams = self._non_linearity(rho)
+                log_det_pos, factor_grads, n_pos = self._kron_log_det_factor_grads(
+                    lams[:-1], cache["eigs"]
+                )
+                total = reduce(lambda a, b: a * b, [eig.shape[0] for eig in cache["eigs"]])
+                n_null = total - n_pos
+                log_det = log_det_pos + n_null * rho[-1]
+                return log_det, jnp.stack([*factor_grads, n_null.astype(rho.dtype)])
+
+            case SqrtMethod.GENERAL:
+                S_i_out = transform_slam(cache["full_rank_S"], rho)
+                return log_det_and_grad_slam(rho, S_i_out)
+
+            case _:
+                raise NotImplementedError(f"_log_det_and_grad not implemented for {method}.")
+
+    def compute_log_det_and_grad(self, rhos: list[jnp.ndarray]) -> tuple[list, list]:
+        """
+        Returns
+        -------
+        log_dets : list[scalar]
+            log|S_lam_i|_+ for each registered penalty i.
+        grads : list[jnp.ndarray]
+            d log|S_lam_i|_+ / d rho for each i; shape matches rhos[i].
+        """
+        log_dets = [None] * self._n_penalties
+        grads = [None] * self._n_penalties
+        for (method, _, id_fn), members in self._groups.items():
+            if len(members) == 1:
+                idx = members[0]
+                ld, g = self._log_det_and_grad(method, self._cache[idx], rhos[idx])
+                log_dets[idx] = ld
+                grads[idx] = g
+            else:
+                batched_cache = jax.tree_util.tree_map(
+                    lambda *a: jnp.stack(a), *[self._cache[i] for i in members]
+                )
+                batched_rhos = jnp.stack([rhos[i] for i in members])
+                batched_ld, batched_g = jax.vmap(
+                    lambda c, r: self._log_det_and_grad(method, c, r)
+                )(batched_cache, batched_rhos)
+                for k, idx in enumerate(members):
+                    log_dets[idx] = batched_ld[k]
+                    grads[idx] = batched_g[k]
+        return log_dets, grads
 
     def compute_sqrt(self, rhos: list[jnp.ndarray]) -> jnp.ndarray:
         lams = jax.tree_util.tree_map(self._non_linearity, rhos)

@@ -347,3 +347,185 @@ class TestJIT:
             jnp.array([0.5, -0.5]),  jnp.array([-0.5, 0.5]),
         ]
         self._check(ph, rhos)
+
+
+# ---------------------------------------------------------------------------
+# compute_log_det_and_grad
+# ---------------------------------------------------------------------------
+
+def _ref_log_det(S_lam):
+    """Numpy reference: log|S_lam|_+ via eigenvalues."""
+    eig = np.linalg.eigvalsh(np.array(S_lam))
+    return float(np.sum(np.log(eig[eig > 1e-10])))
+
+
+def _cd_grad(log_det_fn, rho, eps=1e-5):
+    """Central-difference gradient of log_det_fn(rho) → scalar."""
+    return np.array([
+        (log_det_fn(rho.at[j].add(eps)) - log_det_fn(rho.at[j].add(-eps))) / (2 * eps)
+        for j in range(len(rho))
+    ])
+
+
+class TestLogDetAndGrad:
+
+    def _ph_ld_grad(self, ph, rhos, idx=0):
+        lds, gs = ph.compute_log_det_and_grad(rhos)
+        return float(lds[idx]), np.array(gs[idx])
+
+    # ---- SINGLE ------------------------------------------------------------
+
+    @pytest.mark.parametrize("rho", [-1.0, 0.0, 1.5])
+    def test_single_value(self, S1, rho):
+        rho_arr = jnp.array([rho])
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False)
+        ld, _ = self._ph_ld_grad(ph, [rho_arr])
+        S_lam = float(jnp.exp(rho_arr[0])) * np.array(S1)
+        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=ATOL)
+
+    @pytest.mark.parametrize("rho", [-1.0, 0.0, 1.5])
+    def test_single_grad(self, S1, rho):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False)
+        rho = jnp.array([rho])
+        _, g = self._ph_ld_grad(ph, [rho])
+        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        np.testing.assert_allclose(g, g_cd, rtol=1e-5)
+
+    # ---- SINGLE_WITH_NULL --------------------------------------------------
+
+    @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5)])
+    def test_single_with_null_value(self, S1, S1_null, rho_pen, rho_null):
+        rho_arr = jnp.array([rho_pen, rho_null])
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True)
+        ld, _ = self._ph_ld_grad(ph, [rho_arr])
+        S_lam = (float(jnp.exp(rho_arr[0])) * np.array(S1)
+                 + float(jnp.exp(rho_arr[1])) * np.array(S1_null))
+        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=ATOL)
+
+    @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5)])
+    def test_single_with_null_grad(self, S1, rho_pen, rho_null):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True)
+        rho = jnp.array([rho_pen, rho_null])
+        _, g = self._ph_ld_grad(ph, [rho])
+        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        np.testing.assert_allclose(g, g_cd, rtol=1e-5)
+
+    # ---- KRONECKER ---------------------------------------------------------
+
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0)])
+    def test_kronecker_value(self, S1, S_kron, rho0, rho1):
+        rho_arr = jnp.array([rho0, rho1])
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=False)
+        ld, _ = self._ph_ld_grad(ph, [rho_arr])
+        lams = np.exp([rho0, rho1])
+        S_lam = lams[0] * np.array(S_kron[0]) + lams[1] * np.array(S_kron[1])
+        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=1e-8)
+
+    @pytest.mark.parametrize("rho0, rho1", [(-1.0, 0.5), (0.0, 0.0)])
+    def test_kronecker_grad(self, S1, rho0, rho1):
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=False)
+        rho = jnp.array([rho0, rho1])
+        _, g = self._ph_ld_grad(ph, [rho])
+        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        np.testing.assert_allclose(g, g_cd, rtol=1e-5)
+
+    # ---- KRONECKER_WITH_NULL -----------------------------------------------
+
+    @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
+    def test_kronecker_with_null_value(self, S1, S_kron, S_kron_null, rho0, rho1, rho_null):
+        rho_arr = jnp.array([rho0, rho1, rho_null])
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=True)
+        ld, _ = self._ph_ld_grad(ph, [rho_arr])
+        lams = np.exp([rho0, rho1])
+        S_lam = (lams[0] * np.array(S_kron[0]) + lams[1] * np.array(S_kron[1])
+                 + np.exp(rho_null) * np.array(S_kron_null))
+        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=1e-8)
+
+    @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
+    def test_kronecker_with_null_grad(self, S1, rho0, rho1, rho_null):
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=True)
+        rho = jnp.array([rho0, rho1, rho_null])
+        _, g = self._ph_ld_grad(ph, [rho])
+        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        np.testing.assert_allclose(g, g_cd, rtol=1e-5)
+
+    # ---- GENERAL -----------------------------------------------------------
+
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0)])
+    def test_general_value(self, S_kron, rho0, rho1):
+        rho_arr = jnp.array([rho0, rho1])
+        ph = PenaltyHandler()
+        ph.add(S_kron)
+        ld, _ = self._ph_ld_grad(ph, [rho_arr])
+        lams = np.exp([rho0, rho1])
+        S_lam = lams[0] * np.array(S_kron[0]) + lams[1] * np.array(S_kron[1])
+        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=1e-8)
+
+    @pytest.mark.parametrize("rho0, rho1", [(-1.0, 0.5), (0.0, 0.0)])
+    def test_general_grad(self, S_kron, rho0, rho1):
+        ph = PenaltyHandler()
+        ph.add(S_kron)
+        rho = jnp.array([rho0, rho1])
+        _, g = self._ph_ld_grad(ph, [rho])
+        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        np.testing.assert_allclose(g, g_cd, rtol=1e-5)
+
+    # ---- GENERAL matches KRONECKER on same tensor --------------------------
+
+    def test_general_matches_kronecker(self, S1, S_kron):
+        rho = jnp.array([0.7, -0.3])
+        ph_kron = PenaltyHandler()
+        ph_kron.add_kron([S1, S1], penalize_null_space=False)
+        ph_gen = PenaltyHandler()
+        ph_gen.add(S_kron)
+        ld_kron, g_kron = ph_kron.compute_log_det_and_grad([rho])
+        ld_gen, g_gen = ph_gen.compute_log_det_and_grad([rho])
+        np.testing.assert_allclose(float(ld_kron[0]), float(ld_gen[0]), atol=1e-8)
+        np.testing.assert_allclose(np.array(g_kron[0]), np.array(g_gen[0]), atol=1e-5)
+
+    # ---- JIT ---------------------------------------------------------------
+
+    def test_jit(self, S1, S_kron):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False)
+        ph.add(S1, penalize_null_space=True)
+        ph.add_kron([S1, S1], penalize_null_space=False)
+        ph.add_kron([S1, S1], penalize_null_space=True)
+        ph.add(S_kron)
+        rhos = [
+            jnp.array([0.5]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([0.5, -0.5, 0.0]),
+            jnp.array([0.5, -0.5]),
+        ]
+        lds_e, gs_e = ph.compute_log_det_and_grad(rhos)
+        lds_j, gs_j = jax.jit(ph.compute_log_det_and_grad)(rhos)
+        for ld_e, ld_j in zip(lds_e, lds_j):
+            np.testing.assert_allclose(float(ld_j), float(ld_e), atol=ATOL)
+        for g_e, g_j in zip(gs_e, gs_j):
+            np.testing.assert_allclose(np.array(g_j), np.array(g_e), atol=ATOL)
+
+    # ---- vmap (two members per group) --------------------------------------
+
+    def test_vmap_matches_singletons(self, S1):
+        rho_a, rho_b = jnp.array([0.5, -0.5]), jnp.array([-0.3, 0.7])
+        ph_group = PenaltyHandler()
+        ph_group.add_kron([S1, S1], penalize_null_space=False)
+        ph_group.add_kron([S1, S1], penalize_null_space=False)
+        lds_g, gs_g = ph_group.compute_log_det_and_grad([rho_a, rho_b])
+
+        for k, rho in enumerate([rho_a, rho_b]):
+            ph = PenaltyHandler()
+            ph.add_kron([S1, S1], penalize_null_space=False)
+            ld, g = ph.compute_log_det_and_grad([rho])
+            np.testing.assert_allclose(float(lds_g[k]), float(ld[0]), atol=ATOL)
+            np.testing.assert_allclose(np.array(gs_g[k]), np.array(g[0]), atol=ATOL)
