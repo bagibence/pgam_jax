@@ -34,6 +34,7 @@ class PenaltyHandler:
         self._n_penalties: int = 0
         self._cache: list[dict] = []
         self._non_linearity = non_linearity
+        self._rho_len = []
 
     def add(self, S_tensor, penalize_null_space: bool = True, identifiability_fn: Callable = lambda x: x):
         """
@@ -78,8 +79,7 @@ class PenaltyHandler:
         self._n_penalties += 1
         self._cache.append(cache)
 
-    @staticmethod
-    def _compute_cache(data, penalize_null_space: bool = True, identifiability_fn: Callable = lambda x:x) -> tuple[dict, SqrtMethod]:
+    def _compute_cache(self, data, penalize_null_space: bool = True, identifiability_fn: Callable = lambda x:x) -> tuple[dict, SqrtMethod]:
         """
         Compute the precomputed cache and select the sqrt method in a single pass.
 
@@ -106,6 +106,7 @@ class PenaltyHandler:
             log_det_S = [jnp.sum(jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0))
                          for eig in eigs]
             kron_U    = reduce(jnp.kron, Us)
+            self._rho_len.append(len(eigs) + has_null)
             return {"eigs": eigs, "kron_U": kron_U, "ranks": ranks, "log_det_S": log_det_S, "identifiability_fn": identifiability_fn}, method
 
         if data.ndim == 2:
@@ -117,6 +118,7 @@ class PenaltyHandler:
             cache     = {"eig": eig, "U": U, "rank": rank, "log_det_S": log_det_S, "identifiability_fn": identifiability_fn}
             if method is SqrtMethod.SINGLE_WITH_NULL:
                 cache["rank_null"] = data.shape[0] - rank
+            self._rho_len.append(1 + has_null)
             return cache, method
 
         # GENERAL (ndim == 3)
@@ -128,6 +130,7 @@ class PenaltyHandler:
         keep     = ev > ev[-1] * eps          # eager boolean index — precompute only
         U_keep   = U[:, keep]                 # (q, r)
         full_rank_S = U_keep.T[None] @ S @ U_keep[None]  # (k, r, r)
+        self._rho_len.append(full_rank_S.shape[0])
         return {"U_keep": U_keep, "full_rank_S": full_rank_S, "identifiability_fn": identifiability_fn}, SqrtMethod.GENERAL
 
     def _sqrt(self, method, cache, lams):
@@ -174,10 +177,22 @@ class PenaltyHandler:
             case _:
                 raise NotImplementedError(f"_sqrt not implemented for {method}.")
 
-    def compute_sqrt(self, rhos) -> jnp.ndarray:
+    def compute_sqrt(self, rhos: list[jnp.ndarray]) -> jnp.ndarray:
         lams = jax.tree_util.tree_map(self._non_linearity, rhos)
         out = [None] * self._n_penalties
         for (method, _), members in self._groups.items():
             for idx in members:
                 out[idx] = self._sqrt(method, self._cache[idx], lams[idx])
         return block_diag(*out)
+
+    def __len__(self):
+        return self._n_penalties
+
+    def __repr__(self) -> str:
+        string = self.__class__.__name__ + "("
+        if len(self._rho_len) == 0:
+            return string + ")"
+        for rlen in self._rho_len:
+            string += f"\n\tn_reg_strengths={rlen},"
+        string = string[:-1] + "\n)"
+        return string
