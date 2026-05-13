@@ -168,11 +168,14 @@ def _build_gam_problem(rng_seed, obs_model, y_draw, phi=1.0):
     V_beta, V_beta_inv, log_det_HpS = make_vbeta(
         beta_hat, X, y, obs_model, exp, S_all, rho, phi
     )
+    # M_null = unpenalized intercept (1) + diff2 null space (2) per smooth.
+    # Analytical for this fixture; avoids relying on numerical matrix_rank.
+    M_null = 1 + 2 * S_all.shape[0]
     return dict(
         X=X, y=y, obs=obs_model, inv_link=exp,
         S_all=S_all, rho=rho, phi=phi,
         beta_hat=beta_hat, V_beta=V_beta, V_beta_inv=V_beta_inv,
-        log_det_HpS=log_det_HpS,
+        log_det_HpS=log_det_HpS, M_null=M_null,
     )
 
 
