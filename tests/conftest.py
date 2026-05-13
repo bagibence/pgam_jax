@@ -12,8 +12,8 @@ from scipy.optimize._numdiff import approx_derivative
 
 from pgam_jax._identifiable_features import compute_features_identifiable
 from pgam_jax._laplace_reml_vbeta import vbeta_and_logdet
+from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pirls_weights import _make_w_fn
-from pgam_jax.penalty_utils import symmetric_sqrt
 
 jax.config.update("jax_enable_x64", True)
 
@@ -48,14 +48,22 @@ def diff2_penalty(n):
 
 
 def gam_design_and_penalty(K_per_smooth, x_covs):
-    """B-spline AdditiveBasis design with intercept, and matching diff2 penalties.
+    """B-spline AdditiveBasis design with intercept, with both flat and structured penalties.
 
-    For M smooths each with K basis functions (after identifiability), returns:
-        X      : shape (N, 1 + M*K) — [intercept | smooth_1 | smooth_2 | ...]
-        S_all  : shape (M, 1+M*K, 1+M*K) — diff2 penalty per smooth, intercept unpenalized
-
-    Mirrors the PGAM reference test geometry (B-splines on uniform covariates,
-    leading intercept column, difference-based penalty per smooth).
+    Returns
+    -------
+    X : (N, 1 + M*K)
+        [intercept | smooth_1 | smooth_2 | ...].
+    S_all : (M, 1+M*K, 1+M*K)
+        Stack of full-coef-space penalty matrices (intercept row/col zero) —
+        used by the derivative formulas (dbeta_hat, dH_drho, add1, tr_VS).
+    compute_sqrt, compute_log_det_and_grad : callables
+        From ``PenaltyHandler.build()``.  These provide the Wood-2011 stable
+        sqrt(S_λ) and log|S_λ|_+ — required because the naïve
+        ``symmetric_sqrt(Σ_k λ_k S_k)`` loses small-λ modes when the λ_k span
+        different scales.  ``compute_sqrt`` returns the (rows, M*K) sqrt over
+        the smooth coefs only — the caller is responsible for prepending a
+        zero column for the unpenalized intercept.
     """
     M = len(x_covs)
     assert all(len(x) == len(x_covs[0]) for x in x_covs)
@@ -74,9 +82,9 @@ def gam_design_and_penalty(K_per_smooth, x_covs):
     assert X_smooth.shape == (N, M * K_per_smooth), X_smooth.shape
 
     # Sum-to-zero (mean-center) each smooth's columns so they are orthogonal to
-    # the intercept.  This is the same identifiability transform PGAM applies
-    # in additive_model_preprocessing; without it H + S_λ/φ is poorly conditioned
-    # and the FD-vs-analytic floor inflates roughly 4x.
+    # the intercept.  Same identifiability transform PGAM applies in
+    # additive_model_preprocessing; without it H + S_λ/φ is poorly conditioned
+    # and the FD-vs-analytic floor inflates ~4x.
     for k in range(M):
         s = k * K_per_smooth
         e = s + K_per_smooth
@@ -85,13 +93,18 @@ def gam_design_and_penalty(K_per_smooth, x_covs):
     P = 1 + M * K_per_smooth
     X = jnp.asarray(np.hstack([np.ones((N, 1)), X_smooth]))
 
-    S_block = np.asarray(diff2_penalty(K_per_smooth))
+    S_block_small = diff2_penalty(K_per_smooth)
+    ph = PenaltyHandler(non_linearity=jnp.exp)
+    for _ in range(M):
+        ph.add(S_block_small, penalize_null_space=False)
+    compute_sqrt, compute_log_det_and_grad = ph.build()
+
     S_all = np.zeros((M, P, P))
     for k in range(M):
         s = 1 + k * K_per_smooth
         e = s + K_per_smooth
-        S_all[k, s:e, s:e] = S_block
-    return X, jnp.asarray(S_all)
+        S_all[k, s:e, s:e] = np.asarray(S_block_small)
+    return jnp.asarray(X), jnp.asarray(S_all), compute_sqrt, compute_log_det_and_grad
 
 
 # ─── Penalized MAP optimization ───────────────────────────────────────────────
@@ -133,11 +146,18 @@ def fit_beta(X, y, obs_model, inv_link, S_all, rho, phi, beta0=None):
     return jnp.asarray(result.x)
 
 
-def make_vbeta(beta_hat, X, y, obs_model, inv_link, S_all, rho, phi):
-    """V_beta, V_beta_inv, log|H+S_lam/phi| from observed Hessian weights at beta_hat."""
+def make_vbeta(beta_hat, X, y, obs_model, inv_link, compute_sqrt, rhos_tree, phi):
+    """V_beta, V_beta_inv, log|H+S_lam/phi| using PenaltyHandler's stable sqrt.
+
+    ``compute_sqrt`` and ``rhos_tree`` come from a built PenaltyHandler — they
+    encode the Wood-2011 stable sqrt(Σ_k λ_k S_k) construction.  The result is
+    prepended with a zero column for the unpenalized intercept, matching the
+    convention used in _pql_reml.py.
+    """
     w = _make_w_fn(y, obs_model, inv_link)(X @ beta_hat)
-    _, R = jnp.linalg.qr(jnp.sqrt(w)[:, None] * X, mode="reduced")
-    sqrt_pen = symmetric_sqrt(jnp.einsum("kij,k->ij", S_all, jnp.exp(rho)))
+    R = jnp.linalg.qr(jnp.sqrt(w)[:, None] * X, mode="r")  # skip DORGQR; Q unused
+    sqrt_pen = compute_sqrt(rhos_tree)
+    sqrt_pen = jnp.hstack((jnp.zeros((sqrt_pen.shape[0], 1)), sqrt_pen))
     return vbeta_and_logdet(R, sqrt_pen, phi)
 
 
@@ -156,24 +176,28 @@ def _build_gam_problem(rng_seed, obs_model, y_draw, phi=1.0):
     rng = np.random.default_rng(rng_seed)
     x1 = rng.uniform(0, 10, _N)
     x2 = rng.uniform(0, 10, _N)
-    X, S_all = gam_design_and_penalty(_K, [x1, x2])
+    X, S_all, compute_sqrt, compute_log_det_and_grad = gam_design_and_penalty(_K, [x1, x2])
 
     P = X.shape[1]
+    M = S_all.shape[0]
     beta_true = rng.normal(0, 0.3, P)
     beta_true[0] = 0.5  # intercept
     y = jnp.asarray(y_draw(rng, np.array(exp(X @ beta_true))))
 
-    rho = jnp.array([0.5, 0.5])
-    beta_hat = fit_beta(X, y, obs_model, exp, S_all, rho, phi)
+    rho_flat = jnp.array([0.5, 0.5])
+    rhos_tree = [rho_flat[k:k + 1] for k in range(M)]    # one (1,) array per smooth
+    beta_hat = fit_beta(X, y, obs_model, exp, S_all, rho_flat, phi)
     V_beta, V_beta_inv, log_det_HpS = make_vbeta(
-        beta_hat, X, y, obs_model, exp, S_all, rho, phi
+        beta_hat, X, y, obs_model, exp, compute_sqrt, rhos_tree, phi
     )
     # M_null = unpenalized intercept (1) + diff2 null space (2) per smooth.
     # Analytical for this fixture; avoids relying on numerical matrix_rank.
-    M_null = 1 + 2 * S_all.shape[0]
+    M_null = 1 + 2 * M
     return dict(
         X=X, y=y, obs=obs_model, inv_link=exp,
-        S_all=S_all, rho=rho, phi=phi,
+        S_all=S_all, rho=rho_flat, rhos_tree=rhos_tree, phi=phi,
+        compute_sqrt=compute_sqrt,
+        compute_log_det_and_grad=compute_log_det_and_grad,
         beta_hat=beta_hat, V_beta=V_beta, V_beta_inv=V_beta_inv,
         log_det_HpS=log_det_HpS, M_null=M_null,
     )
