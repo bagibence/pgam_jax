@@ -28,7 +28,7 @@ Validation strategy
 
 import numpy as np
 import pytest
-from scipy.optimize._numdiff import approx_derivative
+from conftest import central_diff
 import statsmodels.genmod.families as smf
 import statsmodels.genmod.families.links as sm_links
 
@@ -176,11 +176,7 @@ def test_small_h_is_dw_deta(case):
     """small_h = dw/dη: gradient of Σ w(η) wrt η."""
     obs, inv_link, _sm, eta_vec, y_vec = _unpack(case)
     w_fn = _make_w_fn(y_vec, obs, inv_link)
-    grad_fd = approx_derivative(
-        lambda eta: jnp.sum(w_fn(eta)),
-        eta_vec,
-        method='3-point',
-    )
+    grad_fd = central_diff(lambda eta: jnp.sum(w_fn(eta)), eta_vec)
     np.testing.assert_allclose(grad_fd, small_h(eta_vec, y_vec, obs, inv_link), atol=1e-7)
 
 
@@ -188,10 +184,8 @@ def test_small_h_is_dw_deta(case):
 def test_deriv_small_h_is_d2w_deta2_over_dmu_deta(case):
     """deriv_small_h · (dμ/dη) = d²w/dη²: gradient of Σ h(η) wrt η."""
     obs, inv_link, _sm, eta_vec, y_vec = _unpack(case)
-    grad_fd = approx_derivative(
-        lambda eta: jnp.sum(small_h(eta, y_vec, obs, inv_link)),
-        eta_vec,
-        method='3-point',
+    grad_fd = central_diff(
+        lambda eta: jnp.sum(small_h(eta, y_vec, obs, inv_link)), eta_vec
     )
     np.testing.assert_allclose(
         grad_fd,
