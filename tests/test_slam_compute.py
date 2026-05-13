@@ -5,18 +5,18 @@ hes_log_det_slam.
 float64 is enabled globally in conftest.py.
 """
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from pgam_jax._slam_compute import (
-    transform_slam,
-    log_det_slam,
-    log_det_and_grad_slam,
+    _compute_log_det_slam_factory,
     grad_log_det_slam,
     hes_log_det_slam,
-    _compute_log_det_slam_factory,
+    log_det_and_grad_slam,
+    log_det_slam,
+    transform_slam,
 )
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,9 @@ def test_factory_val_grad_matches_loop(multi_block_data):
         ld_ref = float(log_det_slam(rho, S_out))
         g_ref = np.array(grad_log_det_slam(rho, S_out))
         assert abs(float(ld_factory[i]) - ld_ref) < 1e-6, f"block {i} log_det mismatch"
-        np.testing.assert_allclose(np.array(g_factory[i]), g_ref, atol=1e-6, err_msg=f"block {i} grad mismatch")
+        np.testing.assert_allclose(
+            np.array(g_factory[i]), g_ref, atol=1e-6, err_msg=f"block {i} grad mismatch"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +252,9 @@ def test_factory_hess_matches_loop(multi_block_data):
     for i, (S, rho) in enumerate(zip(penalty_tree, rho_tree)):
         S_out = transform_slam(S, rho)
         h_ref = np.array(hes_log_det_slam(rho, S_out))
-        np.testing.assert_allclose(np.array(h_factory[i]), h_ref, atol=1e-6, err_msg=f"block {i} hess mismatch")
+        np.testing.assert_allclose(
+            np.array(h_factory[i]), h_ref, atol=1e-6, err_msg=f"block {i} hess mismatch"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +273,7 @@ def _naive_log_det_slam(penalty_tree, rho_flat, split_sizes):
     offset = 0
     for b in blocks:
         n = b.shape[0]
-        S_lam[offset:offset + n, offset:offset + n] = b
+        S_lam[offset : offset + n, offset : offset + n] = b
         offset += n
     ev = np.linalg.eigvalsh(S_lam)
     return float(np.sum(np.log(ev[ev > ev[-1] * 1e-10])))
@@ -297,7 +301,9 @@ def test_block_diag_log_det(block_diag_data):
     ld_factory = float(sum(float(ld) for ld in log_dets))
     ld_naive = _naive_log_det_slam(penalty_tree, rho_flat, split_sizes)
 
-    assert abs(ld_factory - ld_naive) < 1e-6, f"log det: factory={ld_factory:.8f} naive={ld_naive:.8f}"
+    assert (
+        abs(ld_factory - ld_naive) < 1e-6
+    ), f"log det: factory={ld_factory:.8f} naive={ld_naive:.8f}"
 
 
 def test_block_diag_grad(block_diag_data):
@@ -312,12 +318,18 @@ def test_block_diag_grad(block_diag_data):
 
     grad_fd = np.zeros_like(rho_flat)
     for j in range(len(rho_flat)):
-        rp = rho_flat.copy(); rp[j] += h
-        rm = rho_flat.copy(); rm[j] -= h
-        grad_fd[j] = (_naive_log_det_slam(penalty_tree, rp, split_sizes)
-                      - _naive_log_det_slam(penalty_tree, rm, split_sizes)) / (2 * h)
+        rp = rho_flat.copy()
+        rp[j] += h
+        rm = rho_flat.copy()
+        rm[j] -= h
+        grad_fd[j] = (
+            _naive_log_det_slam(penalty_tree, rp, split_sizes)
+            - _naive_log_det_slam(penalty_tree, rm, split_sizes)
+        ) / (2 * h)
 
-    np.testing.assert_allclose(grad_factory, grad_fd, atol=1e-8, err_msg="gradient vs FD")
+    np.testing.assert_allclose(
+        grad_factory, grad_fd, atol=1e-8, err_msg="gradient vs FD"
+    )
 
 
 def test_block_diag_hess(block_diag_data):
@@ -336,23 +348,29 @@ def test_block_diag_hess(block_diag_data):
     for hb in hesses:
         hb = np.array(hb)
         k = hb.shape[0]
-        H_factory[offset:offset + k, offset:offset + k] = hb
+        H_factory[offset : offset + k, offset : offset + k] = hb
         offset += k
 
     # FD hessian via central differences on the gradient
     def grad_fd_at(rho_f):
         g = np.zeros(len(rho_f))
         for j in range(len(rho_f)):
-            rp = rho_f.copy(); rp[j] += h
-            rm = rho_f.copy(); rm[j] -= h
-            g[j] = (_naive_log_det_slam(penalty_tree, rp, split_sizes)
-                    - _naive_log_det_slam(penalty_tree, rm, split_sizes)) / (2 * h)
+            rp = rho_f.copy()
+            rp[j] += h
+            rm = rho_f.copy()
+            rm[j] -= h
+            g[j] = (
+                _naive_log_det_slam(penalty_tree, rp, split_sizes)
+                - _naive_log_det_slam(penalty_tree, rm, split_sizes)
+            ) / (2 * h)
         return g
 
     H_fd = np.zeros((n_total, n_total))
     for j in range(n_total):
-        rp = rho_flat.copy(); rp[j] += h
-        rm = rho_flat.copy(); rm[j] -= h
+        rp = rho_flat.copy()
+        rp[j] += h
+        rm = rho_flat.copy()
+        rm[j] -= h
         H_fd[:, j] = (grad_fd_at(rp) - grad_fd_at(rm)) / (2 * h)
 
     np.testing.assert_allclose(H_factory, H_fd, atol=1e-6, err_msg="hessian vs FD")

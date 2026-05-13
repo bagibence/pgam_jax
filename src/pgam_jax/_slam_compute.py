@@ -28,10 +28,12 @@ Public API
 """
 
 import warnings
-import numpy as np
-import jax.numpy as jnp
-from jax import lax
 from collections import defaultdict
+
+import jax.numpy as jnp
+import numpy as np
+from jax import lax
+
 
 def _warn_if_not_f64(fname: str) -> None:
     if jnp.finfo(float).dtype != np.dtype("float64"):
@@ -69,10 +71,11 @@ def _make_scan_body(lams, q):
     :
         A callable ``body(state, _) -> (state, None)`` suitable for
         ``lax.scan``.  State tuple is
-        ``(S_bar, S_i_out, gamma_mask, K)``:
+        ``(S_bar, S_i_out, Q_s, gamma_mask, K)``:
 
         - ``S_bar``      : (M, q, q) working matrices; active block is [K:, K:]
         - ``S_i_out``    : (M, q, q) individually transformed output matrices
+        - ``Q_s``        : (q, q) accumulated rotation; S_full = Q_s.T @ S_lam @ Q_s
         - ``gamma_mask`` : (M,) bool — True for indices still in gamma
         - ``K``          : () int32 — accumulated block offset
     """
@@ -87,7 +90,7 @@ def _make_scan_body(lams, q):
     outer = jnp.arange(q, dtype=jnp.int32)
 
     def body(state, _):
-        S_bar, S_i_out, gamma_mask, K = state
+        S_bar, S_i_out, Q_s, gamma_mask, K = state
 
         act2d = (outer[:, None] >= K) & (outer[None, :] >= K)
         S_bar_act = S_bar * act2d[None, :, :]
@@ -106,34 +109,38 @@ def _make_scan_body(lams, q):
 
         terminate = r == q - K
 
-        S_lam_alpha = jnp.einsum("ijk,i->jk", S_bar_act, jnp.where(alpha, lams, 0.0))
-        S_eigh = S_lam_alpha - _big * jnp.diag((outer < K).astype(lams.dtype))
-        _, U = jnp.linalg.eigh(S_eigh)
-        U = U[:, ::-1]
+        def no_op(_):
+            return S_bar, S_i_out, Q_s, gamma_mask, K
 
-        V = jnp.where(act2d, U, I_q)
+        def step(_):
+            S_lam_alpha = jnp.einsum("ijk,i->jk", S_bar_act, jnp.where(alpha, lams, 0.0))
+            S_eigh = S_lam_alpha - _big * jnp.diag((outer < K).astype(lams.dtype))
+            _, U = jnp.linalg.eigh(S_eigh)
+            U = U[:, ::-1]
 
-        keep = outer < K + r
-        T_alpha = jnp.where(keep[None, :], V, 0.0)
-        S_from_alpha = T_alpha.T[None] @ S_i_out @ T_alpha[None]
-        S_from_gamma = V.T[None] @ S_i_out @ V[None]
-        S_i_out_new = jnp.where(
-            alpha[:, None, None],
-            S_from_alpha,
-            jnp.where(gamma_prime[:, None, None], S_from_gamma, S_i_out),
+            V = jnp.where(act2d, U, I_q)
+
+            keep = outer < K + r
+            T_alpha = jnp.where(keep[None, :], V, 0.0)
+            S_from_alpha = T_alpha.T[None] @ S_i_out @ T_alpha[None]
+            S_from_gamma = V.T[None] @ S_i_out @ V[None]
+            S_i_out_new = jnp.where(
+                alpha[:, None, None],
+                S_from_alpha,
+                jnp.where(gamma_prime[:, None, None], S_from_gamma, S_i_out),
+            )
+
+            dom_cols = (outer >= K) & (outer < K + r)
+            V_n = jnp.where(dom_cols[None, :], I_q, V)
+            S_bar_gp = V_n.T[None] @ S_bar @ V_n[None]
+            S_bar_new = jnp.where(gamma_prime[:, None, None], S_bar_gp, S_bar)
+
+            return S_bar_new, S_i_out_new, Q_s @ V, gamma_prime, K + r
+
+        S_bar_out, S_i_out_out, Q_s_out, gm_out, K_out = lax.cond(
+            terminate, no_op, step, None
         )
-
-        dom_cols = (outer >= K) & (outer < K + r)
-        V_n = jnp.where(dom_cols[None, :], I_q, V)
-        S_bar_gp = V_n.T[None] @ S_bar @ V_n[None]
-        S_bar_new = jnp.where(gamma_prime[:, None, None], S_bar_gp, S_bar)
-
-        S_i_out_out = jnp.where(terminate, S_i_out, S_i_out_new)
-        S_bar_out = jnp.where(terminate, S_bar, S_bar_new)
-        K_out = jnp.where(terminate, K, K + r)
-        gm_out = jnp.where(terminate, jnp.zeros(M, dtype=bool), gamma_prime)
-
-        return (S_bar_out, S_i_out_out, gm_out, K_out), None
+        return (S_bar_out, S_i_out_out, Q_s_out, gm_out, K_out), None
 
     return body
 
@@ -170,11 +177,51 @@ def transform_slam(S_tensor, rho):
     init = (
         S_tensor,
         S_tensor,
+        jnp.eye(q),
         jnp.ones(M, dtype=bool),
         jnp.zeros((), dtype=jnp.int32),
     )
-    (_, S_i_out, _, _), _ = lax.scan(body, init, None, length=q)
+    (_, S_i_out, _, _, _), _ = lax.scan(body, init, None, length=q)
     return S_i_out
+
+
+def transform_slam_with_Q(S_tensor, lams):
+    """
+    Same block-diagonal transform as :func:`transform_slam` but also returns
+    the accumulated orthogonal rotation Q such that
+    ``sum_i lams[i] * S_i_out[i] == Q.T @ (sum_i lams[i] * S_tensor[i]) @ Q``.
+
+    Unlike :func:`transform_slam` this function takes *lams* (smoothing
+    parameters, not log-scale) so the caller can avoid a log/exp round-trip.
+
+    Parameters
+    ----------
+    S_tensor :
+        Shape (M, q, q) positive semi-definite penalty matrices.
+    lams :
+        Shape (M,) smoothing parameters (> 0, not log-scale).
+
+    Returns
+    -------
+    S_i_out :
+        Shape (M, q, q) individually-transformed matrices with disjoint block
+        support.
+    Q_s :
+        Shape (q, q) accumulated rotation.
+    """
+    _warn_if_not_f64("transform_slam_with_Q")
+    M, q = S_tensor.shape[0], S_tensor.shape[1]
+
+    body = _make_scan_body(lams, q)
+    init = (
+        S_tensor,
+        S_tensor,
+        jnp.eye(q),
+        jnp.ones(M, dtype=bool),
+        jnp.zeros((), dtype=jnp.int32),
+    )
+    (_, S_i_out, Q_s, _, _), _ = lax.scan(body, init, None, length=q)
+    return S_i_out, Q_s
 
 
 # ===========================================================================
@@ -347,22 +394,23 @@ def _compute_log_det_slam_factory(penalty_tree):
     """
     # Not compilable step: drop null spaces of blocks.
     import jax
+
     frobs = jax.tree_util.tree_map(
-        lambda x: jnp.sqrt(jnp.sum(x ** 2, axis=(1, 2), keepdims=True)), penalty_tree
+        lambda x: jnp.sqrt(jnp.sum(x**2, axis=(1, 2), keepdims=True)), penalty_tree
     )
     eig_res = jax.tree_util.tree_map(
         lambda x, f: jnp.linalg.eigh(jnp.sum(x / f, axis=0)), penalty_tree, frobs
     )
     eigenvalues, eigenvectors = zip(*eig_res)
     _eps = jnp.finfo(float).eps
-    keep = jax.tree_util.tree_map(
-        lambda e: e > e[-1] * (_eps**0.8), eigenvalues
-    )
+    keep = jax.tree_util.tree_map(lambda e: e > e[-1] * (_eps**0.8), eigenvalues)
     flat, struct = jax.tree_util.tree_flatten(penalty_tree)
     tl = jax.tree_util.tree_leaves
 
     # formally full rank S_i
-    full_rank_flat = [u[:, k].T @ x @ u[:, k] for (x, u, k) in zip(flat, tl(eigenvectors), tl(keep))]
+    full_rank_flat = [
+        u[:, k].T @ x @ u[:, k] for (x, u, k) in zip(flat, tl(eigenvectors), tl(keep))
+    ]
 
     # compute the groups statically
     groups = compute_groups(full_rank_flat)

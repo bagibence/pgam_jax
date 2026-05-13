@@ -6,12 +6,15 @@ Statsmodels terminology:
 3. variance: the variance function of the observation model
 """
 
+from functools import wraps
+
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxopt import LBFGS, LBFGSB, ScipyBoundedMinimize, ScipyMinimize
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
+
 FLOAT_EPS = jnp.finfo(float).eps
 
 from ._utils import elementwise_derivative as _elementwise_derivative
@@ -104,6 +107,61 @@ def weighted_least_squares(X, y, weights):
     return beta, Xw, yw
 
 
+def _tree_max_leaf_l2_delta(tree1, tree2):
+    """Return the max L2 distance across matching leaves of two pytrees."""
+    return pytree_map_and_reduce(lambda x, y: jnp.linalg.norm(x - y), max, tree1, tree2)
+
+
+def _tree_max_leaf_l2(tree):
+    """Return the max L2 norm across leaves of a pytree."""
+    return pytree_map_and_reduce(jnp.linalg.norm, max, tree)
+
+
+VALID_CONVERGENCE_CRITERIA = ("coef", "coef_and_reg", "gcv")
+
+
+def check_pql_convergence(
+    criterion: str,
+    iteration: int,
+    tol: float,
+    old_params,
+    new_params,
+    old_reg_strength,
+    new_reg_strength,
+    old_score=None,
+    new_score=None,
+):
+    """Check outer-loop convergence using the requested monitor."""
+    if criterion == "coef":
+        if iteration < 1:
+            return False
+        delta = _tree_max_leaf_l2_delta(old_params, new_params)
+        return delta < tol * _tree_max_leaf_l2(new_params)
+
+    if criterion == "coef_and_reg":
+        if iteration < 1:
+            return False
+        coef_ok = _tree_max_leaf_l2_delta(
+            old_params, new_params
+        ) < tol * _tree_max_leaf_l2(new_params)
+        reg_ok = _tree_max_leaf_l2_delta(
+            old_reg_strength, new_reg_strength
+        ) < tol * _tree_max_leaf_l2(new_reg_strength)
+        return coef_ok & reg_ok
+
+    if criterion == "gcv":
+        if iteration <= 3:
+            return False
+        if old_score is None or new_score is None:
+            return False
+        return jnp.abs(new_score - old_score) < tol * jnp.abs(new_score)
+
+    raise ValueError(
+        f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
+        f"got {criterion!r}."
+    )
+
+
 def pql_outer_iteration(
     reg_strength,
     init_pars,
@@ -113,12 +171,13 @@ def pql_outer_iteration(
     obs_model,
     variance_func,
     inner_func,
-    compute_sqrt_penalty,
+    compute_sqrt,
     fisher_scoring=False,
     max_iter=100,
     tol_optim=10**-10,
-    tol_update=10**-6,
+    tol_update=10**-5,
     use_scipy=False,
+    convergence_criterion: str = "gcv",
 ):
     """
 
@@ -144,14 +203,23 @@ def pql_outer_iteration(
         If True, use scipy's L-BFGS-B for both the inner GCV minimization
         and the initial GLM fit instead of jaxopt's. Often faster on CPU.
         Defaults to False.
-
+    convergence_criterion:
+        Outer-loop convergence monitor. ``"coef"`` checks only coefficient
+        movement, ``"coef_and_reg"`` checks both coefficient and log-regularizer
+        movement, and ``"gcv"`` checks relative change in the optimized inner
+        GCV score, matching the legacy PGAM convention.
+        Defaults to ``"gcv"``.
     Returns
     -------
 
     """
+    if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
+        raise ValueError(
+            f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
+            f"got {convergence_criterion!r}."
+        )
     # TODO: variance_func can be determined based on the observation model?
     inv_link_func = obs_model.default_inverse_link_function
-    # Using LBFGSB because bounds (defined a few lines down) is passed to solver.run
     if use_scipy:
         solver = ScipyBoundedMinimize(method="l-bfgs-b", fun=inner_func, tol=tol_optim)
     else:
@@ -185,9 +253,6 @@ def pql_outer_iteration(
     if not use_scipy:
         _solve_inner = jax.jit(_solve_inner)
 
-    def loss_unp(p):
-        return obs_model._negative_log_likelihood(y, inv_link_func(X.dot(p[0]) + p[1]))
-
     link_func = INVERSE_FUNCS[inv_link_func]
     get_pseudo_data_and_weight = model_constructors_for_weights_and_pseudo_data(
         variance_func, link_func, fisher_scoring=fisher_scoring
@@ -198,19 +263,22 @@ def pql_outer_iteration(
 
     n_obs = jtu.tree_leaves(X)[0].shape[0]
     leaf_shapes = [leaf.shape[1] for leaf in jtu.tree_leaves(X)]  # dims of each leaf
-    # TODO: Does this loop need to be converted to a jax loop? Was it even worth it?
-    i = 0
-    for i in range(max_iter):
-        # identifiability constraint drops column by default
-        sqrt_penalty = compute_sqrt_penalty(
-            penalty_tree,
-            reg_strength,
+
+    def loss_unp(p):
+        return obs_model._negative_log_likelihood(
+            y,
+            inv_link_func(X.dot(p[0]) + p[1]),
+            aggregate_sample_scores=jnp.sum,
         )
 
+    # TODO: Does this loop need to be converted to a jax loop? Was it even worth it?
+    i = 0
+    old_inner_score = None
+    for i in range(max_iter):
+        sqrt_penalty = compute_sqrt(reg_strength)
+
         # add a zero corresponding to not-penalizing the intercept
-        sqrt_penalty = jnp.hstack(
-            (jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty)
-        ) / jnp.sqrt(n_obs)
+        sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
 
         # TODO: Lift this out into an initialization step?
         # initialize coefficients by fitting a GLM
@@ -258,19 +326,31 @@ def pql_outer_iteration(
             R,
             yw[:n_obs],
         )
+        new_reg_strength = jtu.tree_map(
+            lambda x: jnp.clip(x, -25, 30),
+            new_reg_strength,
+        )
+        new_inner_score = state.fun_val if use_scipy else state.value
 
         # convergence check
-        delta_reg = pytree_map_and_reduce(
-            lambda x, y: jnp.linalg.norm(x - y),
-            max,
-            (coef, intercept),
-            (new_coef, new_intercept),
+        converged = check_pql_convergence(
+            convergence_criterion,
+            iteration=i,
+            tol=tol_update,
+            old_params=(coef, intercept),
+            new_params=(new_coef, new_intercept),
+            old_reg_strength=reg_strength,
+            new_reg_strength=new_reg_strength,
+            old_score=old_inner_score,
+            new_score=new_inner_score,
         )
-        if delta_reg < tol_update:
-            break
 
         # update
         reg_strength = new_reg_strength
         coef, intercept = new_coef, new_intercept
+        old_inner_score = new_inner_score
+
+        if converged:
+            break
 
     return (coef, intercept), reg_strength, i
