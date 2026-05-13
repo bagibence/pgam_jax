@@ -1,12 +1,11 @@
 """Laplace-approximated REML objective and its gradient wrt log-smoothing parameters."""
 
 import jax.numpy as jnp
+import jax.tree_util as jtu
 
 from ._laplace_reml_beta_derivs import dbeta_hat
 from ._laplace_reml_vbeta import vbeta_and_logdet
 from ._pirls_weights import _make_w_fn, small_h
-from ._slam_compute import log_det_and_grad_slam, log_det_slam, transform_slam
-from .penalty_utils import symmetric_sqrt
 
 
 def laplace_reml(
@@ -19,6 +18,9 @@ def laplace_reml(
     rho: jnp.ndarray,
     phi: float,
     M_null: int,
+    compute_sqrt,
+    compute_log_det_and_grad,
+    rhos_tree,
     return_grad: bool = False,
 ):
     """Laplace-approximated REML at the MAP estimate.
@@ -30,66 +32,62 @@ def laplace_reml(
                - (1/2) log|H + S_λ/φ|
                + (M_0/2) log(2π)
 
-    where H = X^T W X / φ is the observed Fisher information at β̂ and M_0 is
-    the null-space dimension of S_λ (static — depends only on S_all, not ρ).
-
-    The gradient wrt ρ is the sum of three contributions:
-
-        add1 = -(1/2φ) λ_r β̂^T S_r β̂
-        add2 = +(1/2φ) ∂ log|S_λ|_+ / ∂ρ_r
-        add3 = -(1/2) tr(V_β (∂H/∂ρ_r + λ_r S_r / φ))
-
-    The add3 trace splits into (J[r]·q)/φ + λ_r tr(V_β S_r)/φ where
-    q = X^T (h · diag(X V_β X^T)) and h = dw/dη; the first term is a
-    drop-in for `dH_drho` (Component D) but reused via the precomputed J.
+    Stability note: the sqrt and log-det of S_λ both go through
+    ``PenaltyHandler.build()`` callables, which use the Wood (2011) stable
+    block-disjoint parameterisation.  Direct ``symmetric_sqrt(Σ_k λ_k S_k)``
+    would lose small-λ modes when the λ_k span different scales.
 
     Parameters
     ----------
-    beta_hat : shape (p,)
+    beta_hat : (p,)
         MAP coefficient estimate at ρ.
-    X : shape (n, p)
-    y : shape (n,)
-    obs_model : nemos observation model
-    inverse_link_fn : callable g^{-1}: η → μ
-    S_all : shape (M, p, p)
-        Stack of raw penalty matrices.
-    rho : shape (M,)
-        Log-smoothing parameters.
-    phi :
-        Positive scalar dispersion.
+    X : (n, p), y : (n,)
+    obs_model, inverse_link_fn :
+        Nemos observation model and inverse link.
+    S_all : (M, p, p)
+        Stack of raw penalty matrices padded into the full coef space; used by
+        the gradient formulas (add1, J, tr_VS).
+    rho : (M,)
+        Flat log-smoothing parameters consistent with S_all.
+    phi : positive scalar.
     M_null : int
         Null-space dimension of S_λ (static).
+    compute_sqrt, compute_log_det_and_grad :
+        Callables returned by ``PenaltyHandler.build()``.
+    rhos_tree :
+        Pytree of per-smooth rho arrays consistent with the PenaltyHandler
+        structure that produced ``compute_sqrt`` / ``compute_log_det_and_grad``.
     return_grad : bool
-        If True, also return the gradient wrt ρ.
 
     Returns
     -------
     value : scalar
-    grad : shape (M,), only when ``return_grad=True``
+    grad : (M,), only when ``return_grad=True``
     """
     eta = X @ beta_hat
     lams = jnp.exp(rho)
-    S_lam = jnp.einsum("kij,k->ij", S_all, lams)
 
     # log-likelihood
     mu = inverse_link_fn(eta)
     ll = obs_model.log_likelihood(y, mu, aggregate_sample_scores=jnp.sum)
 
     # penalty: -0.5/phi * beta^T S_lam beta
-    pen = -0.5 * beta_hat @ S_lam @ beta_hat / phi
+    pen = -0.5 * jnp.einsum(
+        "i,kij,k,j->", beta_hat, S_all, lams, beta_hat
+    ) / phi
 
-    # log|H + S_lam/phi| via SVD of [R; sqrt(S_lam)]
+    # log|H + S_lam/phi| via SVD of [R; sqrt_penalty], where sqrt_penalty comes
+    # from PenaltyHandler (Wood 2011 stable construction) with a zero column
+    # prepended for the unpenalized intercept.
     w = _make_w_fn(y, obs_model, inverse_link_fn)(eta)
-    _, R = jnp.linalg.qr(jnp.sqrt(w)[:, None] * X, mode="reduced")
-    sqrt_pen = symmetric_sqrt(S_lam)
+    R = jnp.linalg.qr(jnp.sqrt(w)[:, None] * X, mode="r")
+    sqrt_pen = compute_sqrt(rhos_tree)
+    sqrt_pen = jnp.hstack((jnp.zeros((sqrt_pen.shape[0], 1)), sqrt_pen))
     V_beta, _, log_det_HpS = vbeta_and_logdet(R, sqrt_pen, phi)
 
-    # log|S_lam|_+ (and gradient)
-    S_i_out = transform_slam(S_all, rho)
-    if return_grad:
-        log_det_Slam, grad_log_det_Slam = log_det_and_grad_slam(rho, S_i_out)
-    else:
-        log_det_Slam = log_det_slam(rho, S_i_out)
+    # log|S_lam|_+ (and gradient) from PenaltyHandler
+    log_dets, log_det_grads = compute_log_det_and_grad(rhos_tree)
+    log_det_Slam = jtu.tree_reduce(lambda a, b: a + b, log_dets)
 
     value = (
         ll + pen
@@ -107,8 +105,9 @@ def laplace_reml(
         "i,rij,j->r", beta_hat, S_all * lams[:, None, None], beta_hat
     ) / phi
 
-    # add2 = +(0.5/phi) * d log|S_lam|+/d rho
-    add2 = 0.5 * grad_log_det_Slam / phi
+    # add2 = +(0.5/phi) * d log|S_lam|+/d rho  — flatten the PenaltyHandler tree
+    grad_log_det = jnp.concatenate([jnp.atleast_1d(g) for g in log_det_grads])
+    add2 = 0.5 * grad_log_det / phi
 
     # add3 = -0.5 * tr(V_beta * (dH/drho_r + lam_r * S_r / phi))
     J = dbeta_hat(beta_hat, V_beta, S_all, rho, phi)              # (M, p)
