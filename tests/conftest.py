@@ -7,10 +7,10 @@ import nemos.observation_models as nmo_obs
 import numpy as np
 import pytest
 from nemos.inverse_link_function_utils import exp
-from scipy.optimize import minimize
 from scipy.optimize._numdiff import approx_derivative
 
 from pgam_jax._identifiable_features import compute_features_identifiable
+from pgam_jax._laplace_reml_fit import fit_beta  # noqa: F401 — re-exported for tests
 from pgam_jax._laplace_reml_vbeta import vbeta_and_logdet
 from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pirls_weights import _make_w_fn
@@ -108,42 +108,8 @@ def gam_design_and_penalty(K_per_smooth, x_covs):
 
 
 # ─── Penalized MAP optimization ───────────────────────────────────────────────
-
-
-def fit_beta(X, y, obs_model, inv_link, S_all, rho, phi, beta0=None):
-    """Minimize the penalized negative log-likelihood wrt beta.
-
-        loss(beta) = -log L(beta) + 0.5/phi * beta^T S_lambda beta
-
-    Uses scipy trust-ncg with JAX-supplied gradient and Hessian — converges
-    to ~machine precision, which is required for finite-difference checks
-    of d beta_hat / d rho to hit rtol≈1e-3.
-    """
-    S_lam = jnp.einsum("kij,k->ij", S_all, jnp.exp(rho))
-
-    def loss_fn(b):
-        return (
-            -obs_model.log_likelihood(y, inv_link(X @ b), aggregate_sample_scores=jnp.sum)
-            + 0.5 * jnp.dot(b, S_lam @ b) / phi
-        )
-
-    value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
-    hess = jax.jit(jax.hessian(loss_fn))
-
-    def scipy_fun(b_np):
-        val, grad = value_and_grad(jnp.asarray(b_np))
-        return float(val), np.asarray(grad)
-
-    def scipy_hess(b_np):
-        return np.asarray(hess(jnp.asarray(b_np)))
-
-    if beta0 is None:
-        beta0 = np.zeros(X.shape[1])
-    result = minimize(
-        fun=scipy_fun, x0=np.asarray(beta0), jac=True, hess=scipy_hess,
-        method="Newton-CG", tol=1e-14, options={"maxiter": 10000},
-    )
-    return jnp.asarray(result.x)
+# fit_beta is the production inner MAP solver, imported above from
+# pgam_jax._laplace_reml_fit so tests and production share one implementation.
 
 
 def make_vbeta(beta_hat, X, y, obs_model, inv_link, compute_sqrt, rhos_tree, phi):
