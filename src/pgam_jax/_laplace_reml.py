@@ -1,7 +1,9 @@
 """Laplace-approximated REML objective and its gradient wrt log-smoothing parameters."""
 
+import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+from jax.flatten_util import ravel_pytree
 
 from ._laplace_reml_beta_derivs import dbeta_hat
 from ._laplace_reml_vbeta import vbeta_and_logdet
@@ -15,12 +17,11 @@ def laplace_reml(
     obs_model,
     inverse_link_fn,
     S_all: jnp.ndarray,
-    rho: jnp.ndarray,
+    rhos_tree,
     phi: float,
     M_null: int,
     compute_sqrt,
     compute_log_det_and_grad,
-    rhos_tree,
     return_grad: bool = False,
 ):
     """Laplace-approximated REML at the MAP estimate.
@@ -46,24 +47,26 @@ def laplace_reml(
         Nemos observation model and inverse link.
     S_all : (M, p, p)
         Stack of raw penalty matrices padded into the full coef space; used by
-        the gradient formulas (add1, J, tr_VS).
-    rho : (M,)
-        Flat log-smoothing parameters consistent with S_all.
+        the gradient formulas (add1, J, tr_VS).  Its leading axis must align
+        with the flattened ``rhos_tree``.
+    rhos_tree :
+        Pytree of per-smooth rho arrays — the canonical representation,
+        consistent with the PenaltyHandler that produced ``compute_sqrt`` /
+        ``compute_log_det_and_grad``.  The flat ρ used by the S_all einsums is
+        derived internally via ``ravel_pytree``.
     phi : positive scalar.
     M_null : int
         Null-space dimension of S_λ (static).
     compute_sqrt, compute_log_det_and_grad :
         Callables returned by ``PenaltyHandler.build()``.
-    rhos_tree :
-        Pytree of per-smooth rho arrays consistent with the PenaltyHandler
-        structure that produced ``compute_sqrt`` / ``compute_log_det_and_grad``.
     return_grad : bool
 
     Returns
     -------
     value : scalar
-    grad : (M,), only when ``return_grad=True``
+    grad : (M,) flat gradient wrt the raveled ρ, only when ``return_grad=True``
     """
+    rho, _ = ravel_pytree(rhos_tree)
     eta = X @ beta_hat
     lams = jnp.exp(rho)
 
@@ -72,9 +75,7 @@ def laplace_reml(
     ll = obs_model.log_likelihood(y, mu, aggregate_sample_scores=jnp.sum)
 
     # penalty: -0.5/phi * beta^T S_lam beta
-    pen = -0.5 * jnp.einsum(
-        "i,kij,k,j->", beta_hat, S_all, lams, beta_hat
-    ) / phi
+    pen = -0.5 * jnp.einsum("i,kij,k,j->", beta_hat, S_all, lams, beta_hat) / phi
 
     # log|H + S_lam/phi| via SVD of [R; sqrt_penalty], where sqrt_penalty comes
     # from PenaltyHandler (Wood 2011 stable construction) with a zero column
@@ -105,8 +106,8 @@ def laplace_reml(
         "i,rij,j->r", beta_hat, S_all * lams[:, None, None], beta_hat
     ) / phi
 
-    # add2 = +(0.5/phi) * d log|S_lam|+/d rho  — flatten the PenaltyHandler tree
-    grad_log_det = jnp.concatenate([jnp.atleast_1d(g) for g in log_det_grads])
+    # add2 = +(0.5/phi) * d log|S_lam|+/d rho
+    grad_log_det, _ = ravel_pytree(log_det_grads)
     add2 = 0.5 * grad_log_det / phi
 
     # add3 = -0.5 * tr(V_beta * (dH/drho_r + lam_r * S_r / phi))
@@ -119,3 +120,71 @@ def laplace_reml(
     add3 = -0.5 * (tr_dH + lams * tr_VS)
 
     return value, add1 + add2 + add3
+
+
+def laplace_reml_compute_factory(
+    obs_model,
+    inverse_link_fn,
+    phi: float,
+    M_null: int,
+    compute_sqrt,
+    compute_log_det_and_grad,
+    rhos_tree_example,
+):
+    """Build a ``jax.custom_vjp`` Laplace-REML objective: ``rhos_tree → value``.
+
+    Mirrors ``reml_compute_factory`` in ``_pql_reml.py``.  The custom VJP feeds
+    the analytical gradient from ``laplace_reml(..., return_grad=True)`` back
+    through autodiff, so any optimiser that calls ``jax.value_and_grad`` (e.g.
+    ``optimistix.minimise``) gets the analytical gradient transparently —
+    without differentiating through the inner β̂ solve.  ``rhos_tree`` stays a
+    pytree throughout (optimistix optimises pytrees natively); the flat ρ is
+    only an internal detail of ``laplace_reml``'s S_all einsums.
+
+    Parameters
+    ----------
+    obs_model, inverse_link_fn :
+        Nemos observation model and inverse link.
+    phi :
+        Positive scalar dispersion (φ ≡ 1 for Poisson).
+    M_null : int
+        Null-space dimension of S_λ (static).
+    compute_sqrt, compute_log_det_and_grad :
+        Callables from ``PenaltyHandler.build()``.
+    rhos_tree_example :
+        Any rho pytree with the structure used by this fit.  The ρ-structure is
+        fixed for a fit, so the flat→tree ``unravel`` is built once here rather
+        than per ``_fwd`` call.
+
+    Returns
+    -------
+    objective : callable
+        ``objective(rhos_tree, beta_hat, X, y, S_all) -> scalar`` with an
+        analytic reverse-mode gradient wrt ``rhos_tree`` (β̂, X, y, S_all are
+        treated as constants — β̂'s ρ-dependence is already folded into the
+        analytical gradient by the envelope theorem).
+    """
+    _, unravel = ravel_pytree(rhos_tree_example)
+
+    @jax.custom_vjp
+    def _objective(rhos_tree, beta_hat, X, y, S_all):
+        return laplace_reml(
+            beta_hat, X, y, obs_model, inverse_link_fn, S_all, rhos_tree,
+            phi, M_null, compute_sqrt, compute_log_det_and_grad, return_grad=False,
+        )
+
+    def _fwd(rhos_tree, beta_hat, X, y, S_all):
+        value, grad_flat = laplace_reml(
+            beta_hat, X, y, obs_model, inverse_link_fn, S_all, rhos_tree,
+            phi, M_null, compute_sqrt, compute_log_det_and_grad, return_grad=True,
+        )
+        return value, unravel(grad_flat)
+
+    def _bwd(grad_tree, value_bar):
+        return (
+            jtu.tree_map(lambda g: value_bar * g, grad_tree),
+            None, None, None, None,  # beta_hat, X, y, S_all are not differentiated
+        )
+
+    _objective.defvjp(_fwd, _bwd)
+    return _objective
