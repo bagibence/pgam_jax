@@ -539,7 +539,7 @@ class TestBuild:
     def test_compute_sqrt_matches_method(self, S1, S_kron):
         ph = self._make_mixed_ph(S1, S_kron)
         rhos = self._mixed_rhos()
-        compute_sqrt, _ = ph.build()
+        compute_sqrt, _, _ = ph.build()
         B_built = compute_sqrt(rhos)
         B_method = ph.compute_sqrt(rhos)
         np.testing.assert_allclose(
@@ -549,7 +549,7 @@ class TestBuild:
     def test_compute_log_det_matches_method(self, S1, S_kron):
         ph = self._make_mixed_ph(S1, S_kron)
         rhos = self._mixed_rhos()
-        _, compute_ld = ph.build()
+        _, compute_ld, _ = ph.build()
         lds_built, gs_built = compute_ld(rhos)
         lds_method, gs_method = ph.compute_log_det_and_grad(rhos)
         for ld_b, ld_m in zip(lds_built, lds_method):
@@ -560,7 +560,7 @@ class TestBuild:
     def test_compute_sqrt_jittable(self, S1, S_kron):
         ph = self._make_mixed_ph(S1, S_kron)
         rhos = self._mixed_rhos()
-        compute_sqrt, _ = ph.build()
+        compute_sqrt, _, _ = ph.build()
         B_eager = compute_sqrt(rhos)
         B_jit = jax.jit(compute_sqrt)(rhos)
         np.testing.assert_allclose(
@@ -570,7 +570,7 @@ class TestBuild:
     def test_compute_log_det_jittable(self, S1, S_kron):
         ph = self._make_mixed_ph(S1, S_kron)
         rhos = self._mixed_rhos()
-        _, compute_ld = ph.build()
+        _, compute_ld, _ = ph.build()
         lds_e, gs_e = compute_ld(rhos)
         lds_j, gs_j = jax.jit(compute_ld)(rhos)
         for ld_e, ld_j in zip(lds_e, lds_j):
@@ -584,7 +584,7 @@ class TestBuild:
         ph = PenaltyHandler()
         ph.add(S1, penalize_null_space=False)
         ph.add(S1, penalize_null_space=False)
-        compute_sqrt, _ = ph.build()
+        compute_sqrt, _, _ = ph.build()
         B_full = compute_sqrt([rho_a, rho_b])
         q = S1.shape[0]
         B0 = B_full[:q, :q]
@@ -600,3 +600,204 @@ class TestBuild:
         np.testing.assert_allclose(
             np.array(B1.T @ B1), np.array(ph1.compute_sqrt([rho_b]).T @ ph1.compute_sqrt([rho_b])), atol=ATOL
         )
+
+
+# ---------------------------------------------------------------------------
+# compute_log_det_hess — Hessian of log|S_lam|+ wrt rho (block-diagonal)
+# ---------------------------------------------------------------------------
+
+class TestLogDetHess:
+    """Hessian of ``Σᵢ log|S_lam_i|_+`` wrt the flattened ρ.
+
+    The handler's gradient ``compute_log_det_and_grad`` is itself an analytical
+    expression; differentiating it once more by central differences gives a
+    high-precision FD reference.  Tests compare the analytical Hessian against
+    this reference for every method (SINGLE, SINGLE_WITH_NULL, KRONECKER,
+    KRONECKER_WITH_NULL, GENERAL) plus block-diagonal mixtures.
+    """
+
+    @staticmethod
+    def _fd_hess_from_grad(ph, rhos, i_pen):
+        """Numerical Hessian of log_det[i_pen] wrt rhos[i_pen] from grads."""
+        def grad_fn(r):
+            _, gs = ph.compute_log_det_and_grad(
+                [jnp.asarray(r) if j == i_pen else rhos[j] for j in range(len(rhos))]
+            )
+            return np.asarray(gs[i_pen])
+
+        return central_diff(grad_fn, rhos[i_pen])
+
+    # ---- SINGLE — Hessian is identically zero -----------------------------
+
+    @pytest.mark.parametrize("rho", [-1.5, 0.0, 1.5])
+    def test_single_zero(self, S1, rho):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False)
+        _, _, compute_ldh = ph.build()
+        H = compute_ldh([jnp.array([rho])])
+        np.testing.assert_allclose(np.array(H), np.zeros((1, 1)), atol=ATOL)
+
+    # ---- SINGLE_WITH_NULL — Hessian is identically zero -------------------
+
+    @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5)])
+    def test_single_with_null_zero(self, S1, rho_pen, rho_null):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True)
+        _, _, compute_ldh = ph.build()
+        H = compute_ldh([jnp.array([rho_pen, rho_null])])
+        np.testing.assert_allclose(np.array(H), np.zeros((2, 2)), atol=ATOL)
+
+    # ---- KRONECKER --------------------------------------------------------
+
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0), (1.2, -0.8)])
+    def test_kronecker_matches_fd(self, S1, rho0, rho1):
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=False)
+        _, _, compute_ldh = ph.build()
+        rho = jnp.array([rho0, rho1])
+        H = np.asarray(compute_ldh([rho]))
+        H_fd = self._fd_hess_from_grad(ph, [rho], i_pen=0)
+        np.testing.assert_allclose(H, H_fd, rtol=1e-5, atol=1e-7)
+
+    def test_kronecker_symmetric(self, S1):
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=False)
+        _, _, compute_ldh = ph.build()
+        H = np.asarray(compute_ldh([jnp.array([0.3, -0.4])]))
+        np.testing.assert_allclose(H, H.T, atol=ATOL)
+
+    # ---- KRONECKER_WITH_NULL ---------------------------------------------
+
+    @pytest.mark.parametrize("rho0,rho1,rho_null",
+                             [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0), (0.7, -0.3, 0.4)])
+    def test_kronecker_with_null_matches_fd(self, S1, rho0, rho1, rho_null):
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=True)
+        _, _, compute_ldh = ph.build()
+        rho = jnp.array([rho0, rho1, rho_null])
+        H = np.asarray(compute_ldh([rho]))
+        H_fd = self._fd_hess_from_grad(ph, [rho], i_pen=0)
+        np.testing.assert_allclose(H, H_fd, rtol=1e-5, atol=1e-7)
+        # Null-space coordinate (last row/col) must be exactly zero —
+        # log|S_lam|+ is linear in ρ_null, so all second derivatives vanish.
+        np.testing.assert_allclose(H[-1, :], np.zeros(3), atol=ATOL)
+        np.testing.assert_allclose(H[:, -1], np.zeros(3), atol=ATOL)
+
+    # ---- GENERAL ----------------------------------------------------------
+
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0), (1.2, -0.8)])
+    def test_general_matches_fd(self, S_kron, rho0, rho1):
+        ph = PenaltyHandler()
+        ph.add(S_kron)
+        _, _, compute_ldh = ph.build()
+        rho = jnp.array([rho0, rho1])
+        H = np.asarray(compute_ldh([rho]))
+        H_fd = self._fd_hess_from_grad(ph, [rho], i_pen=0)
+        np.testing.assert_allclose(H, H_fd, rtol=1e-5, atol=1e-7)
+
+    def test_general_matches_kronecker(self, S1, S_kron):
+        """GENERAL on a Kronecker tensor matches add_kron's analytical Hessian."""
+        rho = jnp.array([0.7, -0.3])
+        ph_kron = PenaltyHandler()
+        ph_kron.add_kron([S1, S1], penalize_null_space=False)
+        ph_gen = PenaltyHandler()
+        ph_gen.add(S_kron)
+        _, _, ldh_kron = ph_kron.build()
+        _, _, ldh_gen = ph_gen.build()
+        H_kron = np.asarray(ldh_kron([rho]))
+        H_gen = np.asarray(ldh_gen([rho]))
+        np.testing.assert_allclose(H_kron, H_gen, atol=1e-5)
+
+    # ---- Block-diagonal mixture ------------------------------------------
+
+    def test_block_diagonal_structure(self, S1, S_kron):
+        """Mixed handler: rho of penalty i has no influence on log|S_lam_j| for j != i."""
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False)          # SINGLE
+        ph.add(S1, penalize_null_space=True)           # SINGLE_WITH_NULL
+        ph.add_kron([S1, S1], penalize_null_space=False)  # KRONECKER
+        ph.add_kron([S1, S1], penalize_null_space=True)   # KRONECKER_WITH_NULL
+        ph.add(S_kron)                                  # GENERAL
+        rhos = [
+            jnp.array([0.5]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([0.5, -0.5, 0.0]),
+            jnp.array([0.5, -0.5]),
+        ]
+        _, _, compute_ldh = ph.build()
+        H = np.asarray(compute_ldh(rhos))
+
+        sizes = [r.shape[0] for r in rhos]
+        offsets = np.cumsum([0] + sizes)
+        total = offsets[-1]
+        assert H.shape == (total, total)
+
+        # Off-diagonal blocks must be exactly zero (penalties are independent).
+        for i in range(len(sizes)):
+            for j in range(len(sizes)):
+                if i == j:
+                    continue
+                block = H[offsets[i]:offsets[i + 1], offsets[j]:offsets[j + 1]]
+                np.testing.assert_allclose(block, 0.0, atol=ATOL)
+
+        # On-diagonal blocks must match each penalty's standalone Hessian.
+        cases = [
+            (PenaltyHandler(), lambda p: p.add(S1, penalize_null_space=False)),
+            (PenaltyHandler(), lambda p: p.add(S1, penalize_null_space=True)),
+            (PenaltyHandler(), lambda p: p.add_kron([S1, S1], penalize_null_space=False)),
+            (PenaltyHandler(), lambda p: p.add_kron([S1, S1], penalize_null_space=True)),
+            (PenaltyHandler(), lambda p: p.add(S_kron)),
+        ]
+        for i, (ph_i, builder) in enumerate(cases):
+            builder(ph_i)
+            _, _, ldh_i = ph_i.build()
+            H_i = np.asarray(ldh_i([rhos[i]]))
+            diag = H[offsets[i]:offsets[i + 1], offsets[i]:offsets[i + 1]]
+            np.testing.assert_allclose(diag, H_i, atol=ATOL)
+
+    # ---- vmap path (group with two members) ------------------------------
+
+    def test_vmap_matches_singletons(self, S1):
+        """Two penalties with the same method share a vmap group; result matches."""
+        rho_a, rho_b = jnp.array([0.5, -0.5]), jnp.array([-0.3, 0.7])
+        ph_group = PenaltyHandler()
+        ph_group.add_kron([S1, S1], penalize_null_space=False)
+        ph_group.add_kron([S1, S1], penalize_null_space=False)
+        _, _, ldh_group = ph_group.build()
+        H_group = np.asarray(ldh_group([rho_a, rho_b]))
+
+        # Per-member singleton handlers
+        ph_a = PenaltyHandler()
+        ph_a.add_kron([S1, S1], penalize_null_space=False)
+        _, _, ldh_a = ph_a.build()
+        H_a = np.asarray(ldh_a([rho_a]))
+
+        ph_b = PenaltyHandler()
+        ph_b.add_kron([S1, S1], penalize_null_space=False)
+        _, _, ldh_b = ph_b.build()
+        H_b = np.asarray(ldh_b([rho_b]))
+
+        m = rho_a.shape[0]
+        np.testing.assert_allclose(H_group[:m, :m], H_a, atol=ATOL)
+        np.testing.assert_allclose(H_group[m:, m:], H_b, atol=ATOL)
+        # Cross-block: still zero
+        np.testing.assert_allclose(H_group[:m, m:], 0.0, atol=ATOL)
+        np.testing.assert_allclose(H_group[m:, :m], 0.0, atol=ATOL)
+
+    # ---- JIT --------------------------------------------------------------
+
+    def test_jittable(self, S1, S_kron):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False)
+        ph.add_kron([S1, S1], penalize_null_space=True)
+        ph.add(S_kron)
+        rhos = [
+            jnp.array([0.5]),
+            jnp.array([0.5, -0.5, 0.0]),
+            jnp.array([0.5, -0.5]),
+        ]
+        _, _, compute_ldh = ph.build()
+        H_e = np.asarray(compute_ldh(rhos))
+        H_j = np.asarray(jax.jit(compute_ldh)(rhos))
+        np.testing.assert_allclose(H_j, H_e, atol=ATOL)

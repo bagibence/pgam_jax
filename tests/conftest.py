@@ -97,7 +97,7 @@ def gam_design_and_penalty(K_per_smooth, x_covs):
     ph = PenaltyHandler(non_linearity=jnp.exp)
     for _ in range(M):
         ph.add(S_block_small, penalize_null_space=False)
-    compute_sqrt, compute_log_det_and_grad = ph.build()
+    compute_sqrt, compute_log_det_and_grad, _ = ph.build()
 
     S_all = np.zeros((M, P, P))
     for k in range(M):

@@ -169,7 +169,7 @@ class TestLaplaceRemlRegression:
             keep = np.any(S != 0, axis=0) | np.any(S != 0, axis=1)
             small = S[np.ix_(keep, keep)]
             ph.add(jnp.asarray(small), penalize_null_space=False)
-        compute_sqrt, compute_ld = ph.build()
+        compute_sqrt, compute_ld, _ = ph.build()
         rhos_tree = [rho[k:k + 1] for k in range(rho.size)]
 
         value, grad = laplace_reml(

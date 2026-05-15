@@ -6,7 +6,12 @@ from typing import Callable
 from functools import reduce
 
 from nemos.inverse_link_function_utils import identity
-from ._slam_compute import transform_slam_with_Q, transform_slam, log_det_and_grad_slam
+from ._slam_compute import (
+    transform_slam_with_Q,
+    transform_slam,
+    log_det_and_grad_slam,
+    hes_log_det_slam,
+)
 from jax.scipy.linalg import block_diag
 
 
@@ -256,6 +261,79 @@ class PenaltyHandler:
             case _:
                 raise NotImplementedError(f"_log_det_and_grad not implemented for {method}.")
 
+    @staticmethod
+    def _kron_log_det_factor_hess(lams, eigs):
+        """
+        Hessian of log|Σⱼ λⱼ Sⱼ|_+ wrt ρ for the Kronecker-sum factorisation.
+
+        Treats only the positive eigenvalues of the combined sum (the null space
+        is handled separately by ``KRONECKER_WITH_NULL``).  Derived directly
+        from the gradient ``grad[b] = λ_b Σ_i eig_b[i_b] / combined[i]``:
+
+            H[a,b] = δ_{ab} grad[a] − λ_a λ_b Σ_i eig_a[i_a] eig_b[i_b] / combined[i]²
+        """
+        combined_nd = reduce(
+            jnp.add.outer,
+            [lam * eig for lam, eig in zip(lams, eigs)]
+        )
+        pos = combined_nd > 0
+        safe = jnp.where(pos, combined_nd, 1.0)
+        inv = jnp.where(pos, 1.0 / safe, 0.0)
+        inv_sq = jnp.where(pos, 1.0 / (safe * safe), 0.0)
+
+        ndim = len(eigs)
+        grad = []
+        for j, (lam, eig) in enumerate(zip(lams, eigs)):
+            shape = [1] * ndim
+            shape[j] = -1
+            grad.append(lam * jnp.sum(eig.reshape(shape) * inv))
+
+        hess = jnp.zeros((ndim, ndim))
+        for a in range(ndim):
+            sh_a = [1] * ndim
+            sh_a[a] = -1
+            eig_a = eigs[a].reshape(sh_a)
+            for b in range(ndim):
+                sh_b = [1] * ndim
+                sh_b[b] = -1
+                eig_b = eigs[b].reshape(sh_b)
+                off = -lams[a] * lams[b] * jnp.sum(eig_a * eig_b * inv_sq)
+                hess = hess.at[a, b].set(off)
+            hess = hess.at[a, a].add(grad[a])
+        return hess
+
+    def _log_det_hess(self, method, cache, rho):
+        """Hessian of ``log|S_lam|_+`` wrt ρ for one registered penalty block."""
+        m = rho.shape[0]
+        match method:
+            case SqrtMethod.SINGLE:
+                # log_det = rank * rho[0] + const → Hessian is zero.
+                return jnp.zeros((m, m))
+
+            case SqrtMethod.SINGLE_WITH_NULL:
+                # log_det linear in (rho[0], rho[1]) → Hessian is zero.
+                return jnp.zeros((m, m))
+
+            case SqrtMethod.KRONECKER:
+                lams = self._non_linearity(rho)
+                return self._kron_log_det_factor_hess(lams, cache["eigs"])
+
+            case SqrtMethod.KRONECKER_WITH_NULL:
+                lams = self._non_linearity(rho)
+                hess = jnp.zeros((m, m))
+                hess_kron = self._kron_log_det_factor_hess(lams[:-1], cache["eigs"])
+                # Linear term n_null * rho[-1] contributes zero to the Hessian.
+                return hess.at[:m - 1, :m - 1].set(hess_kron)
+
+            case SqrtMethod.GENERAL:
+                S_i_out = transform_slam(cache["full_rank_S"], rho)
+                return hes_log_det_slam(rho, S_i_out)
+
+            case _:
+                raise NotImplementedError(
+                    f"_log_det_hess not implemented for {method}."
+                )
+
     def compute_log_det_and_grad(self, rhos: list[jnp.ndarray]) -> tuple[list, list]:
         """
         Returns
@@ -308,7 +386,7 @@ class PenaltyHandler:
 
     def build(self) -> tuple:
         """
-        Snapshot the handler into two pure callables.
+        Snapshot the handler into pure callables.
 
         Returns
         -------
@@ -316,12 +394,17 @@ class PenaltyHandler:
             ``compute_sqrt(rhos) -> (total_pen_rows, n_params)`` block-diagonal matrix.
         compute_log_det_and_grad : callable
             ``compute_log_det_and_grad(rhos) -> (list[scalar], list[array])``
+        compute_log_det_hess : callable
+            ``compute_log_det_hess(rhos) -> (M_total, M_total)`` block-diagonal
+            Hessian of ``Σᵢ log|S_lam_i|_+`` wrt the flattened ρ.  Each smooth
+            block is independent of the others (block-diagonal structure).
         """
         n = self._n_penalties
         nl = self._non_linearity
         caches = list(self._cache)
         _sqrt_fn = self._sqrt
         _ld_fn = self._log_det_and_grad
+        _ldh_fn = self._log_det_hess
 
         group_data = []
         for (method, _shape, id_fn), members in self._groups.items():
@@ -348,6 +431,9 @@ class PenaltyHandler:
                     ),
                     "vmapped_ld": jax.vmap(
                         lambda c, r, _m=method: _ld_fn(_m, c, r)
+                    ),
+                    "vmapped_ldh": jax.vmap(
+                        lambda c, r, _m=method: _ldh_fn(_m, c, r)
                     ),
                 })
 
@@ -380,7 +466,21 @@ class PenaltyHandler:
                         grads[idx] = batched_g[k]
             return log_dets, grads
 
-        return compute_sqrt, compute_log_det_and_grad
+        def compute_log_det_hess(rhos):
+            blocks = [None] * n
+            for g in group_data:
+                if g["singleton"]:
+                    blocks[g["idx"]] = _ldh_fn(
+                        g["method"], g["cache"], rhos[g["idx"]]
+                    )
+                else:
+                    batched_rhos = jnp.stack([rhos[i] for i in g["members"]])
+                    batched_h = g["vmapped_ldh"](g["stacked_cache"], batched_rhos)
+                    for k, idx in enumerate(g["members"]):
+                        blocks[idx] = batched_h[k]
+            return block_diag(*blocks)
+
+        return compute_sqrt, compute_log_det_and_grad, compute_log_det_hess
 
     def __len__(self):
         return self._n_penalties

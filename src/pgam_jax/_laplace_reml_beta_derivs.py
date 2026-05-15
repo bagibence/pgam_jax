@@ -5,6 +5,75 @@ import jax.numpy as jnp
 from ._pirls_weights import small_h
 
 
+def _dSlam_drho(S_all, rho, phi):
+    """∂(λ_k S_k)/∂ρ = λ_k S_k / φ stack — shape (M, p, p)."""
+    return S_all * jnp.exp(rho)[:, None, None] / phi
+
+
+def d2beta_hat(
+    beta_hat: jnp.ndarray,
+    V_beta: jnp.ndarray,
+    dH_drho_arr: jnp.ndarray,
+    S_all: jnp.ndarray,
+    rho: jnp.ndarray,
+    phi: float,
+    J: jnp.ndarray,
+) -> jnp.ndarray:
+    """Second derivative of the MAP estimate β̂ wrt log-smoothing parameters.
+
+    Differentiating ``J[k] = -V_β (λ_k S_k / φ) β̂`` a second time and using
+    ``dV_β/dρ_h = -V_β · (dH/dρ_h + λ_h S_h / φ) · V_β`` gives
+
+        d²β̂/(dρ_h dρ_k) = -V_β · (dH/dρ_h + λ_h S_h/φ) · J[k]
+                          + δ_{hk} · J[k]
+                          - V_β · (λ_k S_k/φ) · J[h].
+
+    The book (Wood 2017) contains a sign error here; this implementation matches
+    the numpy reference (which encodes the corrected derivation in the project
+    Overleaf notes).  Cross-validated against the legacy implementation by the
+    AIC FD-vs-analytical test.
+
+    Parameters
+    ----------
+    beta_hat : (p,)
+        MAP coefficient estimate at ρ.
+    V_beta : (p, p)
+        Posterior covariance (output of :func:`vbeta_and_logdet`).
+    dH_drho_arr : (M, p, p)
+        Pre-computed ``dH/dρ`` from :func:`dH_drho`.
+    S_all : (M, p, p)
+        Stack of raw penalty matrices (full coef space).
+    rho : (M,)
+        Log-smoothing parameters.
+    phi :
+        Dispersion parameter (positive scalar).
+    J : (M, p)
+        Pre-computed ``dβ̂/dρ`` from :func:`dbeta_hat`.
+
+    Returns
+    -------
+    d2B : (M, M, p)
+        ``d2B[h, k, :] = d²β̂/(dρ_h dρ_k)``.
+    """
+    M = rho.shape[0]
+    dSlam = _dSlam_drho(S_all, rho, phi)                       # (M, p, p)
+    dVbi = dH_drho_arr + dSlam                                  # (M, p, p) = dV_β⁻¹/dρ
+
+    # add1[h, k, :] = -V_β · dV_β⁻¹/dρ_h · J[k]
+    Vb_dVbi = jnp.einsum("ij,hjl->hil", V_beta, dVbi)           # (M, p, p)
+    add1 = -jnp.einsum("hil,kl->hki", Vb_dVbi, J)               # (M, M, p)
+
+    # add2[h, k, :] = -V_β · (λ_k S_k/φ) · J[h]
+    dSlam_J = jnp.einsum("kij,hj->khi", dSlam, J)               # (M, M, p) — dSlam[k] · J[h]
+    add2 = -jnp.einsum("il,khl->hki", V_beta, dSlam_J)          # (M, M, p)
+
+    hes = add1 + add2
+    # Diagonal correction δ_{hk} · J[k]
+    idx = jnp.arange(M)
+    hes = hes.at[idx, idx].add(J)
+    return hes
+
+
 def dbeta_hat(
     beta_hat: jnp.ndarray,
     V_beta: jnp.ndarray,

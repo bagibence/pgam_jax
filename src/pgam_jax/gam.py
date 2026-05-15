@@ -600,7 +600,7 @@ class GAM:
         y = jnp.asarray(y)
 
         ph = self._build_penalty_handler(penalty_tree)
-        compute_sqrt, compute_log_det_and_grad = ph.build()
+        compute_sqrt, compute_log_det_and_grad, _ = ph.build()
 
         # TODO: Pull out the GLM initialization here?
         if init_params is None:

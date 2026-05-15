@@ -28,7 +28,7 @@ def _build_ph_and_factory(penalty_tree):
     ph = PenaltyHandler(non_linearity=jnp.exp)
     for S in penalty_tree:
         ph.add(S, penalize_null_space=False, identifiability_fn=_identity)
-    compute_sqrt, compute_log_det_and_grad = ph.build()
+    compute_sqrt, compute_log_det_and_grad, _ = ph.build()
 
     id_fns = tuple(_identity for _ in range(n_smooths))
     return reml_compute_factory(
