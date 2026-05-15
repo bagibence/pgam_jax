@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from jax.scipy.linalg import block_diag
 
+from conftest import central_diff, diff2_penalty
+
 from pgam_jax._penalty_handler import PenaltyHandler, SqrtMethod, _drop_last_col
 from pgam_jax.penalty_utils import (
     compute_penalty_null_space,
@@ -18,27 +20,13 @@ ATOL = 1e-12
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _diff2_penalty(n):
-    """n×n second-derivative penalty, rank n-2, null space = {constants, linear}."""
-    D = np.zeros((n - 2, n))
-    for i in range(n - 2):
-        D[i, i] = 1.0
-        D[i, i + 1] = -2.0
-        D[i, i + 2] = 1.0
-    return jnp.array(D.T @ D, dtype=float)
-
-
-# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
 def S1():
     """10×10 second-derivative penalty, rank 8, 2-dim null space."""
-    return _diff2_penalty(10)
+    return diff2_penalty(10)
 
 
 @pytest.fixture(scope="module")
@@ -359,14 +347,6 @@ def _ref_log_det(S_lam):
     return float(np.sum(np.log(eig[eig > 1e-10])))
 
 
-def _cd_grad(log_det_fn, rho, eps=1e-5):
-    """Central-difference gradient of log_det_fn(rho) → scalar."""
-    return np.array([
-        (log_det_fn(rho.at[j].add(eps)) - log_det_fn(rho.at[j].add(-eps))) / (2 * eps)
-        for j in range(len(rho))
-    ])
-
-
 class TestLogDetAndGrad:
 
     def _ph_ld_grad(self, ph, rhos, idx=0):
@@ -390,7 +370,7 @@ class TestLogDetAndGrad:
         ph.add(S1, penalize_null_space=False)
         rho = jnp.array([rho])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- SINGLE_WITH_NULL --------------------------------------------------
@@ -411,7 +391,7 @@ class TestLogDetAndGrad:
         ph.add(S1, penalize_null_space=True)
         rho = jnp.array([rho_pen, rho_null])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- KRONECKER ---------------------------------------------------------
@@ -432,7 +412,7 @@ class TestLogDetAndGrad:
         ph.add_kron([S1, S1], penalize_null_space=False)
         rho = jnp.array([rho0, rho1])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- KRONECKER_WITH_NULL -----------------------------------------------
@@ -454,7 +434,7 @@ class TestLogDetAndGrad:
         ph.add_kron([S1, S1], penalize_null_space=True)
         rho = jnp.array([rho0, rho1, rho_null])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- GENERAL -----------------------------------------------------------
@@ -475,7 +455,7 @@ class TestLogDetAndGrad:
         ph.add(S_kron)
         rho = jnp.array([rho0, rho1])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- GENERAL matches KRONECKER on same tensor --------------------------
