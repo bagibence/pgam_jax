@@ -57,17 +57,29 @@ def d2beta_hat(
     """
     M = rho.shape[0]
     dSlam = _dSlam_drho(S_all, rho, phi)                       # (M, p, p)
-    dVbi = dH_drho_arr + dSlam                                  # (M, p, p) = dV_β⁻¹/dρ
 
-    # add1[h, k, :] = -V_β · dV_β⁻¹/dρ_h · J[k]
-    Vb_dVbi = jnp.einsum("ij,hjl->hil", V_beta, dVbi)           # (M, p, p)
-    add1 = -jnp.einsum("hil,kl->hki", Vb_dVbi, J)               # (M, M, p)
+    # Both add1's dSlam-part and add2 hit the SAME V_β contraction of
+    # ``T[h, k] := dSlam[k] · J[h]`` — by symmetry of dSlam, ``T[k, h]`` equals
+    # ``dSlam[h] · J[k]``, so the V_β post-multiplication is shared:
+    #   add2[h, k]                = -V_β · T[h, k]
+    #   add1's dSlam-part[h, k]   = -V_β · T[k, h]
+    # The dH-part of add1 needs its own V_β · dH · J pass.
+    # See `_script/bench_d2beta_hat.py` for the timing study justifying this
+    # factorisation (10–40 % faster than the naïve dH+dSlam-then-multiply form
+    # at realistic GAM sizes; bit-identical results to 1e-9 absolute).
 
-    # add2[h, k, :] = -V_β · (λ_k S_k/φ) · J[h]
-    dSlam_J = jnp.einsum("kij,hj->khi", dSlam, J)               # (M, M, p) — dSlam[k] · J[h]
-    add2 = -jnp.einsum("il,khl->hki", V_beta, dSlam_J)          # (M, M, p)
+    # T[h, k, i] = (dSlam[k] · J[h])[i]
+    T = jnp.einsum("kij,hj->hki", dSlam, J)                    # (M, M, p)
+    # U[h, k] = V_β · T[h, k]
+    U = jnp.einsum("il,hkl->hki", V_beta, T)                   # (M, M, p)
+    # add2 = -U;  add1's dSlam-part = -U.transpose(1, 0, 2)
+    add_shared = -(U + U.transpose(1, 0, 2))                    # (M, M, p)
 
-    hes = add1 + add2
+    # add1's dH-part: -V_β · dH[h] · J[k]
+    Vb_dH = jnp.einsum("ij,hjl->hil", V_beta, dH_drho_arr)      # (M, p, p)
+    add1_dH = -jnp.einsum("hil,kl->hki", Vb_dH, J)              # (M, M, p)
+
+    hes = add1_dH + add_shared
     # Diagonal correction δ_{hk} · J[k]
     idx = jnp.arange(M)
     hes = hes.at[idx, idx].add(J)
