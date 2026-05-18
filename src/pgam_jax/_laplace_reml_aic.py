@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from ._chol_deriv import grad_chol_Vbeta
+from ._chol_deriv import grad_U_Vbeta
 from ._laplace_reml_beta_derivs import dbeta_hat, dH_drho
 from ._laplace_reml_hessian import hess_laplace_reml
 from ._pirls_weights import _make_w_fn
@@ -103,16 +103,21 @@ def compute_aic_corrected(
     dH = dH_drho(beta_hat, X, y, obs_model, inverse_link_fn, J, phi)  # (M, p, p)
     dSlam = S_all * jnp.exp(rho)[:, None, None] / phi                 # (M, p, p)
     dVb_inv = dH + dSlam                                              # (M, p, p)
-    dR = grad_chol_Vbeta(V_beta, dVb_inv)                             # (M, p, p)
+    # dU stack for the U-convention V_β = U U^T (mgcv-style; see _chol_deriv
+    # for the stability rationale).  Operates on V_β⁻¹ throughout — never
+    # factors V_β directly.
+    dU = grad_U_Vbeta(V_beta_inv, dVb_inv)                            # (M, p, p)
 
-    # 3. V'_β = V_β + Jᵀ V_ρ J + Σ_{h,k} (dR_h)ᵀ V_ρ[h,k] (dR_k).
+    # 3. V'_β = V_β + Jᵀ V_ρ J + Σ_{h,k} V_ρ[h,k] · dU_h · dU_k^T.
+    # The transpose on the *second* factor matches mgcv's vcorr (trans=FALSE
+    # branch, ``src/mat.c:1815``).  See _chol_deriv.grad_U_Vbeta docstring.
     V_rho_J = apply_V_rho(J)                                          # (M, p)
     V_prime = J.T @ V_rho_J                                            # (p, p)
 
     M = rho.shape[0]
     p = V_beta.shape[0]
-    V_rho_dR = apply_V_rho(dR.reshape(M, p * p)).reshape(M, p, p)
-    V_2prime = jnp.einsum("kij,kil->jl", dR, V_rho_dR)                 # (p, p)
+    V_rho_dU = apply_V_rho(dU.reshape(M, p * p)).reshape(M, p, p)
+    V_2prime = jnp.einsum("hia,hja->ij", dU, V_rho_dU)                 # (p, p)
     V_corr = V_beta + V_prime + V_2prime
 
     # 4. τ₂ = tr(V'_β · I̥).  I̥ = Xᵀ diag(w) X / φ, with w = -d²logf/dη² at β̂.

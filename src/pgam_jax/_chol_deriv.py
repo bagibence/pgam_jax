@@ -50,36 +50,63 @@ def grad_cholesky(grad_D: jnp.ndarray, R: jnp.ndarray) -> jnp.ndarray:
     return upper_half @ R
 
 
-def grad_chol_Vbeta(
-    V_beta: jnp.ndarray,
+def grad_U_Vbeta(
+    V_beta_inv: jnp.ndarray,
     dVb_inv_drho: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Derivative of the upper-Cholesky factor of ``V_β`` wrt log-smoothing parameters.
+    """Derivative of the ``U`` factor of ``V_β`` wrt log-smoothing parameters.
 
-    The corrected-AIC ``V''_β`` term (Wood 2017 eq. 6.32; legacy
-    ``grad_chol_Vb_rho``) uses ``R^T R = V_β`` — the **covariance**, not the
-    precision.  Given ``dV_β⁻¹/dρ_h`` (which the Laplace-REML pipeline
-    produces directly as ``dH/dρ_h + λ_h S_h/φ``), the covariance derivative
-    follows from the matrix-inverse identity
+    The corrected-AIC ``V''_β`` term (Wood 2017 eq. 6.32) needs the derivative
+    of a square-root factor of ``V_β``.  This implementation uses the
+    ``U U^T`` factorisation rather than the textbook ``R^T R`` one,
 
-        dV_β/dρ_h = −V_β · dV_β⁻¹/dρ_h · V_β,
+        V_β  =  U U^T,    U upper-triangular,
+        U   =  R̃⁻¹  where  R̃^T R̃ = V_β⁻¹  (R̃ also upper-triangular),
 
-    and we ``vmap`` :func:`grad_cholesky` across the smoothing-parameter axis.
+    for numerical stability: in penalised regression ``V_β⁻¹ = X^T W X + S_λ``
+    is the well-conditioned object (the penalty ``S_λ`` regularises it), while
+    ``V_β`` can have small eigenvalues in directions of strong smoothing.
+    Operating only on R̃ via triangular solves never amplifies those small
+    eigenvalues; factoring ``V_β`` directly via ``chol(V_β)`` does.
+
+    The derivative formula mirrors mgcv's ``Vb.corr`` (R wrapper in
+    ``R/gam.fit3.r``, C kernel ``dchol`` in ``src/mat.c:1845``):
+
+        dR̃/dρ_h  =  dchol(dV_β⁻¹/dρ_h, R̃)              (standard upper-chol deriv)
+        dU/dρ_h  = −R̃⁻¹ · dR̃/dρ_h · R̃⁻¹                (two triangular solves)
+
+    The matching V_2prime assembly is
+
+        V_2prime  =  Σ_{h,k} V_ρ[h,k] · dU_h · dU_k^T
+
+    — note the transpose on the *second* factor, in contrast to the textbook
+    ``Σ V_ρ dR^T dR`` form (Wood 2017 App. B.7) that the legacy numpy PGAM
+    uses with ``R^T R = V_β``.  Both are valid leading-order Wood corrections
+    of the marginal covariance ``Cov(β̂)``; we adopt mgcv's convention for the
+    stability advantage and document the convention break here.
 
     Parameters
     ----------
-    V_beta : ``(p, p)``
-        Posterior covariance ``φ (H + S_λ/φ)⁻¹`` (from :func:`vbeta_and_logdet`).
+    V_beta_inv : ``(p, p)``
+        Posterior precision ``(H + S_λ)/φ`` (from :func:`vbeta_and_logdet`).
+        Symmetric positive-definite.
     dVb_inv_drho : ``(M, p, p)``
-        Stack ``dV_β⁻¹/dρ`` — typically ``dH/dρ + λ_k S_k/φ``.
+        Stack of ``dV_β⁻¹/dρ_h``.  In the Laplace-REML pipeline this equals
+        ``dH/dρ_h + λ_h S_h / φ`` — note no inversion is needed, the precision
+        derivative is the natural quantity produced by the fit.
 
     Returns
     -------
-    dR : ``(M, p, p)``
-        ``dR[h]`` is the derivative of the upper-triangular Cholesky factor of
-        ``V_β`` wrt ``ρ_h``.
+    dU : ``(M, p, p)``
+        ``dU[h]`` is upper-triangular and satisfies the U-convention defining
+        identity ``dU[h] U^T + U dU[h]^T = dV_β/dρ_h``.
     """
-    R = jnp.linalg.cholesky(V_beta).T  # upper triangular, R^T R = V_β
-    # dV_β/dρ_h = -V_β · dV_β⁻¹/dρ_h · V_β
-    dVb = -jnp.einsum("ij,hjk,kl->hil", V_beta, dVb_inv_drho, V_beta)
-    return jax.vmap(lambda dD: grad_cholesky(dD, R))(dVb)
+    R_tilde = jnp.linalg.cholesky(V_beta_inv).T  # upper-tri, R̃^T R̃ = V_β⁻¹
+
+    def per_smooth(dVbinv_h):
+        dR_tilde = grad_cholesky(dVbinv_h, R_tilde)
+        # dU = -R̃⁻¹ · dR̃ · R̃⁻¹ via two triangular solves.
+        Z = solve_triangular(R_tilde, dR_tilde, lower=False)        # Z = R̃⁻¹ dR̃
+        return -solve_triangular(R_tilde.T, Z.T, lower=True).T      # = Z · R̃⁻¹
+
+    return jax.vmap(per_smooth)(dVb_inv_drho)

@@ -283,8 +283,13 @@ $$
          \frac{\partial V_\beta^{-1}}{\partial \rho_k}\, V_\beta, \tag{5}
 $$
 
-which the wrapper `_chol_deriv.py:grad_chol_Vbeta` does internally before
-`vmap`-ing `grad_cholesky` over the $M$-axis.
+which the wrapper `_chol_deriv.py:grad_U_Vbeta` *avoids* — it operates on
+$V_\beta^{-1}$ throughout (the well-conditioned object in penalised
+regression) and returns $\mathrm{d}U/\mathrm{d}\rho$ where $U U^T = V_\beta$,
+via the mgcv-style transform $\mathrm{d}U = -\tilde R^{-1}\,\mathrm{d}\tilde R\,\tilde R^{-1}$
+with $\tilde R = \mathrm{chol}(V_\beta^{-1})$.  See the
+`grad_U_Vbeta` docstring for the stability rationale and the convention
+switch from the textbook $R^T R = V_\beta$ form.
 
 ---
 

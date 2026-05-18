@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from conftest import central_diff
 
-from pgam_jax._chol_deriv import grad_cholesky, grad_chol_Vbeta
+from pgam_jax._chol_deriv import grad_cholesky, grad_U_Vbeta
 
 jax.config.update("jax_enable_x64", True)
 
@@ -136,91 +136,130 @@ class TestGradCholesky:
 
 
 # ---------------------------------------------------------------------------
-# grad_chol_Vbeta — batched derivative of chol(V_β) wrt ρ  (AIC V'' term)
+# grad_U_Vbeta — batched derivative of U (where U U^T = V_β) wrt ρ  (AIC V''
+# term, mgcv U-convention; see _chol_deriv.grad_U_Vbeta docstring for why we
+# use V_β = U U^T rather than the textbook V_β = R^T R).
 # ---------------------------------------------------------------------------
 
-class TestGradCholVbeta:
-    """``grad_chol_Vbeta(V_β, dV_β⁻¹/dρ) → dR/dρ`` with ``R^T R = V_β``.
 
-    Mirrors the legacy ``grad_chol_Vb_rho`` (caller in ``compute_AIC``):
-    V_β is the covariance, ``dV_β⁻¹/dρ_h = dH/dρ_h + λ_h S_h/φ`` is the
-    precision derivative. The function internally re-inverts to the
-    covariance derivative ``-V_β · dV_β⁻¹/dρ · V_β`` before calling
-    grad_cholesky.
+def _mgcv_dU_reference(V_beta_inv: np.ndarray, dVb_inv_stack: np.ndarray) -> np.ndarray:
+    """Independent numpy reference for grad_U_Vbeta — mirrors mgcv Vb.corr.
+
+    Steps:
+      R̃ = chol(V_β⁻¹).T                                 (upper-tri)
+      dR̃ = grad_cholesky(dV_β⁻¹/dρ_h, R̃)                (upper-chol deriv recurrence)
+      dU = −R̃⁻¹ · dR̃ · R̃⁻¹                              (via explicit dense inv)
+    """
+    R_tilde = np.linalg.cholesky(V_beta_inv).T
+    R_inv = np.linalg.solve(R_tilde, np.eye(R_tilde.shape[0]))  # upper-tri R̃⁻¹
+    dU = np.zeros_like(dVb_inv_stack)
+    for h in range(dVb_inv_stack.shape[0]):
+        dR_tilde = _legacy_grad_cholesky(dVb_inv_stack[h], R_tilde)
+        dU[h] = -R_inv @ dR_tilde @ R_inv
+    return dU
+
+
+class TestGradUVbeta:
+    """``grad_U_Vbeta(V_β⁻¹, dV_β⁻¹/dρ) → dU/dρ`` with ``U U^T = V_β``.
+
+    U is the upper-tri inverse of the Cholesky factor of V_β⁻¹.  Convention
+    differs from Wood (2017) App. B.7 / legacy numpy PGAM (which use
+    ``R^T R = V_β`` and assemble ``Σ V_ρ dR^T dR``); see the function
+    docstring for the stability rationale.
     """
 
-    def test_matches_legacy_per_rho(self):
-        """Batched (vmap) result matches per-ρ legacy recurrence."""
+    def test_matches_mgcv_reference(self):
+        """Batched (vmap) result matches the mgcv-recipe numpy reference."""
         rng = np.random.default_rng(3)
         p, M = 6, 3
-        # Construct a covariance V_β and its-inverse-derivatives dV_β⁻¹/dρ_h.
         A = rng.standard_normal((p, p))
-        Vb = jnp.asarray(A @ A.T + 0.4 * np.eye(p))
+        Vbi = A @ A.T + 0.4 * np.eye(p)          # precision (well-conditioned)
         dVb_inv = np.stack([
             (lambda B: B + B.T)(rng.standard_normal((p, p)))
             for _ in range(M)
         ])
-        dVb_inv_j = jnp.asarray(dVb_inv)
 
-        dR_batched = np.asarray(grad_chol_Vbeta(Vb, dVb_inv_j))
+        dU_batched = np.asarray(
+            grad_U_Vbeta(jnp.asarray(Vbi), jnp.asarray(dVb_inv))
+        )
+        dU_ref = _mgcv_dU_reference(Vbi, dVb_inv)
+        np.testing.assert_allclose(dU_batched, dU_ref, atol=1e-10, rtol=1e-10)
 
-        # Reference: legacy applies grad_cholesky to dV_β/dρ = -V_β · dV_β⁻¹/dρ · V_β
-        # against R = chol(V_β).T.
-        Vb_np = np.asarray(Vb)
-        R_np = np.linalg.cholesky(Vb_np).T
-        dVb_np = -np.einsum("ij,hjk,kl->hil", Vb_np, dVb_inv, Vb_np)
-        dR_ref = np.stack([
-            _legacy_grad_cholesky(dVb_np[h], R_np) for h in range(M)
-        ])
-        np.testing.assert_allclose(dR_batched, dR_ref, atol=1e-10, rtol=1e-10)
-
-    def test_matches_finite_difference(self):
-        """dR[h] = d/dρ_h chol(V_β(ρ)) matches central differences.
-
-        Parameterise the precision V_β⁻¹(ρ) = V_β⁻¹_0 + Σ_h ρ_h · S_h, so
-        dV_β⁻¹/dρ_h = S_h, and at ρ=0 the covariance is V_β_0 = inv(V_β⁻¹_0).
-        """
-        rng = np.random.default_rng(5)
-        p, M = 6, 2
+    def test_satisfies_defining_identity(self):
+        """dU U^T + U dU^T = dV_β/dρ_h, the U-convention defining relation."""
+        rng = np.random.default_rng(7)
+        p, M = 5, 3
         A = rng.standard_normal((p, p))
-        Vbi0 = A @ A.T + 0.4 * np.eye(p)  # precision at ρ=0
-        S_stack = np.stack([
+        Vbi = A @ A.T + 0.5 * np.eye(p)
+        dVb_inv = np.stack([
             (lambda B: B + B.T)(rng.standard_normal((p, p)))
             for _ in range(M)
         ])
 
-        Vb0 = np.linalg.inv(Vbi0)
-        # dV_β⁻¹/dρ_h = S_h  (precision derivative — what grad_chol_Vbeta consumes)
-        dVb_inv = S_stack
+        Vb = np.linalg.inv(Vbi)
+        R_tilde = np.linalg.cholesky(Vbi).T
+        U = np.linalg.solve(R_tilde, np.eye(p))         # U = R̃⁻¹, upper-tri
 
-        dR_batched = np.asarray(
-            grad_chol_Vbeta(jnp.asarray(Vb0), jnp.asarray(dVb_inv))
+        dU = np.asarray(
+            grad_U_Vbeta(jnp.asarray(Vbi), jnp.asarray(dVb_inv))
+        )
+        for h in range(M):
+            lhs = dU[h] @ U.T + U @ dU[h].T
+            rhs = -Vb @ dVb_inv[h] @ Vb        # = dV_β/dρ_h
+            np.testing.assert_allclose(lhs, rhs, atol=1e-10, rtol=1e-10)
+
+    def test_matches_finite_difference(self):
+        """dU[h] = d/dρ_h U(ρ) matches central differences of chol(V_β⁻¹(ρ))⁻¹."""
+        rng = np.random.default_rng(5)
+        p, M = 6, 2
+        A = rng.standard_normal((p, p))
+        Vbi0 = A @ A.T + 0.4 * np.eye(p)
+        S_stack = np.stack([
+            (lambda B: B + B.T)(rng.standard_normal((p, p)))
+            for _ in range(M)
+        ])
+        dVb_inv = S_stack                                  # dV_β⁻¹/dρ_h = S_h
+
+        dU_batched = np.asarray(
+            grad_U_Vbeta(jnp.asarray(Vbi0), jnp.asarray(dVb_inv))
         )
 
-        # FD reference: dR[h] = d/dρ_h chol(V_β(ρ))|_ρ=0 where
-        # V_β(ρ) = inv(Vbi0 + Σ ρ_h S_h).
-        def chol_at(rho):
+        def U_at(rho):
             Vbi_p = Vbi0 + np.einsum("h,hij->ij", rho, S_stack)
-            Vb_p = np.linalg.inv(Vbi_p)
-            Vb_p = 0.5 * (Vb_p + Vb_p.T)  # symmetrise — Cholesky requires it
-            return np.linalg.cholesky(Vb_p).T.ravel()
+            R_tilde = np.linalg.cholesky(Vbi_p).T
+            return np.linalg.solve(R_tilde, np.eye(p)).ravel()
 
-        dR_fd = central_diff(chol_at, np.zeros(M), rel_step=1e-6)
-        dR_fd = dR_fd.reshape(p, p, M).transpose(2, 0, 1)
-        np.testing.assert_allclose(dR_batched, dR_fd, rtol=1e-5, atol=1e-7)
+        dU_fd = central_diff(U_at, np.zeros(M), rel_step=1e-6)
+        dU_fd = dU_fd.reshape(p, p, M).transpose(2, 0, 1)
+        np.testing.assert_allclose(dU_batched, dU_fd, rtol=1e-5, atol=1e-7)
+
+    def test_dU_is_upper_triangular(self):
+        """Returned dU[h] must respect the upper-triangular structure of U."""
+        rng = np.random.default_rng(9)
+        p, M = 7, 2
+        A = rng.standard_normal((p, p))
+        Vbi = jnp.asarray(A @ A.T + 0.5 * np.eye(p))
+        dVb_inv = jnp.asarray(np.stack([
+            (lambda B: B + B.T)(rng.standard_normal((p, p)))
+            for _ in range(M)
+        ]))
+        dU = np.asarray(grad_U_Vbeta(Vbi, dVb_inv))
+        for h in range(M):
+            strict_lower = dU[h] - np.triu(dU[h])
+            np.testing.assert_allclose(strict_lower, 0.0, atol=1e-12)
 
     def test_jittable(self):
         rng = np.random.default_rng(13)
         p, M = 5, 2
         A = rng.standard_normal((p, p))
-        Vb = jnp.asarray(A @ A.T + 0.3 * np.eye(p))
+        Vbi = jnp.asarray(A @ A.T + 0.3 * np.eye(p))
         dVb_inv = jnp.asarray(np.stack([
             (lambda B: B + B.T)(rng.standard_normal((p, p)))
             for _ in range(M)
         ]))
-        dR_e = grad_chol_Vbeta(Vb, dVb_inv)
-        dR_j = jax.jit(grad_chol_Vbeta)(Vb, dVb_inv)
-        np.testing.assert_allclose(np.asarray(dR_j), np.asarray(dR_e), atol=1e-12)
+        dU_e = grad_U_Vbeta(Vbi, dVb_inv)
+        dU_j = jax.jit(grad_U_Vbeta)(Vbi, dVb_inv)
+        np.testing.assert_allclose(np.asarray(dU_j), np.asarray(dU_e), atol=1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -238,11 +277,15 @@ class TestDiscrepantRho:
     drops small-λ modes and PenaltyHandler's Wood-2011 stable construction is
     required.
 
-    These tests verify :func:`grad_chol_Vbeta` survives the same regime: build
+    These tests verify :func:`grad_U_Vbeta` survives the same regime: build
     the realistic Laplace-REML precision ``V_β⁻¹ = X^T W X + Σ_k exp(ρ_k) S_k``,
-    pass the covariance ``V_β = (V_β⁻¹)⁻¹`` and the precision derivative
-    ``dV_β⁻¹/dρ_k = λ_k S_k`` to ``grad_chol_Vbeta``, and check vs (a) the Wood
-    Appendix B.7 recurrence and (b) central differences of ``chol(V_β(ρ))``.
+    pass it and the precision derivative ``dV_β⁻¹/dρ_k = λ_k S_k`` to
+    ``grad_U_Vbeta``, and check vs (a) the mgcv-recipe numpy reference and (b)
+    central differences of ``chol(V_β⁻¹(ρ))⁻¹``.  In contrast to the textbook
+    R-convention path (which would Cholesky-factor V_β directly and so amplify
+    its small eigenvalues in the strong-penalty directions), the U-convention
+    only ever factors V_β⁻¹, which the penalty *regularises* — so we expect
+    accurate results even at the extreme corners of ρ-space.
     """
 
     @staticmethod
@@ -271,32 +314,24 @@ class TestDiscrepantRho:
             (-20.0, 20.0, -5.0),    # reversed sign pattern
         ],
     )
-    def test_discrepant_matches_legacy(self, rho_vals):
-        """Closed-form JAX path equals Wood B.7 recurrence under extreme ρ."""
+    def test_discrepant_matches_mgcv_reference(self, rho_vals):
+        """JAX path equals mgcv-recipe reference under extreme ρ."""
         rng = np.random.default_rng(101)
         p, n, M = 8, 40, 3
         S_stack = self._random_psd_stack(rng, p, M)
         rho = np.array(rho_vals)
         Vbi, lams = self._make_precision(rng, p, n, rho, S_stack)
-        Vb = np.linalg.inv(Vbi)
-        Vb = 0.5 * (Vb + Vb.T)  # symmetrise — Cholesky requires it
         # dV_β⁻¹/dρ_k = λ_k S_k  (in this stripped-down setup, no W-derivative)
         dVb_inv = np.einsum("k,kij->kij", lams, S_stack)
 
-        dR_jax = np.asarray(
-            grad_chol_Vbeta(jnp.asarray(Vb), jnp.asarray(dVb_inv))
+        dU_jax = np.asarray(
+            grad_U_Vbeta(jnp.asarray(Vbi), jnp.asarray(dVb_inv))
         )
+        dU_ref = _mgcv_dU_reference(Vbi, dVb_inv)
 
-        # Legacy reference: R = chol(V_β).T, dV_β/dρ = -V_β · dV_β⁻¹/dρ · V_β.
-        R_np = np.linalg.cholesky(Vb).T
-        dVb_np = -np.einsum("ij,hjk,kl->hil", Vb, dVb_inv, Vb)
-        dR_legacy = np.stack([
-            _legacy_grad_cholesky(dVb_np[h], R_np) for h in range(M)
-        ])
-
-        # Entries scale with V_β entries; rtol catches drift on dominant
+        # Entries scale with U entries; rtol catches drift on dominant
         # entries, atol floor avoids spurious failures on near-zero ones.
-        np.testing.assert_allclose(dR_jax, dR_legacy, rtol=1e-8, atol=1e-6)
+        np.testing.assert_allclose(dU_jax, dU_ref, rtol=1e-8, atol=1e-6)
 
     @pytest.mark.parametrize(
         "rho_vals",
@@ -307,7 +342,7 @@ class TestDiscrepantRho:
         ],
     )
     def test_discrepant_matches_finite_difference(self, rho_vals):
-        """Closed-form matches central differences of ``chol(V_β(ρ))``."""
+        """Matches central differences of ``U(ρ) = chol(V_β⁻¹(ρ))⁻¹``."""
         rng = np.random.default_rng(202)
         p, n, M = 6, 30, 2
         S_stack = self._random_psd_stack(rng, p, M)
@@ -322,26 +357,23 @@ class TestDiscrepantRho:
             return XWX + np.einsum("k,kij->ij", lams, S_stack)
 
         Vbi0 = precision_at(rho)
-        Vb0 = np.linalg.inv(Vbi0)
-        Vb0 = 0.5 * (Vb0 + Vb0.T)
         lams0 = np.exp(rho)
         dVb_inv = np.einsum("k,kij->kij", lams0, S_stack)
 
-        dR_jax = np.asarray(
-            grad_chol_Vbeta(jnp.asarray(Vb0), jnp.asarray(dVb_inv))
+        dU_jax = np.asarray(
+            grad_U_Vbeta(jnp.asarray(Vbi0), jnp.asarray(dVb_inv))
         )
 
-        def chol_at(rho_):
-            Vb_p = np.linalg.inv(precision_at(rho_))
-            Vb_p = 0.5 * (Vb_p + Vb_p.T)
-            return np.linalg.cholesky(Vb_p).T.ravel()
+        def U_at(rho_):
+            R_tilde = np.linalg.cholesky(precision_at(rho_)).T
+            return np.linalg.solve(R_tilde, np.eye(p)).ravel()
 
-        dR_fd = central_diff(chol_at, rho, rel_step=1e-6)
-        dR_fd = dR_fd.reshape(p, p, M).transpose(2, 0, 1)
-        np.testing.assert_allclose(dR_jax, dR_fd, rtol=1e-3, atol=1e-4)
+        dU_fd = central_diff(U_at, rho, rel_step=1e-6)
+        dU_fd = dU_fd.reshape(p, p, M).transpose(2, 0, 1)
+        np.testing.assert_allclose(dU_jax, dU_fd, rtol=1e-3, atol=1e-4)
 
     def test_precision_dominated_by_huge_lambda(self):
-        """One ρ → +∞: V_β picks up a tiny mode; dR stays finite, matches legacy."""
+        """One ρ → +∞: V_β picks up a tiny mode; dU stays finite, matches reference."""
         rng = np.random.default_rng(303)
         p, n, M = 5, 25, 3
         S_stack = self._random_psd_stack(rng, p, M, jitter=1e-2)
@@ -352,18 +384,11 @@ class TestDiscrepantRho:
         XWX = X.T @ (W[:, None] * X)
         lams = np.exp(rho)
         Vbi = XWX + np.einsum("k,kij->ij", lams, S_stack)
-        Vb = np.linalg.inv(Vbi)
-        Vb = 0.5 * (Vb + Vb.T)
         dVb_inv = np.einsum("k,kij->kij", lams, S_stack)
 
-        dR_jax = np.asarray(
-            grad_chol_Vbeta(jnp.asarray(Vb), jnp.asarray(dVb_inv))
+        dU_jax = np.asarray(
+            grad_U_Vbeta(jnp.asarray(Vbi), jnp.asarray(dVb_inv))
         )
-        assert np.all(np.isfinite(dR_jax))
-
-        R_np = np.linalg.cholesky(Vb).T
-        dVb_np = -np.einsum("ij,hjk,kl->hil", Vb, dVb_inv, Vb)
-        dR_legacy = np.stack([
-            _legacy_grad_cholesky(dVb_np[h], R_np) for h in range(M)
-        ])
-        np.testing.assert_allclose(dR_jax, dR_legacy)
+        assert np.all(np.isfinite(dU_jax))
+        dU_ref = _mgcv_dU_reference(Vbi, dVb_inv)
+        np.testing.assert_allclose(dU_jax, dU_ref, rtol=1e-8, atol=1e-6)

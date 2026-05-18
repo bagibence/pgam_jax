@@ -4,6 +4,7 @@ from typing import Callable, Literal
 
 import jax
 import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.observation_models import Observations, PoissonObservations
@@ -18,6 +19,7 @@ from ._identifiable_features import (
     compute_features_identifiable,
 )
 
+from ._laplace_reml_aic import compute_aic_corrected
 from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
 from ._penalty_handler import PenaltyHandler, _drop_last_col
 from ._pql_gcv import gcv_compute_factory
@@ -180,6 +182,12 @@ class GAM:
         (available after ``fit``).
     dof_resid_ :
         Residual degrees of freedom ``n_obs − edf_`` (available after ``fit``).
+    aic_ :
+        Wood (2017) eq. 6.32 corrected AIC, ``-2·ℓ(β̂) + 2·edf2_``.  ``None``
+        unless ``fit`` was called with ``compute_aic=True``.
+    edf2_ :
+        AIC-corrected effective degrees of freedom ``τ₂ = tr(V'_β · I̥(β̂))``.
+        ``None`` unless ``fit`` was called with ``compute_aic=True``.
     """
 
     def __init__(
@@ -252,6 +260,11 @@ class GAM:
             )
             for b in self.basis
         )
+
+        # Optional fit outputs: present-but-None lets users read ``gam.aic_``
+        # without a ``hasattr`` dance.  Populated by ``fit(..., compute_aic=True)``.
+        self.aic_: float | None = None
+        self.edf2_: float | None = None
 
     def initialize_params(
         self,
@@ -463,9 +476,9 @@ class GAM:
         regularizer_strength: list[jnp.ndarray],
         compute_sqrt,
         rtol: float = 1e-8,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
-        Compute posterior covariance, EDF, and dispersion scale after fitting.
+        Compute posterior covariance, its inverse, EDF, and dispersion scale.
 
         This mirrors legacy PGAM's final refresh: recompute final IRLS weights
         from the returned coefficients, form QR(sqrt(W) X), then invert
@@ -475,6 +488,8 @@ class GAM:
         -------
         cov_beta :
             Posterior covariance ``φ · (X'WX + S_λ)⁻¹``, shape ``(p+1, p+1)``.
+        cov_beta_inv :
+            Posterior precision ``(X'WX + S_λ) / φ``, shape ``(p+1, p+1)``.
         edf :
             Effective degrees of freedom — Wood's ``edf1 = 2·tr(F) − tr(F²)``.
         scale :
@@ -529,7 +544,9 @@ class GAM:
         keep = singular_values >= rtol * singular_values.max()
         singular_values_inv = jnp.where(keep, 1.0 / singular_values, 0.0)
         cov_beta = scale * (Vt.T * singular_values_inv**2) @ Vt
-        return cov_beta, edf1, scale
+        # V_β⁻¹ = (X'WX + S_λ) / φ — forward direction, no inverse needed
+        cov_beta_inv = (Vt.T * singular_values**2) @ Vt / scale
+        return cov_beta, cov_beta_inv, edf1, scale
 
     def _resolve_basis_component(
         self,
@@ -565,6 +582,7 @@ class GAM:
         y: ArrayLike,
         init_params: tuple[jnp.ndarray, jnp.ndarray] | None = None,
         init_regularizer_strength: list[jnp.ndarray] | None = None,
+        compute_aic: bool = False,
     ) -> GAM:
         """
         Fit the GAM to data.
@@ -584,6 +602,14 @@ class GAM:
         init_regularizer_strength :
             Initial log-space regularization strengths. If None, initialized to zeros
             (lambda=1 for every penalty component).
+        compute_aic :
+            If ``True``, compute Wood (2017) eq. 6.32 corrected AIC after the
+            outer iteration converges and store it as ``self.aic_`` (with
+            matching ``self.edf2_``). Off by default — the full REML Hessian
+            assembly is the slowest part of the laplace_reml path and we don't
+            want every fit to pay for it. Supported for all three methods; for
+            ``method="pql_gcv"`` the V_ρ plug-in (Laplace-REML Hessian at ρ̂)
+            assumes REML asymptotics and is a documented approximation.
 
         Returns
         -------
@@ -600,7 +626,7 @@ class GAM:
         y = jnp.asarray(y)
 
         ph = self._build_penalty_handler(penalty_tree)
-        compute_sqrt, compute_log_det_and_grad, _ = ph.build()
+        compute_sqrt, compute_log_det_and_grad, compute_log_det_hess = ph.build()
 
         # TODO: Pull out the GLM initialization here?
         if init_params is None:
@@ -638,7 +664,12 @@ class GAM:
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
         self.n_iter_ = n_iter
-        self.cov_beta_, self.edf_, self.scale_ = self._compute_cov_beta_from_fit_state(
+        (
+            self.cov_beta_,
+            cov_beta_inv,
+            self.edf_,
+            self.scale_,
+        ) = self._compute_cov_beta_from_fit_state(
             X,
             y,
             opt_coef,
@@ -647,7 +678,60 @@ class GAM:
         )
         self.dof_resid_ = X.shape[0] - self.edf_
 
+        if compute_aic:
+            self._compute_aic_inplace(
+                X, y, penalty_tree, cov_beta_inv, compute_log_det_hess,
+            )
+
         return self
+
+    def _compute_aic_inplace(
+        self,
+        X: jnp.ndarray,
+        y: jnp.ndarray,
+        penalty_tree: list[jnp.ndarray],
+        cov_beta_inv: jnp.ndarray,
+        compute_log_det_hess,
+    ) -> None:
+        """Assemble Wood (2017) eq. 6.32 corrected AIC into ``self.aic_/edf2_``.
+
+        Uses the converged ``(ρ̂, β̂(ρ̂))`` plus the already-computed
+        ``cov_beta_`` / ``cov_beta_inv`` so we only pay for the REML Hessian
+        + V_corr assembly here.  See :func:`compute_aic_corrected` for the
+        underlying math and method-coverage caveats.
+        """
+
+        n_obs = X.shape[0]
+        X_full = jnp.column_stack((jnp.ones(n_obs), X))
+        beta = jnp.concatenate(
+            [jnp.atleast_1d(self.intercept_), self.coef_]
+        )
+
+        penalty_blocks = compute_penalty_blocks(
+            penalty_tree,
+            apply_identifiability=self._apply_identifiability_square,
+            shift_by=1,
+        )
+        S_all = jnp.concatenate(jax.tree_util.tree_leaves(penalty_blocks), axis=0)
+
+        rho_flat, _ = ravel_pytree(self.regularizer_strength_)
+        log_det_hess_Slam = compute_log_det_hess(self.regularizer_strength_)
+
+        aic, edf2 = compute_aic_corrected(
+            beta,
+            X_full,
+            y,
+            self.observation_model,
+            self.observation_model.default_inverse_link_function,
+            S_all,
+            rho_flat,
+            float(self.scale_),
+            self.cov_beta_,
+            cov_beta_inv,
+            log_det_hess_Slam,
+        )
+        self.aic_ = float(aic)
+        self.edf2_ = float(edf2)
 
     def _predict(
         self,
