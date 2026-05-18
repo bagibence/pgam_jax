@@ -725,13 +725,13 @@ class GAM:
             self.observation_model.default_inverse_link_function,
             S_all,
             rho_flat,
-            float(self.scale_),
+            self.scale_,
             self.cov_beta_,
             cov_beta_inv,
             log_det_hess_Slam,
         )
-        self.aic_ = float(aic)
-        self.edf2_ = float(edf2)
+        self.aic_ = aic
+        self.edf2_ = edf2
 
     def _predict(
         self,
