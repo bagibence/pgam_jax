@@ -14,10 +14,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from nemos.inverse_link_function_utils import identity as _identity
 
 from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pql_reml import reml_compute_factory
-from nemos.inverse_link_function_utils import identity as _identity
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -118,9 +118,9 @@ def test_val_equals_val_from_value_and_grad(filename):
     f_direct = float(reml_fn(reg_strength, penalty_tree, X, Q, R, y))
     f_vg, _ = jax.value_and_grad(reml_fn)(reg_strength, penalty_tree, X, Q, R, y)
 
-    assert abs(f_direct - float(f_vg)) < 1e-12, (
-        f"{filename}: val mismatch = {abs(f_direct - float(f_vg)):.2e}"
-    )
+    assert (
+        abs(f_direct - float(f_vg)) < 1e-12
+    ), f"{filename}: val mismatch = {abs(f_direct - float(f_vg)):.2e}"
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import jax.tree_util as jtu
 from numpy.typing import NDArray
 
 from . import penalty_utils
-from ._pql_gcv import FLOAT_EPS, _vmap_where, _vmap_symm_mult, _vmap_trace
+from ._pql_gcv import FLOAT_EPS, _vmap_symm_mult, _vmap_trace, _vmap_where
 
 
 @partial(

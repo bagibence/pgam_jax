@@ -79,8 +79,6 @@ def _make_scan_body(lams, q):
         - ``gamma_mask`` : (M,) bool — True for indices still in gamma
         - ``K``          : () int32 — accumulated block offset
     """
-    M = lams.shape[0]
-
     _eps = jnp.finfo(float).eps
     _eps_split = float(_eps ** (1.0 / 3.0))
     _eps_rank = float(_eps**0.8)
@@ -113,7 +111,9 @@ def _make_scan_body(lams, q):
             return S_bar, S_i_out, Q_s, gamma_mask, K
 
         def step(_):
-            S_lam_alpha = jnp.einsum("ijk,i->jk", S_bar_act, jnp.where(alpha, lams, 0.0))
+            S_lam_alpha = jnp.einsum(
+                "ijk,i->jk", S_bar_act, jnp.where(alpha, lams, 0.0)
+            )
             S_eigh = S_lam_alpha - _big * jnp.diag((outer < K).astype(lams.dtype))
             _, U = jnp.linalg.eigh(S_eigh)
             U = U[:, ::-1]

@@ -5,6 +5,7 @@ from typing import Callable, Literal
 import jax.numpy as jnp
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
+from nemos.inverse_link_function_utils import identity as _id_no_drop
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
@@ -16,7 +17,6 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
-
 from ._penalty_handler import PenaltyHandler, _drop_last_col
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
@@ -26,7 +26,6 @@ from .iterative_optim import (
     pql_outer_iteration,
 )
 from .penalty_utils import compute_energy_penalty_tensor
-from nemos.inverse_link_function_utils import identity as _id_no_drop
 
 
 # TODO: Should any other observation model be supported?
@@ -251,9 +250,11 @@ class GAM:
         """Construct a PenaltyHandler from the penalty tensor list."""
         ph = PenaltyHandler()
         id_fns = [
-            _drop_last_col
-            if _should_drop_basis_col(b, self.drop_conv_basis_col)
-            else _id_no_drop
+            (
+                _drop_last_col
+                if _should_drop_basis_col(b, self.drop_conv_basis_col)
+                else _id_no_drop
+            )
             for b in self.basis
         ]
         for S_tensor, id_fn in zip(penalty_tree, id_fns):
