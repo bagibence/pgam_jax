@@ -34,12 +34,10 @@ def _preprocess_kron(S):
 
 
 class PenaltyHandler:
-
-    def __init__(self, non_linearity: Callable = jnp.exp):
+    def __init__(self):
         self._groups: dict = defaultdict(list)
         self._n_penalties: int = 0
         self._cache: list[dict] = []
-        self._non_linearity = non_linearity
         self._rho_len = []
 
     def add(self, S_tensor, penalize_null_space: bool = True, identifiability_fn: Callable = identity):
@@ -235,12 +233,14 @@ class PenaltyHandler:
                 return log_det, jnp.stack([rank, rank_null]).astype(rho.dtype)
 
             case SqrtMethod.KRONECKER:
-                lams = self._non_linearity(rho)
-                log_det, factor_grads, _ = self._kron_log_det_factor_grads(lams, cache["eigs"])
+                lams = jnp.exp(rho)
+                log_det, factor_grads, _ = self._kron_log_det_factor_grads(
+                    lams, cache["eigs"]
+                )
                 return log_det, jnp.stack(factor_grads)
 
             case SqrtMethod.KRONECKER_WITH_NULL:
-                lams = self._non_linearity(rho)
+                lams = jnp.exp(rho)
                 log_det_pos, factor_grads, n_pos = self._kron_log_det_factor_grads(
                     lams[:-1], cache["eigs"]
                 )
@@ -287,7 +287,7 @@ class PenaltyHandler:
         return log_dets, grads
 
     def compute_sqrt(self, rhos: list[jnp.ndarray]) -> jnp.ndarray:
-        lams = jax.tree_util.tree_map(self._non_linearity, rhos)
+        lams = jax.tree_util.tree_map(jnp.exp, rhos)
         out = [None] * self._n_penalties
         for (method, _, id_fn), members in self._groups.items():
             if len(members) == 1:
@@ -318,7 +318,6 @@ class PenaltyHandler:
             ``compute_log_det_and_grad(rhos) -> (list[scalar], list[array])``
         """
         n = self._n_penalties
-        nl = self._non_linearity
         caches = list(self._cache)
         _sqrt_fn = self._sqrt
         _ld_fn = self._log_det_and_grad
@@ -352,7 +351,7 @@ class PenaltyHandler:
                 })
 
         def compute_sqrt(rhos):
-            lams = [nl(r) for r in rhos]
+            lams = [jnp.exp(r) for r in rhos]
             out = [None] * n
             for g in group_data:
                 if g["singleton"]:

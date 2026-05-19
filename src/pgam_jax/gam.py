@@ -250,7 +250,7 @@ class GAM:
 
     def _build_penalty_handler(self, penalty_tree: list) -> PenaltyHandler:
         """Construct a PenaltyHandler from the penalty tensor list."""
-        ph = PenaltyHandler(non_linearity=self._positive_mon_func_for_lambda)
+        ph = PenaltyHandler()
         id_fns = [
             _drop_last_col if _should_drop_basis_col(b, self.drop_conv_basis_col) else _id_no_drop
             for b in self.basis

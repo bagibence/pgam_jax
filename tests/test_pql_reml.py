@@ -25,7 +25,7 @@ DATA_DIR = Path(__file__).parent / "data"
 def _build_ph_and_factory(penalty_tree):
     """Construct PenaltyHandler from a list of (k, q, q) tensors and return reml_fn."""
     n_smooths = len(penalty_tree)
-    ph = PenaltyHandler(non_linearity=jnp.exp)
+    ph = PenaltyHandler()
     for S in penalty_tree:
         ph.add(S, penalize_null_space=False, identifiability_fn=_identity)
     compute_sqrt, compute_log_det_and_grad = ph.build()
