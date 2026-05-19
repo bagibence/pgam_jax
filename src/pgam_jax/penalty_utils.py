@@ -11,6 +11,7 @@ from nemos.tree_utils import pytree_map_and_reduce
 from scipy import sparse
 
 from .config import config
+from ._nemos_compat import get_n_inputs
 
 
 def symmetric_sqrt(symmetric_matrix):
@@ -492,7 +493,7 @@ def compute_energy_penalty_tensor_additive_component(
     """
     if isinstance(basis_component, MultiplicativeBasis):
         components = list(basis_component._iterate_over_components())
-        bad = [c for c in components if c._n_inputs != 1]
+        bad = [c for c in components if get_n_inputs(c) != 1]
         if bad:
             raise ValueError(
                 f"MultiplicativeBasis contains {len(bad)} factor(s) with _n_inputs != 1 "
