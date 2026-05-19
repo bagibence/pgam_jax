@@ -65,7 +65,7 @@ class PenaltyHandler:
         """
         S_tensor = jnp.asarray(S_tensor)
         if S_tensor.ndim == 2:
-            S_tensor = S_tensor[None]
+            S_tensor = S_tensor[None, :, :]
 
         if S_tensor.shape[0] == 1:
             cache, method = self._compute_cache(S_tensor[0], penalize_null_space)
@@ -312,6 +312,7 @@ class PenaltyHandler:
                     d log|S_lam_i|_+ / d rho for each i; shape matches rhos[i].
         """
         n = self._n_penalties
+        # create snapshots
         caches = list(self._cache)
         _sqrt_fn = self._sqrt
         _ld_fn = self._log_det_and_grad
