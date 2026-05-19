@@ -288,54 +288,12 @@ class PenaltyHandler:
                 )
 
     def compute_log_det_and_grad(self, rhos: list[jnp.ndarray]) -> tuple[list, list]:
-        """
-        Returns
-        -------
-        log_dets : list[scalar]
-            log|S_lam_i|_+ for each registered penalty i.
-        grads : list[jnp.ndarray]
-            d log|S_lam_i|_+ / d rho for each i; shape matches rhos[i].
-        """
-        log_dets = [None] * self._n_penalties
-        grads = [None] * self._n_penalties
-        for (method, _, id_fn), members in self._groups.items():
-            if len(members) == 1:
-                idx = members[0]
-                ld, g = self._log_det_and_grad(method, self._cache[idx], rhos[idx])
-                log_dets[idx] = ld
-                grads[idx] = g
-            else:
-                batched_cache = jax.tree_util.tree_map(
-                    lambda *a: jnp.stack(a), *[self._cache[i] for i in members]
-                )
-                batched_rhos = jnp.stack([rhos[i] for i in members])
-                batched_ld, batched_g = jax.vmap(
-                    lambda c, r: self._log_det_and_grad(method, c, r)
-                )(batched_cache, batched_rhos)
-                for k, idx in enumerate(members):
-                    log_dets[idx] = batched_ld[k]
-                    grads[idx] = batched_g[k]
-        return log_dets, grads
+        _, _compute_log_det_and_grad = self.build()
+        return _compute_log_det_and_grad(rhos)
 
     def compute_sqrt(self, rhos: list[jnp.ndarray]) -> jnp.ndarray:
-        lams = jax.tree_util.tree_map(jnp.exp, rhos)
-        out = [None] * self._n_penalties
-        for (method, _, id_fn), members in self._groups.items():
-            if len(members) == 1:
-                idx = members[0]
-                out[idx] = self._sqrt(method, self._cache[idx], lams[idx], id_fn)
-            else:
-                # All members share method, shape, and id_fn → batch with vmap.
-                batched_cache = jax.tree_util.tree_map(
-                    lambda *a: jnp.stack(a), *[self._cache[i] for i in members]
-                )
-                batched_lams = jnp.stack([lams[i] for i in members])
-                batched_out = jax.vmap(
-                    lambda cache, lams: self._sqrt(method, cache, lams, id_fn)
-                )(batched_cache, batched_lams)
-                for k, idx in enumerate(members):
-                    out[idx] = batched_out[k]
-        return block_diag(*out)
+        _compute_sqrt, _ = self.build()
+        return _compute_sqrt(rhos)
 
     def build(self) -> tuple:
         """
@@ -346,7 +304,12 @@ class PenaltyHandler:
         compute_sqrt : callable
             ``compute_sqrt(rhos) -> (total_pen_rows, n_params)`` block-diagonal matrix.
         compute_log_det_and_grad : callable
-            ``compute_log_det_and_grad(rhos) -> (list[scalar], list[array])``
+            ``compute_log_det_and_grad(rhos) -> (log_dets, grads)``
+            where
+                log_dets : list[scalar]
+                    log|S_lam_i|_+ for each registered penalty i.
+                grads : list[jnp.ndarray]
+                    d log|S_lam_i|_+ / d rho for each i; shape matches rhos[i].
         """
         n = self._n_penalties
         caches = list(self._cache)
