@@ -41,11 +41,12 @@ class PenaltyHandler:
         self._cache: list[dict] = []
         self._rho_len = []
 
+    # TODO: Review call sites now that defaults are gone
     def add(
         self,
         S_tensor,
-        penalize_null_space: bool = True,
-        identifiability_fn: Callable = identity,
+        penalize_null_space: bool,
+        identifiability_fn: Callable,
     ):
         """
         Parameters
@@ -80,8 +81,8 @@ class PenaltyHandler:
     def add_kron(
         self,
         factor_list,
-        penalize_null_space: bool = True,
-        identifiability_fn: Callable = identity,
+        penalize_null_space: bool,
+        identifiability_fn: Callable,
     ):
         """
         Parameters
