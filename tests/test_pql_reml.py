@@ -39,7 +39,6 @@ def _load_and_run(filename):
     n_smooths = len(penalty_tree)
     reml_fn = reml_compute_factory(
         penalty_tree=penalty_tree,
-        positive_mon_func=jnp.exp,
         apply_identifiability_columns=tuple(_identity for _ in range(n_smooths)),
         apply_identifiability=tuple(_identity for _ in range(n_smooths)),
     )
@@ -91,7 +90,6 @@ def _load_inputs(filename):
     n_smooths = len(penalty_tree)
     reml_fn = reml_compute_factory(
         penalty_tree=penalty_tree,
-        positive_mon_func=jnp.exp,
         apply_identifiability_columns=tuple(_identity for _ in range(n_smooths)),
         apply_identifiability=tuple(_identity for _ in range(n_smooths)),
     )
@@ -112,9 +110,9 @@ def test_val_equals_val_from_value_and_grad(filename):
     f_direct = float(reml_fn(reg_strength, penalty_tree, X, Q, R, y))
     f_vg, _ = jax.value_and_grad(reml_fn)(reg_strength, penalty_tree, X, Q, R, y)
 
-    assert (
-        abs(f_direct - float(f_vg)) < 1e-12
-    ), f"{filename}: val mismatch = {abs(f_direct - float(f_vg)):.2e}"
+    assert abs(f_direct - float(f_vg)) < 1e-12, (
+        f"{filename}: val mismatch = {abs(f_direct - float(f_vg)):.2e}"
+    )
 
 
 # ---------------------------------------------------------------------------

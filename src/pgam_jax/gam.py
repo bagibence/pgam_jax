@@ -197,7 +197,6 @@ class GAM:
         self.drop_conv_basis_col = drop_conv_basis_col
         self.n_simpson_sample = int(1e4)
 
-        self._positive_mon_func_for_lambda = jnp.exp
         # Identifiability is applied per basis component to match how the design matrix is built:
         # BSplineConv leaves follow ``drop_conv_basis_col``; other leaves drop the last column.
         self._apply_identifiability_column = tuple(
@@ -263,7 +262,6 @@ class GAM:
             penalty_tree,
             regularizer_strength,
             shift_by=0,
-            positive_mon_func=self._positive_mon_func_for_lambda,
             apply_identifiability=self._apply_identifiability_column,
             prepend_zeros_for_intercept=prepend_zeros_for_intercept,
         )
@@ -272,7 +270,6 @@ class GAM:
         """Build the smoothing-parameter objective for the current ``method``."""
         if self.method == "gcv":
             return gcv_compute_factory(
-                self._positive_mon_func_for_lambda,
                 self._apply_identifiability_column,
                 self._apply_identifiability_square,
                 1.5,
@@ -280,7 +277,6 @@ class GAM:
         if self.method == "reml":
             return reml_compute_factory(
                 penalty_tree,
-                self._positive_mon_func_for_lambda,
                 self._apply_identifiability_column,
                 self._apply_identifiability_square,
             )
@@ -426,7 +422,7 @@ class GAM:
 
         # EDF: edf1 = 2·tr(F) − tr(F²) where F = (X'WX + S_λ)⁻¹ X'WX
         # Expressed via U1: tr(F) = ‖U1‖²_F,  tr(F²) = ‖U1'U1‖²_F  (Wood 2017 eq. 6.13)
-        edf = jnp.sum(U1 ** 2)
+        edf = jnp.sum(U1**2)
         edf1 = 2.0 * edf - jnp.sum((U1.T @ U1) ** 2)
 
         # dispersion: Poisson → 1.0; Gaussian/Gamma → Pearson χ²/dof

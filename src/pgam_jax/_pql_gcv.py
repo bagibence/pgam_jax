@@ -15,9 +15,7 @@ FLOAT_EPS = jnp.finfo(jnp.float32).eps
 _vmap_where = jax.vmap(jnp.where, (None, None, 0), out_axes=0)
 
 
-@partial(
-    jax.jit, static_argnames=("positive_mon_func", "apply_identifiability", "gamma")
-)
+@partial(jax.jit, static_argnames=("apply_identifiability", "gamma"))
 def _compute_gcv_and_states(
     regularization_strength: Any,
     penalty_tree: Any,
@@ -25,7 +23,6 @@ def _compute_gcv_and_states(
     Q: NDArray,
     R: NDArray,
     y: NDArray,
-    positive_mon_func: Callable[[jnp.ndarray], jnp.ndarray] = jnp.exp,
     apply_identifiability: Callable | None = None,
     gamma=1.5,
 ):
@@ -34,7 +31,6 @@ def _compute_gcv_and_states(
         penalty_tree,
         regularization_strength,
         shift_by=0,
-        positive_mon_func=positive_mon_func,
         apply_identifiability=apply_identifiability,
         prepend_zeros_for_intercept=True,
     )
@@ -79,9 +75,7 @@ _vmap_symm_mult = jax.vmap(symm_mult, in_axes=(0, None), out_axes=0)
 _vmap_trace = jax.vmap(jnp.linalg.trace, in_axes=0, out_axes=0)
 
 
-@partial(
-    jax.jit, static_argnames=("positive_mon_func", "apply_identifiability", "gamma")
-)
+@partial(jax.jit, static_argnames=("apply_identifiability", "gamma"))
 def _gcv_grad_compute_from_states(
     regularization_strength,
     penalty_tree,
@@ -94,7 +88,6 @@ def _gcv_grad_compute_from_states(
     V_T,
     Q,
     s_inv,
-    positive_mon_func,
     apply_identifiability,
 ):
     # compute useful vector
@@ -110,7 +103,7 @@ def _gcv_grad_compute_from_states(
     comp = V_T.T * s_inv
     M = jtu.tree_map(lambda x: _vmap_symm_mult(x, comp), blocks)
     F = jtu.tree_map(lambda x: jnp.dot(x, UTU, precision=jax.lax.Precision.HIGHEST), M)
-    lams = jtu.tree_map(positive_mon_func, regularization_strength)
+    lams = jtu.tree_map(jnp.exp, regularization_strength)
     alpha_grad = jtu.tree_map(
         lambda x, y: y * _vmap_symm_mult(x, y1),
         jtu.tree_map(lambda x, y: 2 * x - y - jnp.transpose(y, (0, 2, 1)), M, F),
@@ -127,9 +120,7 @@ def _gcv_grad_compute_from_states(
     return gcv_grad
 
 
-def gcv_compute_factory(
-    positive_mon_func, apply_identifiability_columns, apply_identifiability, gamma
-):
+def gcv_compute_factory(apply_identifiability_columns, apply_identifiability, gamma):
     @jax.custom_vjp
     def _gcv_compute(
         regularization_strength: Any,
@@ -170,7 +161,6 @@ def gcv_compute_factory(
             Q,
             R,
             y,
-            positive_mon_func=positive_mon_func,
             apply_identifiability=apply_identifiability_columns,
             gamma=gamma,
         )[0]
@@ -193,7 +183,6 @@ def gcv_compute_factory(
                 Q,
                 R,
                 y,
-                positive_mon_func=positive_mon_func,
                 apply_identifiability=apply_identifiability_columns,
                 gamma=gamma,
             )
@@ -254,7 +243,6 @@ def gcv_compute_factory(
             V_T,
             Q,
             s_inv,
-            positive_mon_func,
             apply_identifiability,
         )
         return (jtu.tree_map(lambda g: gcv_bar * g, gcv_grad),) + (None,) * 5

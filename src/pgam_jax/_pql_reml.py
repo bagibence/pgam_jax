@@ -14,11 +14,7 @@ from ._slam_compute import _compute_log_det_slam_factory
 
 @partial(
     jax.jit,
-    static_argnames=(
-        "compute_log_det_and_grad",
-        "positive_mon_func",
-        "apply_identifiability",
-    ),
+    static_argnames=("compute_log_det_and_grad", "apply_identifiability"),
 )
 def _compute_reml_and_states(
     regularization_strength: Any,
@@ -28,7 +24,6 @@ def _compute_reml_and_states(
     R: NDArray,
     y: NDArray,
     compute_log_det_and_grad: Callable,
-    positive_mon_func: Callable = jnp.exp,
     apply_identifiability: Callable | None = None,
 ):
     """
@@ -57,8 +52,6 @@ def _compute_reml_and_states(
     compute_log_det_and_grad :
         Static callable produced by _compute_log_det_slam_factory.  Receives
         regularization_strength and returns (log_dets pytree, grads pytree).
-    positive_mon_func :
-        Monotone positive function mapping rho -> lambda (default: exp).
     apply_identifiability :
         Per-leaf column-drop function (or None).
 
@@ -88,7 +81,6 @@ def _compute_reml_and_states(
         penalty_tree,
         regularization_strength,
         shift_by=0,
-        positive_mon_func=positive_mon_func,
         apply_identifiability=apply_identifiability,
         prepend_zeros_for_intercept=True,
     )
@@ -125,7 +117,7 @@ def _compute_reml_and_states(
 
 @partial(
     jax.jit,
-    static_argnames=("positive_mon_func", "apply_identifiability"),
+    static_argnames=("apply_identifiability",),
 )
 def _reml_grad_compute_from_states(
     regularization_strength: Any,
@@ -134,7 +126,6 @@ def _reml_grad_compute_from_states(
     s_inv: jnp.ndarray,
     V_T: jnp.ndarray,
     log_det_sl_grads: Any,
-    positive_mon_func: Callable,
     apply_identifiability: Callable | None,
 ):
     """
@@ -158,7 +149,7 @@ def _reml_grad_compute_from_states(
         shift_by=1,
     )
 
-    lams = jtu.tree_map(positive_mon_func, regularization_strength)
+    lams = jtu.tree_map(jnp.exp, regularization_strength)
 
     # lam_j * (comp @ y1)^T Sj (comp @ y1)
     rss_grad = jtu.tree_map(
@@ -184,7 +175,6 @@ def _reml_grad_compute_from_states(
 
 def reml_compute_factory(
     penalty_tree: Any,
-    positive_mon_func: Callable,
     apply_identifiability_columns: Callable | None,
     apply_identifiability: Callable | None,
 ):
@@ -199,7 +189,7 @@ def reml_compute_factory(
     ----------
     penalty_tree :
         Static pytree of (M_i, q_i, q_i) penalty tensors.
-    positive_mon_func, apply_identifiability_columns, apply_identifiability :
+    apply_identifiability_columns, apply_identifiability :
         Same semantics as in gcv_compute_factory.
 
     Returns
@@ -228,7 +218,6 @@ def reml_compute_factory(
             R,
             y,
             compute_log_det_and_grad=compute_log_det_and_grad,
-            positive_mon_func=positive_mon_func,
             apply_identifiability=apply_identifiability_columns,
         )[0]
 
@@ -242,7 +231,6 @@ def reml_compute_factory(
                 R,
                 y,
                 compute_log_det_and_grad=compute_log_det_and_grad,
-                positive_mon_func=positive_mon_func,
                 apply_identifiability=apply_identifiability_columns,
             )
         )
@@ -264,7 +252,6 @@ def reml_compute_factory(
             s_inv,
             V_T,
             log_det_sl_grads,
-            positive_mon_func=positive_mon_func,
             apply_identifiability=apply_identifiability,
         )
         return (jtu.tree_map(lambda g: reml_bar * g, reml_grad),) + (None,) * 5

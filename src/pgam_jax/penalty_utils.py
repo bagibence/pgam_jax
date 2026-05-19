@@ -108,7 +108,6 @@ def tree_compute_sqrt_penalty(
     tree_penalty: Any,
     reg_strength: Any,
     shift_by: int | None = 0,
-    positive_mon_func: Callable = jnp.exp,
     apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
     prepend_zeros_for_intercept: bool = False,
 ):
@@ -124,8 +123,6 @@ def tree_compute_sqrt_penalty(
         corresponding leaf of tree_penalty is of shape (m, Ki, Ki).
     shift_by :
         Initial index to shift by, default is 0.
-    positive_mon_func :
-        Monotonic function to ensure positive weights, default is `jnp.exp`.
     apply_identifiability:
         Either a single function or a tuple of such functions with one entry per leaf of ``tree_penalty``
         (used when different leaves need different identifiability constraints, e.g. a mix of convolutional and
@@ -142,9 +139,7 @@ def tree_compute_sqrt_penalty(
         Weighted penalty matrix.
     """
     scaled_pen = jax.tree_util.tree_map(
-        lambda pen, reg: compute_weighted_penalty(
-            pen, reg, positive_mon_func=positive_mon_func
-        ),
+        lambda pen, reg: compute_weighted_penalty(pen, reg),
         tree_penalty,
         reg_strength,
     )
@@ -337,9 +332,7 @@ def compute_penalty_null_space_jax(penalty):
     return jnp.dot(U, U.T)
 
 
-def compute_weighted_penalty(
-    penalty_tensor: jnp.ndarray, reg_strength: jnp.ndarray, positive_mon_func=jnp.exp
-):
+def compute_weighted_penalty(penalty_tensor: jnp.ndarray, reg_strength: jnp.ndarray):
     """
     Compute a weighted sum of the penalties.
 
@@ -349,15 +342,13 @@ def compute_weighted_penalty(
         Tensor of shape (N, K, K), where K is the number of coefficients and N is the number of penalty matrices.
     reg_strength :
         Regularization strengths of shape (N,).
-    positive_mon_func :
-        Function that ensures positive weights, default is `jnp.exp`.
 
     Returns
     -------
     :
         Weighted penalty matrix of shape (K, K).
     """
-    pos_reg = positive_mon_func(reg_strength)
+    pos_reg = jnp.exp(reg_strength)
     return jnp.sum(penalty_tensor * pos_reg[:, None, None], axis=0)
 
 
@@ -568,7 +559,6 @@ def compute_penalty_agumented_from_basis(
     n_samples: int = 10**4,
     penalize_null_space: bool = True,
     shift_by: int | None = 0,
-    positive_mon_func=jnp.exp,
     apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
 ):
     """
@@ -586,8 +576,6 @@ def compute_penalty_agumented_from_basis(
         Boolean, if true penalize the null space of every energy penalty component.
     shift_by:
         Shift columns by this integer.
-    positive_mon_func:
-        Non-linearity applied to the regularization strengths enforce positivity.
     apply_identifiability:
         A function that matches the identifiability constrain at the level of the penalty matrix.
         If for example, we dropped a b-spline element, i.e. dropped a column of the design matrix,
@@ -607,7 +595,6 @@ def compute_penalty_agumented_from_basis(
         penalty_tree,
         reg_strength,
         shift_by=shift_by,
-        positive_mon_func=positive_mon_func,
         apply_identifiability=apply_identifiability,
     )
 
