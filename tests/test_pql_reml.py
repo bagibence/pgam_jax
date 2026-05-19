@@ -31,13 +31,16 @@ def _build_ph_and_factory(penalty_tree):
     compute_sqrt, compute_log_det_and_grad = ph.build()
 
     id_fns = tuple(_identity for _ in range(n_smooths))
-    return reml_compute_factory(
-        compute_sqrt=compute_sqrt,
-        compute_log_det_and_grad=compute_log_det_and_grad,
-        positive_mon_func=jnp.exp,
-        apply_identifiability_columns=id_fns,
-        apply_identifiability=id_fns,
-    ), compute_sqrt, compute_log_det_and_grad
+    return (
+        reml_compute_factory(
+            compute_sqrt=compute_sqrt,
+            compute_log_det_and_grad=compute_log_det_and_grad,
+            apply_identifiability_columns=id_fns,
+            apply_identifiability=id_fns,
+        ),
+        compute_sqrt,
+        compute_log_det_and_grad,
+    )
 
 
 def _load_and_run(filename):
@@ -115,9 +118,9 @@ def test_val_equals_val_from_value_and_grad(filename):
     f_direct = float(reml_fn(reg_strength, penalty_tree, X, Q, R, y))
     f_vg, _ = jax.value_and_grad(reml_fn)(reg_strength, penalty_tree, X, Q, R, y)
 
-    assert (
-        abs(f_direct - float(f_vg)) < 1e-12
-    ), f"{filename}: val mismatch = {abs(f_direct - float(f_vg)):.2e}"
+    assert abs(f_direct - float(f_vg)) < 1e-12, (
+        f"{filename}: val mismatch = {abs(f_direct - float(f_vg)):.2e}"
+    )
 
 
 # ---------------------------------------------------------------------------

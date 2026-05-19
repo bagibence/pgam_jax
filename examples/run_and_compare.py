@@ -166,8 +166,6 @@ variance_func = lambda x: x
 # The sqrt is used because we augment the system as [X; sqrt(penalty)] for WLS.
 #
 # Key parameters:
-# - positive_mon_func=exp: regularization strengths are parameterized as exp(λ)
-#   to ensure positivity during optimization
 # - apply_identifiability: drops the last column to handle the identifiability
 #   constraint (see docs/pgam_overview.md for why this is needed)
 #
@@ -178,7 +176,6 @@ variance_func = lambda x: x
 compute_sqrt_penalty = lambda *args: pen_utils.tree_compute_sqrt_penalty(
     *args,
     shift_by=0,
-    positive_mon_func=jax.numpy.exp,
     apply_identifiability=lambda x: x[..., :-1],
 )
 
@@ -191,13 +188,10 @@ compute_sqrt_penalty = lambda *args: pen_utils.tree_compute_sqrt_penalty(
 # designed to compute correct gradients through the SVD-based GCV computation.
 #
 # Arguments:
-# 1. positive_mon_func: exp() to ensure λ > 0
-# 2. apply_identifiability for sqrt penalty (drop last column)
-# 3. apply_identifiability for full penalty (drop last row AND column)
-# 4. gamma=1.5: GCV correction factor (>1 gives more smoothing, reduces overfitting)
-inner_func = gcv_compute_factory(
-    jax.numpy.exp, lambda x: x[..., :-1], lambda x: x[..., :-1, :-1], 1.5
-)
+# 1. apply_identifiability for sqrt penalty (drop last column)
+# 2. apply_identifiability for full penalty (drop last row AND column)
+# 3. gamma=1.5: GCV correction factor (>1 gives more smoothing, reduces overfitting)
+inner_func = gcv_compute_factory(lambda x: x[..., :-1], lambda x: x[..., :-1, :-1], 1.5)
 
 # =============================================================================
 # Step 4: Fit the ORIGINAL PGAM model

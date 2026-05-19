@@ -110,7 +110,7 @@ def _compute_reml_and_states(
 
 @partial(
     jax.jit,
-    static_argnames=("positive_mon_func", "apply_identifiability"),
+    static_argnames=("apply_identifiability",),
 )
 def _reml_grad_compute_from_states(
     regularization_strength: Any,
@@ -119,7 +119,6 @@ def _reml_grad_compute_from_states(
     s_inv: jnp.ndarray,
     V_T: jnp.ndarray,
     log_det_sl_grads: Any,
-    positive_mon_func: Callable,
     apply_identifiability: Callable | None,
 ):
     """
@@ -143,7 +142,7 @@ def _reml_grad_compute_from_states(
         shift_by=1,
     )
 
-    lams = jtu.tree_map(positive_mon_func, regularization_strength)
+    lams = jtu.tree_map(jnp.exp, regularization_strength)
 
     # lam_j * (comp @ y1)^T Sj (comp @ y1)
     rss_grad = jtu.tree_map(
@@ -170,7 +169,6 @@ def _reml_grad_compute_from_states(
 def reml_compute_factory(
     compute_sqrt: Callable,
     compute_log_det_and_grad: Callable,
-    positive_mon_func: Callable,
     apply_identifiability_columns: Callable | None,
     apply_identifiability: Callable | None,
 ):
@@ -185,7 +183,6 @@ def reml_compute_factory(
     compute_log_det_and_grad :
         Static callable from ``PenaltyHandler.build()`` computing log|S_lam|_+ and
         its gradient w.r.t. rho from regularization_strength.
-    positive_mon_func, apply_identifiability_columns, apply_identifiability :
         Same semantics as in gcv_compute_factory.
 
     Returns
@@ -195,6 +192,7 @@ def reml_compute_factory(
         _reml_compute(regularization_strength, penalty_tree, X, Q, R, y)
         returning the scalar REML objective with analytic reverse-mode gradient.
     """
+
     @jax.custom_vjp
     def _reml_compute(
         regularization_strength: Any,
@@ -206,7 +204,10 @@ def reml_compute_factory(
     ):
         return _compute_reml_and_states(
             regularization_strength,
-            X, Q, R, y,
+            X,
+            Q,
+            R,
+            y,
             compute_log_det_and_grad=compute_log_det_and_grad,
             compute_sqrt=compute_sqrt,
         )[0]
@@ -215,7 +216,10 @@ def reml_compute_factory(
         reml_val, RSS_reml, log_det_XtXpSl, y1, s_inv, V_T, log_det_sl_grads, n_obs = (
             _compute_reml_and_states(
                 regularization_strength,
-                X, Q, R, y,
+                X,
+                Q,
+                R,
+                y,
                 compute_log_det_and_grad=compute_log_det_and_grad,
                 compute_sqrt=compute_sqrt,
             )
@@ -238,7 +242,6 @@ def reml_compute_factory(
             s_inv,
             V_T,
             log_det_sl_grads,
-            positive_mon_func=positive_mon_func,
             apply_identifiability=apply_identifiability,
         )
         return (jtu.tree_map(lambda g: reml_bar * g, reml_grad),) + (None,) * 5
