@@ -16,6 +16,8 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
+from .concurvity import concurvity as _concurvity
+from .concurvity import design_with_intercept, term_blocks_for_gam
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
 from .iterative_optim import (
@@ -679,12 +681,6 @@ class GAM:
           formulas implemented here are derived from that source and
           documented in ``docs/concurvity_mgcv.md``.
         """
-        from .concurvity import (
-            concurvity as _concurvity,
-            design_with_intercept,
-            term_blocks_for_gam,
-        )
-
         X = design_with_intercept(self, xi)
         blocks = term_blocks_for_gam(self)
         beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
