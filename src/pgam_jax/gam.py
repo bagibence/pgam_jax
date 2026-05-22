@@ -592,7 +592,7 @@ class GAM:
         full: bool = True,
         as_dataframe: bool = False,
     ):
-        r"""Concurvity diagnostics for this fitted GAM.
+        r"""Concurvity diagnostics for this GAM.
 
         Concurvity generalizes collinearity to smooth terms: it measures the
         fraction of a smooth's fitted curve that can be reproduced by some
@@ -600,36 +600,44 @@ class GAM:
         individual smooths weakly identifiable and their coefficient
         estimates unstable, even though the model as a whole can fit well.
 
-        For each term, the fitted contribution
+        For each term, the contribution
         :math:`\mathbf{f}_i = \mathbf{X}_i \boldsymbol{\beta}_i` is split as
         :math:`\mathbf{f}_i = \mathbf{g}_i + (\mathbf{f}_i - \mathbf{g}_i)`,
         where :math:`\mathbf{g}_i` is the projection of
         :math:`\mathbf{f}_i` onto the column space of the *other* terms.
-        Three indices, all in :math:`[0, 1]` (0 = identifiable, 1 = fully
-        redundant), summarize :math:`\|\mathbf{g}_i\|^2 / \|\mathbf{f}_i\|^2`:
+        Three indices summarize :math:`\|\mathbf{g}_i\|^2/\|\mathbf{f}_i\|^2`,
+        all in :math:`[0, 1]` (0 = identifiable, 1 = fully redundant):
 
-        - ``worst`` : :math:`\sup_{\boldsymbol{\beta}_i}
-          \|\mathbf{g}_i\|^2 / \|\mathbf{f}_i\|^2`. The largest the ratio
-          could ever be, over all possible coefficient vectors. Pessimistic
-          but coefficient-free.
-        - ``observed`` : the ratio evaluated at the fitted
-          :math:`\hat{\boldsymbol{\beta}}_i`. Most direct interpretation,
-          but can be over-optimistic if shrinkage pushed the estimate
-          away from the worst-case direction.
-        - ``estimate`` : the Frobenius-norm ratio
-          :math:`\|\mathbf{R}_{12}\|_F^2 / \|\mathbf{R}_{:,2}\|_F^2` from
-          the block-QR of :math:`[\mathbf{X}_{-i} \mid \mathbf{X}_i]`. Free
-          of both the pessimism of ``worst`` and the optimism of
-          ``observed``, at the cost of being less interpretable.
+        - ``worst`` — :math:`\sup_{\boldsymbol{\beta}_i}
+          \|\mathbf{g}_i\|^2/\|\mathbf{f}_i\|^2`. Worst case over coefficient
+          space; pessimistic but coefficient-free.
+        - ``estimate`` — the Frobenius-norm ratio
+          :math:`\|\mathbf{R}_{12}\|_F^2/\|\mathbf{R}_{:,2}\|_F^2` from the
+          block-QR of :math:`[\mathbf{X}_{-i} \mid \mathbf{X}_i]`. Free of
+          both pessimism and optimism; depends only on the design matrix.
+        - ``observed`` — the ratio evaluated at the fitted
+          :math:`\hat{\boldsymbol{\beta}}_i`. Most direct interpretation, but
+          can be over-optimistic if shrinkage pushed :math:`\hat{\boldsymbol{\beta}}_i`
+          away from the worst-case direction. **Only available after fit.**
+
+        Callable in two states:
+
+        - **Before** ``fit``: returns ``worst`` and ``estimate`` only (these
+          are properties of the design matrix and don't need
+          :math:`\hat{\boldsymbol{\beta}}`). Side effect: ``basis.setup_basis``
+          is called on ``xi`` to make the basis usable for evaluation; a
+          later ``fit(xi_train, …)`` will overwrite this state.
+        - **After** ``fit``: returns all three measures using the cached
+          ``feature_mean_`` and the fitted coefficients.
 
         Parameters
         ----------
         xi :
             Inputs at which to evaluate concurvity, one array per basis
-            dimension. Concurvity is a property of the design matrix, so
-            you should pass the same inputs the model was fit on — using
-            held-out inputs measures a different quantity (concurvity of
-            the basis when extrapolated, not of the fit).
+            dimension. After ``fit`` you almost always want to pass the
+            training inputs; before ``fit``, pass the inputs you plan to
+            train on (so the design matrix is the one the actual fit will
+            see).
         full :
             If ``True`` (default), decompose each term against the rest of
             the model. If ``False``, return pairwise concurvity between
@@ -641,8 +649,8 @@ class GAM:
         Returns
         -------
         dict[str, jax.Array] | pandas.DataFrame | dict[str, pandas.DataFrame]
-            Output keys are ``worst``, ``observed``, ``estimate``. Layout
-            depends on ``full`` and ``as_dataframe``:
+            Layout depends on ``full`` and ``as_dataframe``; ``observed``
+            is included only post-fit.
 
             - ``full=True, as_dataframe=False``: dict of 1-D arrays of
               length ``m`` (one entry per term, parametric block included
@@ -651,27 +659,15 @@ class GAM:
               where ``M[i, j]`` = fraction of term ``j`` explained by term
               ``i`` (i.e. row = explainer, column = focal).
             - ``full=True, as_dataframe=True``: single ``DataFrame``,
-              one row per term, columns are the three measures.
+              one row per term, columns are the available measures.
             - ``full=False, as_dataframe=True``: ``dict[measure -> DataFrame]``,
               each frame ``(m, m)`` with term labels on both axes.
 
         Notes
         -----
-        Note that ``worst`` is symmetric in the pairwise case (a property
-        of principal angles between subspaces), while ``observed`` and
-        ``estimate`` are not.
-
-        Examples
-        --------
-        >>> import numpy as np, nemos as nmo
-        >>> from pgam_jax import GAM
-        >>> rng = np.random.default_rng(0)
-        >>> x1 = rng.uniform(0, 1, 300); x2 = x1 + 0.2 * rng.normal(size=300)
-        >>> y = rng.poisson(np.exp(0.5 * np.sin(4 * np.pi * x1) + 0.1 * x2))
-        >>> basis = (nmo.basis.BSplineEval(10, bounds=(0., 1.))
-        ...          + nmo.basis.BSplineEval(10, bounds=(x2.min(), x2.max())))
-        >>> gam = GAM(basis, use_scipy=True, maxiter=15).fit((x1, x2), y)
-        >>> gam.concurvity((x1, x2), as_dataframe=True)  # doctest: +SKIP
+        ``worst`` is symmetric in the pairwise case (a property of
+        principal angles between subspaces); ``observed`` and ``estimate``
+        are not.
 
         References
         ----------
@@ -681,9 +677,19 @@ class GAM:
           formulas implemented here are derived from that source and
           documented in ``docs/concurvity_mgcv.md``.
         """
-        X = design_with_intercept(self, xi)
+        if hasattr(self, "coef_"):
+            # Post-fit: reuse the cached centering and the fitted β.
+            X = design_with_intercept(self, xi)
+            beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
+        else:
+            # Pre-fit: set up the basis on `xi` and center on-the-fly.
+            # No β yet, so the underlying call skips the `observed` measure.
+            X_raw = self._compute_uncentered_design_matrix(xi, setup_basis=True)
+            X_smooths = X_raw - X_raw.mean(axis=0)
+            intercept_col = jnp.ones((X_smooths.shape[0], 1))
+            X = jnp.concatenate([intercept_col, X_smooths], axis=1)
+            beta = None
         blocks = term_blocks_for_gam(self)
-        beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
         return _concurvity(X, blocks, beta=beta, full=full,
                            as_dataframe=as_dataframe)
 
