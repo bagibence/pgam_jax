@@ -584,6 +584,113 @@ class GAM:
         params = (self.coef_, self.intercept_)
         return self._predict(params, xi)
 
+    def concurvity(
+        self,
+        xi: tuple[ArrayLike, ...],
+        full: bool = True,
+        as_dataframe: bool = False,
+    ):
+        r"""Concurvity diagnostics for this fitted GAM.
+
+        Concurvity generalizes collinearity to smooth terms: it measures the
+        fraction of a smooth's fitted curve that can be reproduced by some
+        combination of the other terms in the model. High concurvity makes
+        individual smooths weakly identifiable and their coefficient
+        estimates unstable, even though the model as a whole can fit well.
+
+        For each term, the fitted contribution
+        :math:`\mathbf{f}_i = \mathbf{X}_i \boldsymbol{\beta}_i` is split as
+        :math:`\mathbf{f}_i = \mathbf{g}_i + (\mathbf{f}_i - \mathbf{g}_i)`,
+        where :math:`\mathbf{g}_i` is the projection of
+        :math:`\mathbf{f}_i` onto the column space of the *other* terms.
+        Three indices, all in :math:`[0, 1]` (0 = identifiable, 1 = fully
+        redundant), summarize :math:`\|\mathbf{g}_i\|^2 / \|\mathbf{f}_i\|^2`:
+
+        - ``worst`` : :math:`\sup_{\boldsymbol{\beta}_i}
+          \|\mathbf{g}_i\|^2 / \|\mathbf{f}_i\|^2`. The largest the ratio
+          could ever be, over all possible coefficient vectors. Pessimistic
+          but coefficient-free.
+        - ``observed`` : the ratio evaluated at the fitted
+          :math:`\hat{\boldsymbol{\beta}}_i`. Most direct interpretation,
+          but can be over-optimistic if shrinkage pushed the estimate
+          away from the worst-case direction.
+        - ``estimate`` : the Frobenius-norm ratio
+          :math:`\|\mathbf{R}_{12}\|_F^2 / \|\mathbf{R}_{:,2}\|_F^2` from
+          the block-QR of :math:`[\mathbf{X}_{-i} \mid \mathbf{X}_i]`. Free
+          of both the pessimism of ``worst`` and the optimism of
+          ``observed``, at the cost of being less interpretable.
+
+        Parameters
+        ----------
+        xi :
+            Inputs at which to evaluate concurvity, one array per basis
+            dimension. Concurvity is a property of the design matrix, so
+            you should pass the same inputs the model was fit on — using
+            held-out inputs measures a different quantity (concurvity of
+            the basis when extrapolated, not of the fit).
+        full :
+            If ``True`` (default), decompose each term against the rest of
+            the model. If ``False``, return pairwise concurvity between
+            every ordered pair of terms; the diagonal is 1 by convention.
+        as_dataframe :
+            If ``True``, return pandas DataFrames instead of raw arrays.
+            See *Returns*.
+
+        Returns
+        -------
+        dict[str, jax.Array] | pandas.DataFrame | dict[str, pandas.DataFrame]
+            Output keys are ``worst``, ``observed``, ``estimate``. Layout
+            depends on ``full`` and ``as_dataframe``:
+
+            - ``full=True, as_dataframe=False``: dict of 1-D arrays of
+              length ``m`` (one entry per term, parametric block included
+              as the first entry labelled ``'para'``).
+            - ``full=False, as_dataframe=False``: dict of ``(m, m)`` arrays
+              where ``M[i, j]`` = fraction of term ``j`` explained by term
+              ``i`` (i.e. row = explainer, column = focal).
+            - ``full=True, as_dataframe=True``: single ``DataFrame``,
+              one row per term, columns are the three measures.
+            - ``full=False, as_dataframe=True``: ``dict[measure -> DataFrame]``,
+              each frame ``(m, m)`` with term labels on both axes.
+
+        Notes
+        -----
+        Note that ``worst`` is symmetric in the pairwise case (a property
+        of principal angles between subspaces), while ``observed`` and
+        ``estimate`` are not.
+
+        Examples
+        --------
+        >>> import numpy as np, nemos as nmo
+        >>> from pgam_jax import GAM
+        >>> rng = np.random.default_rng(0)
+        >>> x1 = rng.uniform(0, 1, 300); x2 = x1 + 0.2 * rng.normal(size=300)
+        >>> y = rng.poisson(np.exp(0.5 * np.sin(4 * np.pi * x1) + 0.1 * x2))
+        >>> basis = (nmo.basis.BSplineEval(10, bounds=(0., 1.))
+        ...          + nmo.basis.BSplineEval(10, bounds=(x2.min(), x2.max())))
+        >>> gam = GAM(basis, use_scipy=True, maxiter=15).fit((x1, x2), y)
+        >>> gam.concurvity((x1, x2), as_dataframe=True)  # doctest: +SKIP
+
+        References
+        ----------
+        - Wood, S. N. (2017). *Generalized Additive Models: An Introduction
+          with R*, 2nd ed., §5.6.3. CRC Press.
+        - `mgcv` source: ``R/mgcv.r``, function ``concurvity``. The exact
+          formulas implemented here are derived from that source and
+          documented in ``docs/concurvity_mgcv.md``.
+        """
+        from .concurvity import (
+            concurvity as _concurvity,
+            design_with_intercept,
+            term_blocks_for_gam,
+        )
+
+        X = design_with_intercept(self, xi)
+        blocks = term_blocks_for_gam(self)
+        beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
+        return _concurvity(X, blocks, beta=beta, full=full,
+                           as_dataframe=as_dataframe)
+
     # TODO: Test against original implementation
     def smooth_compute(
         self,
