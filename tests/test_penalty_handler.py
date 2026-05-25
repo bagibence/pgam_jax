@@ -83,13 +83,13 @@ class TestSINGLE:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
         ph.add(S1, penalize_null_space=False, identifiability_fn=identity)
-        assert SqrtMethod.SINGLE in [m for m, *_ in ph._groups]
+        assert SqrtMethod.SINGLE in {p.method for p in ph._penalties}
 
     def test_full_rank_stays_single_with_penalize_null(self, S_full_rank):
         ph = PenaltyHandler()
         ph.add(S_full_rank, penalize_null_space=True, identifiability_fn=identity)
-        assert SqrtMethod.SINGLE in [m for m, *_ in ph._groups]
-        assert SqrtMethod.SINGLE_WITH_NULL not in [m for m, *_ in ph._groups]
+        assert SqrtMethod.SINGLE in {p.method for p in ph._penalties}
+        assert SqrtMethod.SINGLE_WITH_NULL not in {p.method for p in ph._penalties}
 
     @pytest.mark.parametrize("rho", [-2.0, 0.0, 2.0])
     def test_round_trip(self, S1, rho):
@@ -128,7 +128,7 @@ class TestSINGLE_WITH_NULL:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
         ph.add(S1, penalize_null_space=True, identifiability_fn=identity)
-        assert SqrtMethod.SINGLE_WITH_NULL in [m for m, *_ in ph._groups]
+        assert SqrtMethod.SINGLE_WITH_NULL in {p.method for p in ph._penalties}
 
     @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5), (2.0, 1.0)])
     def test_round_trip(self, S1, S1_null, rho_pen, rho_null):
@@ -155,14 +155,14 @@ class TestKRONECKER:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
         ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=identity)
-        assert SqrtMethod.KRONECKER in [m for m, *_ in ph._groups]
+        assert SqrtMethod.KRONECKER in {p.method for p in ph._penalties}
 
     def test_not_fired_when_one_factor_full_rank(self, S1, S_full_rank):
         ph = PenaltyHandler()
         ph.add_kron(
             [S1, S_full_rank], penalize_null_space=True, identifiability_fn=identity
         )
-        methods = [m for m, *_ in ph._groups]
+        methods = {p.method for p in ph._penalties}
         assert SqrtMethod.KRONECKER in methods
         assert SqrtMethod.KRONECKER_WITH_NULL not in methods
 
@@ -195,14 +195,14 @@ class TestKRONECKER_WITH_NULL:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
         ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=identity)
-        assert SqrtMethod.KRONECKER_WITH_NULL in [m for m, *_ in ph._groups]
+        assert SqrtMethod.KRONECKER_WITH_NULL in {p.method for p in ph._penalties}
 
     def test_requires_all_factors_rank_deficient(self, S1, S_full_rank):
         ph = PenaltyHandler()
         ph.add_kron(
             [S1, S_full_rank], penalize_null_space=True, identifiability_fn=identity
         )
-        assert SqrtMethod.KRONECKER_WITH_NULL not in [m for m, *_ in ph._groups]
+        assert SqrtMethod.KRONECKER_WITH_NULL not in {p.method for p in ph._penalties}
 
     @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
     def test_round_trip(self, S1, S_kron, S_kron_null, rho0, rho1, rho_null):
@@ -223,7 +223,7 @@ class TestGENERAL:
     def test_method_selected(self, S_kron):
         ph = PenaltyHandler()
         ph.add(S_kron, penalize_null_space=True, identifiability_fn=identity)
-        assert SqrtMethod.GENERAL in [m for m, *_ in ph._groups]
+        assert SqrtMethod.GENERAL in {p.method for p in ph._penalties}
 
     @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.5, 2.0), (0.0, 0.0)])
     def test_round_trip(self, S_kron, rho0, rho1):

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import enum
 from collections import defaultdict
 from functools import reduce
@@ -34,12 +35,56 @@ def _preprocess_kron(S):
     return jnp.where(pos, eig, 0.0), U, rank
 
 
+@dataclass(frozen=True, eq=False)
+class _Penalty:
+    # method for computing the sqrt penalty
+    method: SqrtMethod
+    # method-specific precomputed arrays
+    cache: dict[str, jnp.ndarray | list[jnp.ndarray] | int]
+    # identity or _drop_last_col
+    id_fn: Callable
+    # S_tensor shape
+    shape: tuple[int, ...]
+
+    @property
+    def rho_len(self) -> int:
+        # len(rhos[i]), so how many regularization strengths it needs
+        match self.method:
+            case SqrtMethod.SINGLE:
+                return 1
+            case SqrtMethod.SINGLE_WITH_NULL:
+                return 2
+            case SqrtMethod.KRONECKER:
+                return len(self.cache["eigs"])
+            case SqrtMethod.KRONECKER_WITH_NULL:
+                return len(self.cache["eigs"]) + 1
+            case SqrtMethod.GENERAL:
+                return self.cache["full_rank_S"].shape[0]
+
+    @property
+    def _group_key(self):
+        """Key for identifying stackable groups."""
+        if self.method is SqrtMethod.GENERAL:
+            # U_keep is (q, r) and full_rank_S is (k, r, r), where r is the
+            # retained rank identified during precompute.
+            # Two (k, q, q) tensors with the same q can have different r,
+            # so keying on the original tensor shape is not enough.
+            # Instead, include the actual cache shape so GENERAL penalties only
+            # batch when their caches are truly stackable.
+            return (self.method, self.cache["full_rank_S"].shape, self.id_fn)
+
+        if self.method in {SqrtMethod.KRONECKER, SqrtMethod.KRONECKER_WITH_NULL}:
+            # same product q is not enough: 2x6 and 3x4 both produce q=12
+            # but have non-stackable per-factor eig arrays
+            eig_shapes = tuple(eig.shape for eig in self.cache["eigs"])
+            return (self.method, eig_shapes, self.id_fn)
+
+        return (self.method, self.shape, self.id_fn)
+
+
 class PenaltyHandler:
     def __init__(self):
-        self._groups: dict = defaultdict(list)
-        self._n_penalties: int = 0
-        self._cache: list[dict] = []
-        self._rho_len = []
+        self._penalties = []
 
     # TODO: Review call sites now that defaults are gone
     def add(
@@ -67,17 +112,24 @@ class PenaltyHandler:
         if S_tensor.ndim == 2:
             S_tensor = S_tensor[None, :, :]
 
+        # TODO: Give a more meaningful name to cache
         if S_tensor.shape[0] == 1:
             cache, method = self._compute_cache(S_tensor[0], penalize_null_space)
         else:
             cache, method = self._compute_cache(S_tensor, penalize_null_space)
 
-        self._groups[(method, S_tensor.shape, identifiability_fn)].append(
-            self._n_penalties
-        )
-        self._n_penalties += 1
-        self._cache.append(cache)
+        print(method)
 
+        self._penalties.append(
+            _Penalty(
+                method=method,
+                cache=cache,
+                id_fn=identifiability_fn,
+                shape=S_tensor.shape,
+            )
+        )
+
+    # TODO: add_kron is never called. Where should that be used?
     def add_kron(
         self,
         factor_list,
@@ -100,9 +152,14 @@ class PenaltyHandler:
         cache, method = self._compute_cache(factor_list, penalize_null_space)
         q = reduce(lambda a, b: a * b, [S.shape[0] for S in factor_list])
         shape = (len(factor_list), q, q)
-        self._groups[(method, shape, identifiability_fn)].append(self._n_penalties)
-        self._n_penalties += 1
-        self._cache.append(cache)
+        self._penalties.append(
+            _Penalty(
+                method=method,
+                cache=cache,
+                id_fn=identifiability_fn,
+                shape=shape,
+            )
+        )
 
     def _compute_cache(
         self, data, penalize_null_space: bool = True
@@ -119,6 +176,7 @@ class PenaltyHandler:
         penalize_null_space :
             Ignored for GENERAL (null space dropped by the precompute projection).
         """
+        # TODO: Make sure data is already column-dropped
         if isinstance(data, list):
             # KRONECKER
             results = [_preprocess_kron(S) for S in data]
@@ -137,7 +195,6 @@ class PenaltyHandler:
                 for eig in eigs
             ]
             kron_U = reduce(jnp.kron, Us)
-            self._rho_len.append(len(eigs) + has_null)
             return {
                 "eigs": eigs,
                 "kron_U": kron_U,
@@ -156,7 +213,6 @@ class PenaltyHandler:
             cache = {"eig": eig, "U": U, "rank": rank, "log_det_S": log_det_S}
             if method is SqrtMethod.SINGLE_WITH_NULL:
                 cache["rank_null"] = data.shape[0] - rank
-            self._rho_len.append(1 + has_null)
             return cache, method
 
         # GENERAL (ndim == 3)
@@ -168,7 +224,6 @@ class PenaltyHandler:
         keep = ev > ev[-1] * eps  # eager boolean index — precompute only
         U_keep = U[:, keep]  # (q, r)
         full_rank_S = U_keep.T[None] @ S @ U_keep[None]  # (k, r, r)
-        self._rho_len.append(full_rank_S.shape[0])
         return {"U_keep": U_keep, "full_rank_S": full_rank_S}, SqrtMethod.GENERAL
 
     def _sqrt(self, method, cache, lams, id_fn):
@@ -311,27 +366,33 @@ class PenaltyHandler:
                 grads : list[jnp.ndarray]
                     d log|S_lam_i|_+ / d rho for each i; shape matches rhos[i].
         """
-        n = self._n_penalties
-        # create snapshots
-        caches = list(self._cache)
+        # create snapshots of these at the time of build
+        penalties = self._penalties
+        n = len(penalties)
         _sqrt_fn = self._sqrt
         _ld_fn = self._log_det_and_grad
 
+        # build stack groups
+        stack_groups = defaultdict(list)
+        for i, p in enumerate(penalties):
+            stack_groups[p._group_key].append(i)
+
         group_data = []
-        for (method, _shape, id_fn), members in self._groups.items():
+        for (method, _shape, id_fn), members in stack_groups.items():
             if len(members) == 1:
+                i = members[0]
                 group_data.append(
                     {
                         "singleton": True,
                         "method": method,
                         "id_fn": id_fn,
-                        "idx": members[0],
-                        "cache": caches[members[0]],
+                        "idx": i,
+                        "cache": penalties[i].cache,
                     }
                 )
             else:
                 stacked = jax.tree_util.tree_map(
-                    lambda *a: jnp.stack(a), *[caches[i] for i in members]
+                    lambda *a: jnp.stack(a), *[penalties[i].cache for i in members]
                 )
                 group_data.append(
                     {
@@ -360,6 +421,7 @@ class PenaltyHandler:
                         g["method"], g["cache"], lams[g["idx"]], g["id_fn"]
                     )
                 else:
+                    # all members share method, shape, and id_fn, so they can be batched with vmap
                     batched_lams = jnp.stack([lams[i] for i in g["members"]])
                     batched_out = g["vmapped_sqrt"](g["stacked_cache"], batched_lams)
                     for k, idx in enumerate(g["members"]):
@@ -387,13 +449,13 @@ class PenaltyHandler:
         return compute_sqrt, compute_log_det_and_grad
 
     def __len__(self):
-        return self._n_penalties
+        return len(self._penalties)
 
     def __repr__(self) -> str:
         string = self.__class__.__name__ + "("
-        if len(self._rho_len) == 0:
+        if len(self._penalties) == 0:
             return string + ")"
-        for rlen in self._rho_len:
-            string += f"\n\tn_reg_strengths={rlen},"
+        for pen in self._penalties:
+            string += f"\n\tn_reg_strengths={pen.rho_len},"
         string = string[:-1] + "\n)"
         return string
