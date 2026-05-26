@@ -162,7 +162,9 @@ class PenaltyHandler:
         )
 
     def _compute_cache(
-        self, data, penalize_null_space: bool = True
+        self,
+        data,
+        penalize_null_space: bool,
     ) -> tuple[dict, SqrtMethod]:
         """
         Compute the precomputed cache and select the sqrt method in a single pass.
