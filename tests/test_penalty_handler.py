@@ -594,6 +594,62 @@ class TestLogDetAndGrad:
 
 
 # ---------------------------------------------------------------------------
+# Cross-consistency: log_det path must agree with sqrt path
+# ---------------------------------------------------------------------------
+
+
+class TestLogDetMatchesSqrt:
+    """compute_log_det_and_grad must equal log|B.T @ B|_+ where B = compute_sqrt(rho).
+
+    REML combines log|X'X + S_lam| (computed from the SVD of [R; B]) with
+    log|S_lam|_+ (computed by compute_log_det_and_grad). The two paths must agree
+    on the same restricted basis. Internal consistency catches the id_fn bug
+    without needing a separate external reference.
+    """
+
+    def _check(self, ph, rhos, idx=0, atol=1e-8):
+        B = ph.compute_sqrt(rhos)
+        lds, _ = ph.compute_log_det_and_grad(rhos)
+        ref = _ref_log_det(np.array(B.T @ B))
+        np.testing.assert_allclose(float(lds[idx]), ref, atol=atol)
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho", [-1.0, 0.0, 1.5])
+    def test_single(self, S1, id_fn, rho):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False, identifiability_fn=id_fn)
+        self._check(ph, [jnp.array([rho])])
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5), (2.0, 1.0)])
+    def test_single_with_null(self, S1, id_fn, rho_pen, rho_null):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True, identifiability_fn=id_fn)
+        self._check(ph, [jnp.array([rho_pen, rho_null])])
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0), (1.5, -0.5)])
+    def test_kronecker(self, S1, id_fn, rho0, rho1):
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=id_fn)
+        self._check(ph, [jnp.array([rho0, rho1])])
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
+    def test_kronecker_with_null(self, S1, id_fn, rho0, rho1, rho_null):
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=id_fn)
+        self._check(ph, [jnp.array([rho0, rho1, rho_null])])
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.5, 2.0), (0.0, 0.0)])
+    def test_general(self, S_kron, id_fn, rho0, rho1):
+        ph = PenaltyHandler()
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=id_fn)
+        self._check(ph, [jnp.array([rho0, rho1])])
+
+
+# ---------------------------------------------------------------------------
 # build() — pre-built closures
 # ---------------------------------------------------------------------------
 
