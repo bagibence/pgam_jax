@@ -249,6 +249,18 @@ class PenaltyHandler:
             }
             if method is SqrtMethod.SINGLE_WITH_NULL:
                 cache["rank_null"] = data.shape[0] - rank
+            # Restricted precompute for id_fn=_drop_last_col on SINGLE only.
+            # (SINGLE_WITH_NULL uses Schur instead; see _log_det_and_grad.)
+            if method is SqrtMethod.SINGLE and id_fn is _drop_last_col:
+                S_r = data[:-1, :-1]
+                eig_r, _, rank_r = _eigh_and_rank(S_r)
+                log_det_S_r = jnp.sum(
+                    jnp.where(
+                        eig_r > 0, jnp.log(jnp.where(eig_r > 0, eig_r, 1.0)), 0.0
+                    )
+                )
+                cache["rank_r"] = rank_r
+                cache["log_det_S_r"] = log_det_S_r
             return cache, method
 
         # GENERAL (ndim == 3)
@@ -344,9 +356,18 @@ class PenaltyHandler:
         """
         match method:
             case SqrtMethod.SINGLE:
-                # log|lam*S|_+ = rank*rho + log_det_S,  grad = rank
-                rank = cache["rank"]
-                log_det = rank * rho[0] + cache["log_det_S"]
+                # log|lam*S_id|_+ = rank(S_id)*rho + log|S_id|_+, with S_id = id_fn'd S.
+                if id_fn is _drop_last_col:
+                    rank = cache["rank_r"]
+                    log_det_S = cache["log_det_S_r"]
+                elif id_fn is identity:
+                    rank = cache["rank"]
+                    log_det_S = cache["log_det_S"]
+                else:
+                    raise NotImplementedError(
+                        f"SINGLE log_det not implemented for id_fn={id_fn}"
+                    )
+                log_det = rank * rho[0] + log_det_S
                 return log_det, jnp.full_like(rho, rank)
 
             case SqrtMethod.SINGLE_WITH_NULL:
