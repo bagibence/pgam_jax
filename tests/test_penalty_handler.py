@@ -118,6 +118,18 @@ class TestSINGLE:
 
         np.testing.assert_allclose(np.array(B_id), np.array(B_full[:, :-1]), atol=ATOL)
 
+    @pytest.mark.parametrize("S_fixture", ["S1", "S_full_rank"])
+    @pytest.mark.parametrize("rho", [-2.0, 0.0, 2.0])
+    def test_identifiability_round_trip(self, request, S_fixture, rho):
+        S = request.getfixturevalue(S_fixture)
+        ph = PenaltyHandler()
+        ph.add(S, penalize_null_space=False, identifiability_fn=_drop_last_col)
+        B = ph.compute_sqrt([jnp.array([rho])])
+        target = jnp.exp(rho) * S
+        np.testing.assert_allclose(
+            np.array(B.T @ B), np.array(target)[:-1, :-1], atol=ATOL
+        )
+
 
 # ---------------------------------------------------------------------------
 # SINGLE_WITH_NULL
@@ -144,6 +156,16 @@ class TestSINGLE_WITH_NULL:
         ph.add(S1, penalize_null_space=True, identifiability_fn=_drop_last_col)
         B = ph.compute_sqrt([jnp.array([0.0, 0.0])])
         assert B.shape == (q, q - 1)
+
+    @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5), (2.0, 1.0)])
+    def test_identifiability_round_trip(self, S1, S1_null, rho_pen, rho_null):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True, identifiability_fn=_drop_last_col)
+        B = ph.compute_sqrt([jnp.array([rho_pen, rho_null])])
+        S_full = jnp.exp(rho_pen) * S1 + jnp.exp(rho_null) * S1_null
+        np.testing.assert_allclose(
+            np.array(B.T @ B), np.array(S_full)[:-1, :-1], atol=ATOL
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +207,19 @@ class TestKRONECKER:
         q_kron = q * q
         assert B.shape == (q_kron, q_kron - 1)
 
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0), (1.5, -0.5)])
+    def test_identifiability_round_trip(self, S1, S_kron, rho0, rho1):
+        ph = PenaltyHandler()
+        ph.add_kron(
+            [S1, S1], penalize_null_space=False, identifiability_fn=_drop_last_col
+        )
+        B = ph.compute_sqrt([jnp.array([rho0, rho1])])
+        lams = jnp.exp(jnp.array([rho0, rho1]))
+        S_lam = jnp.einsum("k,kij->ij", lams, S_kron)
+        np.testing.assert_allclose(
+            np.array(B.T @ B), np.array(S_lam)[:-1, :-1], atol=ATOL
+        )
+
 
 # ---------------------------------------------------------------------------
 # KRONECKER_WITH_NULL
@@ -212,6 +247,21 @@ class TestKRONECKER_WITH_NULL:
         lams = jnp.exp(jnp.array([rho0, rho1]))
         S_lam = jnp.einsum("k,kij->ij", lams, S_kron) + jnp.exp(rho_null) * S_kron_null
         np.testing.assert_allclose(np.array(B.T @ B), np.array(S_lam), atol=ATOL)
+
+    @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
+    def test_identifiability_round_trip(
+        self, S1, S_kron, S_kron_null, rho0, rho1, rho_null
+    ):
+        ph = PenaltyHandler()
+        ph.add_kron(
+            [S1, S1], penalize_null_space=True, identifiability_fn=_drop_last_col
+        )
+        B = ph.compute_sqrt([jnp.array([rho0, rho1, rho_null])])
+        lams = jnp.exp(jnp.array([rho0, rho1]))
+        S_lam = jnp.einsum("k,kij->ij", lams, S_kron) + jnp.exp(rho_null) * S_kron_null
+        np.testing.assert_allclose(
+            np.array(B.T @ B), np.array(S_lam)[:-1, :-1], atol=ATOL
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +308,17 @@ class TestGENERAL:
         ph.add(S_kron, penalize_null_space=True, identifiability_fn=_drop_last_col)
         B = ph.compute_sqrt([jnp.array([0.0, 0.0])])
         assert B.shape[1] == q - 1
+
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.5, 2.0), (0.0, 0.0)])
+    def test_identifiability_round_trip(self, S_kron, rho0, rho1):
+        ph = PenaltyHandler()
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=_drop_last_col)
+        B = ph.compute_sqrt([jnp.array([rho0, rho1])])
+        lams = jnp.exp(jnp.array([rho0, rho1]))
+        S_lam = jnp.einsum("k,kij->ij", lams, S_kron)
+        np.testing.assert_allclose(
+            np.array(B.T @ B), np.array(S_lam)[:-1, :-1], atol=ATOL
+        )
 
 
 # ---------------------------------------------------------------------------
