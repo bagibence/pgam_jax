@@ -410,11 +410,25 @@ class PenaltyHandler:
                     )
 
             case SqrtMethod.KRONECKER:
-                lams = jnp.exp(rho)
-                log_det, factor_grads, _ = self._kron_log_det_factor_grads(
-                    lams, cache["eigs"]
-                )
-                return log_det, jnp.stack(factor_grads)
+                if id_fn is _drop_last_col:
+                    # Restricting Σ λ_k S_k to [:-1, :-1] destroys the Kron-sum
+                    # eigenvalue factorization and the matrix is rank-deficient
+                    # (Schur doesn't apply). The natural tensor-product smooth
+                    # routes to KRONECKER_WITH_NULL instead, which is supported.
+                    raise NotImplementedError(
+                        "KRONECKER log_det not implemented under _drop_last_col; "
+                        "use add_kron(..., penalize_null_space=True) for KRONECKER_WITH_NULL."
+                    )
+                elif id_fn is identity:
+                    lams = jnp.exp(rho)
+                    log_det, factor_grads, _ = self._kron_log_det_factor_grads(
+                        lams, cache["eigs"]
+                    )
+                    return log_det, jnp.stack(factor_grads)
+                else:
+                    raise NotImplementedError(
+                        f"KRONECKER log_det not implemented for id_fn={id_fn}"
+                    )
 
             case SqrtMethod.KRONECKER_WITH_NULL:
                 lams = jnp.exp(rho)

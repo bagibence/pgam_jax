@@ -486,6 +486,20 @@ def _id_fn_square(id_fn):
     raise ValueError(f"unhandled id_fn: {id_fn}")
 
 
+# KRONECKER (no null) log_det under _drop_last_col is intentionally unimplemented:
+# restricting Σ λ_k S_k destroys the Kron-sum factorization and the matrix is
+# rank-deficient, so neither Schur nor restrict-at-add applies. The natural
+# tensor-product use-case routes through KRONECKER_WITH_NULL instead.
+_KRONECKER_DROP_LAST_COL_XFAIL = pytest.param(
+    _drop_last_col,
+    marks=pytest.mark.xfail(
+        raises=NotImplementedError,
+        strict=True,
+        reason="KRONECKER (no null) + _drop_last_col is unsupported by design",
+    ),
+)
+
+
 class TestLogDetAndGrad:
     def _ph_ld_grad(self, ph, rhos, idx=0):
         lds, gs = ph.compute_log_det_and_grad(rhos)
@@ -543,7 +557,7 @@ class TestLogDetAndGrad:
 
     # ---- KRONECKER ---------------------------------------------------------
 
-    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("id_fn", [identity, _KRONECKER_DROP_LAST_COL_XFAIL])
     @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0)])
     def test_kronecker_value(self, S1, S_kron, id_fn, rho0, rho1):
         rho_arr = jnp.array([rho0, rho1])
@@ -556,7 +570,7 @@ class TestLogDetAndGrad:
             ld, _ref_log_det(_id_fn_square(id_fn)(S_lam)), atol=1e-8
         )
 
-    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("id_fn", [identity, _KRONECKER_DROP_LAST_COL_XFAIL])
     @pytest.mark.parametrize("rho0, rho1", [(-1.0, 0.5), (0.0, 0.0)])
     def test_kronecker_grad(self, S1, id_fn, rho0, rho1):
         ph = PenaltyHandler()
@@ -717,7 +731,7 @@ class TestLogDetMatchesSqrt:
         ph.add(S1, penalize_null_space=True, identifiability_fn=id_fn)
         self._check(ph, [jnp.array([rho_pen, rho_null])])
 
-    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("id_fn", [identity, _KRONECKER_DROP_LAST_COL_XFAIL])
     @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0), (1.5, -0.5)])
     def test_kronecker(self, S1, id_fn, rho0, rho1):
         ph = PenaltyHandler()
