@@ -114,9 +114,13 @@ class PenaltyHandler:
 
         # TODO: Give a more meaningful name to cache
         if S_tensor.shape[0] == 1:
-            cache, method = self._compute_cache(S_tensor[0], penalize_null_space)
+            cache, method = self._compute_cache(
+                S_tensor[0], penalize_null_space, identifiability_fn
+            )
         else:
-            cache, method = self._compute_cache(S_tensor, penalize_null_space)
+            cache, method = self._compute_cache(
+                S_tensor, penalize_null_space, identifiability_fn
+            )
 
         print(method)
 
@@ -149,7 +153,9 @@ class PenaltyHandler:
         identifiability_fn :
             See ``add``.
         """
-        cache, method = self._compute_cache(factor_list, penalize_null_space)
+        cache, method = self._compute_cache(
+            factor_list, penalize_null_space, identifiability_fn
+        )
         q = reduce(lambda a, b: a * b, [S.shape[0] for S in factor_list])
         shape = (len(factor_list), q, q)
         self._penalties.append(
@@ -165,6 +171,7 @@ class PenaltyHandler:
         self,
         data,
         penalize_null_space: bool,
+        id_fn: Callable,
     ) -> tuple[dict, SqrtMethod]:
         """
         Compute the precomputed cache and select the sqrt method in a single pass.
