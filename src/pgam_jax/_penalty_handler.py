@@ -71,7 +71,14 @@ class _Penalty:
             # so keying on the original tensor shape is not enough.
             # Instead, include the actual cache shape so GENERAL penalties only
             # batch when their caches are truly stackable.
-            return (self.method, self.cache["full_rank_S"].shape, self.id_fn)
+            # When id_fn drops a column we also stash a restricted full_rank_S_r
+            # whose shape (k, r_r, r_r) may not match across penalties even when
+            # the unrestricted shape does — include it in the key so vmap groups
+            # stay tree-stackable.
+            keys = [self.method, self.cache["full_rank_S"].shape, self.id_fn]
+            if "full_rank_S_r" in self.cache:
+                keys.append(self.cache["full_rank_S_r"].shape)
+            return tuple(keys)
 
         if self.method in {SqrtMethod.KRONECKER, SqrtMethod.KRONECKER_WITH_NULL}:
             # same product q is not enough: 2x6 and 3x4 both produce q=12
@@ -264,15 +271,26 @@ class PenaltyHandler:
             return cache, method
 
         # GENERAL (ndim == 3)
+        def _full_rank_precompute(S_in):
+            """Frobenius-averaging + eigh + null-space drop. Returns (U_keep, full_rank_S)."""
+            frobs = jnp.sqrt(jnp.sum(S_in**2, axis=(1, 2), keepdims=True))
+            norm_avg = jnp.sum(S_in / frobs, axis=0)
+            ev, U = jnp.linalg.eigh(norm_avg)
+            eps = float(jnp.finfo(float).eps ** 0.8)
+            keep = ev > ev[-1] * eps  # eager boolean index — precompute only
+            U_keep = U[:, keep]
+            full_rank_S = U_keep.T[None] @ S_in @ U_keep[None]
+            return U_keep, full_rank_S
+
         S = data
-        frobs = jnp.sqrt(jnp.sum(S**2, axis=(1, 2), keepdims=True))
-        norm_avg = jnp.sum(S / frobs, axis=0)
-        ev, U = jnp.linalg.eigh(norm_avg)
-        eps = float(jnp.finfo(float).eps ** 0.8)
-        keep = ev > ev[-1] * eps  # eager boolean index — precompute only
-        U_keep = U[:, keep]  # (q, r)
-        full_rank_S = U_keep.T[None] @ S @ U_keep[None]  # (k, r, r)
-        return {"U_keep": U_keep, "full_rank_S": full_rank_S}, SqrtMethod.GENERAL
+        U_keep, full_rank_S = _full_rank_precompute(S)
+        cache = {"U_keep": U_keep, "full_rank_S": full_rank_S}
+        # Restricted precompute for id_fn=_drop_last_col on GENERAL.
+        # Only full_rank_S_r is needed (log-det path); compute_sqrt is unaffected.
+        if id_fn is _drop_last_col:
+            _, full_rank_S_r = _full_rank_precompute(S[:, :-1, :-1])
+            cache["full_rank_S_r"] = full_rank_S_r
+        return cache, SqrtMethod.GENERAL
 
     def _sqrt(self, method, cache, lams, id_fn):
         match method:
@@ -453,7 +471,15 @@ class PenaltyHandler:
                     )
 
             case SqrtMethod.GENERAL:
-                S_i_out = transform_slam(cache["full_rank_S"], rho)
+                if id_fn is _drop_last_col:
+                    full_rank_S = cache["full_rank_S_r"]
+                elif id_fn is identity:
+                    full_rank_S = cache["full_rank_S"]
+                else:
+                    raise NotImplementedError(
+                        f"GENERAL log_det not implemented for id_fn={id_fn}"
+                    )
+                S_i_out = transform_slam(full_rank_S, rho)
                 return log_det_and_grad_slam(rho, S_i_out)
 
             case _:
@@ -497,7 +523,8 @@ class PenaltyHandler:
             stack_groups[p._group_key].append(i)
 
         group_data = []
-        for (method, _shape, id_fn), members in stack_groups.items():
+        for key, members in stack_groups.items():
+            method, _shape, id_fn, *_ = key
             if len(members) == 1:
                 i = members[0]
                 group_data.append(
