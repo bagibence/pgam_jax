@@ -416,6 +416,15 @@ def _cd_grad(log_det_fn, rho, eps=1e-5):
     )
 
 
+def _id_fn_square(id_fn):
+    """Square-restrict matching id_fn: drop the same trailing rows as columns."""
+    if id_fn is identity:
+        return lambda M: M
+    if id_fn is _drop_last_col:
+        return lambda M: M[..., :-1, :-1]
+    raise ValueError(f"unhandled id_fn: {id_fn}")
+
+
 class TestLogDetAndGrad:
     def _ph_ld_grad(self, ph, rhos, idx=0):
         lds, gs = ph.compute_log_det_and_grad(rhos)
@@ -423,19 +432,23 @@ class TestLogDetAndGrad:
 
     # ---- SINGLE ------------------------------------------------------------
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho", [-1.0, 0.0, 1.5])
-    def test_single_value(self, S1, rho):
+    def test_single_value(self, S1, id_fn, rho):
         rho_arr = jnp.array([rho])
         ph = PenaltyHandler()
-        ph.add(S1, penalize_null_space=False, identifiability_fn=identity)
+        ph.add(S1, penalize_null_space=False, identifiability_fn=id_fn)
         ld, _ = self._ph_ld_grad(ph, [rho_arr])
         S_lam = float(jnp.exp(rho_arr[0])) * np.array(S1)
-        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=ATOL)
+        np.testing.assert_allclose(
+            ld, _ref_log_det(_id_fn_square(id_fn)(S_lam)), atol=ATOL
+        )
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho", [-1.0, 0.0, 1.5])
-    def test_single_grad(self, S1, rho):
+    def test_single_grad(self, S1, id_fn, rho):
         ph = PenaltyHandler()
-        ph.add(S1, penalize_null_space=False, identifiability_fn=identity)
+        ph.add(S1, penalize_null_space=False, identifiability_fn=id_fn)
         rho = jnp.array([rho])
         _, g = self._ph_ld_grad(ph, [rho])
         g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
@@ -443,21 +456,25 @@ class TestLogDetAndGrad:
 
     # ---- SINGLE_WITH_NULL --------------------------------------------------
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5)])
-    def test_single_with_null_value(self, S1, S1_null, rho_pen, rho_null):
+    def test_single_with_null_value(self, S1, S1_null, id_fn, rho_pen, rho_null):
         rho_arr = jnp.array([rho_pen, rho_null])
         ph = PenaltyHandler()
-        ph.add(S1, penalize_null_space=True, identifiability_fn=identity)
+        ph.add(S1, penalize_null_space=True, identifiability_fn=id_fn)
         ld, _ = self._ph_ld_grad(ph, [rho_arr])
         S_lam = float(jnp.exp(rho_arr[0])) * np.array(S1) + float(
             jnp.exp(rho_arr[1])
         ) * np.array(S1_null)
-        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=ATOL)
+        np.testing.assert_allclose(
+            ld, _ref_log_det(_id_fn_square(id_fn)(S_lam)), atol=ATOL
+        )
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5)])
-    def test_single_with_null_grad(self, S1, rho_pen, rho_null):
+    def test_single_with_null_grad(self, S1, id_fn, rho_pen, rho_null):
         ph = PenaltyHandler()
-        ph.add(S1, penalize_null_space=True, identifiability_fn=identity)
+        ph.add(S1, penalize_null_space=True, identifiability_fn=id_fn)
         rho = jnp.array([rho_pen, rho_null])
         _, g = self._ph_ld_grad(ph, [rho])
         g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
@@ -465,20 +482,24 @@ class TestLogDetAndGrad:
 
     # ---- KRONECKER ---------------------------------------------------------
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0)])
-    def test_kronecker_value(self, S1, S_kron, rho0, rho1):
+    def test_kronecker_value(self, S1, S_kron, id_fn, rho0, rho1):
         rho_arr = jnp.array([rho0, rho1])
         ph = PenaltyHandler()
-        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=identity)
+        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=id_fn)
         ld, _ = self._ph_ld_grad(ph, [rho_arr])
         lams = np.exp([rho0, rho1])
         S_lam = lams[0] * np.array(S_kron[0]) + lams[1] * np.array(S_kron[1])
-        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=1e-8)
+        np.testing.assert_allclose(
+            ld, _ref_log_det(_id_fn_square(id_fn)(S_lam)), atol=1e-8
+        )
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho0, rho1", [(-1.0, 0.5), (0.0, 0.0)])
-    def test_kronecker_grad(self, S1, rho0, rho1):
+    def test_kronecker_grad(self, S1, id_fn, rho0, rho1):
         ph = PenaltyHandler()
-        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=identity)
+        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=id_fn)
         rho = jnp.array([rho0, rho1])
         _, g = self._ph_ld_grad(ph, [rho])
         g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
@@ -486,13 +507,14 @@ class TestLogDetAndGrad:
 
     # ---- KRONECKER_WITH_NULL -----------------------------------------------
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
     def test_kronecker_with_null_value(
-        self, S1, S_kron, S_kron_null, rho0, rho1, rho_null
+        self, S1, S_kron, S_kron_null, id_fn, rho0, rho1, rho_null
     ):
         rho_arr = jnp.array([rho0, rho1, rho_null])
         ph = PenaltyHandler()
-        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=identity)
+        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=id_fn)
         ld, _ = self._ph_ld_grad(ph, [rho_arr])
         lams = np.exp([rho0, rho1])
         S_lam = (
@@ -500,12 +522,15 @@ class TestLogDetAndGrad:
             + lams[1] * np.array(S_kron[1])
             + np.exp(rho_null) * np.array(S_kron_null)
         )
-        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=1e-8)
+        np.testing.assert_allclose(
+            ld, _ref_log_det(_id_fn_square(id_fn)(S_lam)), atol=1e-8
+        )
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
-    def test_kronecker_with_null_grad(self, S1, rho0, rho1, rho_null):
+    def test_kronecker_with_null_grad(self, S1, id_fn, rho0, rho1, rho_null):
         ph = PenaltyHandler()
-        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=identity)
+        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=id_fn)
         rho = jnp.array([rho0, rho1, rho_null])
         _, g = self._ph_ld_grad(ph, [rho])
         g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
@@ -513,20 +538,24 @@ class TestLogDetAndGrad:
 
     # ---- GENERAL -----------------------------------------------------------
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0)])
-    def test_general_value(self, S_kron, rho0, rho1):
+    def test_general_value(self, S_kron, id_fn, rho0, rho1):
         rho_arr = jnp.array([rho0, rho1])
         ph = PenaltyHandler()
-        ph.add(S_kron, penalize_null_space=True, identifiability_fn=identity)
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=id_fn)
         ld, _ = self._ph_ld_grad(ph, [rho_arr])
         lams = np.exp([rho0, rho1])
         S_lam = lams[0] * np.array(S_kron[0]) + lams[1] * np.array(S_kron[1])
-        np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=1e-8)
+        np.testing.assert_allclose(
+            ld, _ref_log_det(_id_fn_square(id_fn)(S_lam)), atol=1e-8
+        )
 
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
     @pytest.mark.parametrize("rho0, rho1", [(-1.0, 0.5), (0.0, 0.0)])
-    def test_general_grad(self, S_kron, rho0, rho1):
+    def test_general_grad(self, S_kron, id_fn, rho0, rho1):
         ph = PenaltyHandler()
-        ph.add(S_kron, penalize_null_space=True, identifiability_fn=identity)
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=id_fn)
         rho = jnp.array([rho0, rho1])
         _, g = self._ph_ld_grad(ph, [rho])
         g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
