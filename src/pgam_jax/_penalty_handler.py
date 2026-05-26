@@ -262,9 +262,7 @@ class PenaltyHandler:
                 S_r = data[:-1, :-1]
                 eig_r, _, rank_r = _eigh_and_rank(S_r)
                 log_det_S_r = jnp.sum(
-                    jnp.where(
-                        eig_r > 0, jnp.log(jnp.where(eig_r > 0, eig_r, 1.0)), 0.0
-                    )
+                    jnp.where(eig_r > 0, jnp.log(jnp.where(eig_r > 0, eig_r, 1.0)), 0.0)
                 )
                 cache["rank_r"] = rank_r
                 cache["log_det_S_r"] = log_det_S_r
@@ -451,14 +449,12 @@ class PenaltyHandler:
                     )  # shape = factor_shape
                     pos = combined > 0
                     # d_lam: lam_null on null modes, combined on positive modes.
-                    d_lam = jnp.where(
-                        pos, jnp.where(pos, combined, 1.0), lams[-1]
-                    )
+                    d_lam = jnp.where(pos, jnp.where(pos, combined, 1.0), lams[-1])
                     D = jnp.sum(w / d_lam)  # = (A^-1)[-1, -1], strictly positive
                     c = jnp.log(D)
                     # Per-factor grad: -sum_{pos} w * lam_j * eig_j / d_lam^2 / D
                     ndim = len(eigs)
-                    d_sq_inv = 1.0 / (d_lam ** 2)
+                    d_sq_inv = 1.0 / (d_lam**2)
                     factor_grad_corrs = []
                     for j, (lam, eig) in enumerate(zip(lams[:-1], eigs)):
                         shape = [1] * ndim
@@ -473,9 +469,9 @@ class PenaltyHandler:
                     return (
                         log_det_full + c,
                         grad_full
-                        + jnp.stack(
-                            [*factor_grad_corrs, null_grad_corr]
-                        ).astype(rho.dtype),
+                        + jnp.stack([*factor_grad_corrs, null_grad_corr]).astype(
+                            rho.dtype
+                        ),
                     )
                 elif id_fn is identity:
                     return log_det_full, grad_full
@@ -595,9 +591,7 @@ class PenaltyHandler:
             grads = [None] * n
             for g in group_data:
                 if g["singleton"]:
-                    ld, gr = _ld_fn(
-                        g["method"], g["cache"], rhos[g["idx"]], g["id_fn"]
-                    )
+                    ld, gr = _ld_fn(g["method"], g["cache"], rhos[g["idx"]], g["id_fn"])
                     log_dets[g["idx"]] = ld
                     grads[g["idx"]] = gr
                 else:
