@@ -28,7 +28,7 @@ where
 From $A = U \Sigma V^\top$:
 
 $$
-A^\top A = V \Sigma^2 V^\top = X^\top W X + S_\lambda = \phi\,(H + S_\lambda)
+A^\top A = V \Sigma^2 V^\top = X^\top W X + S_\lambda = \phi\,H + S_\lambda
 $$
 
 The $1/\phi$ is **not** folded into $B$; it is recovered explicitly in each derived quantity:
