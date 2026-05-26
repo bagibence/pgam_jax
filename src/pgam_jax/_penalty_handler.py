@@ -1,6 +1,6 @@
-from dataclasses import dataclass
 import enum
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import reduce
 from typing import Callable
 
@@ -24,7 +24,7 @@ def _drop_last_col(x):
     return x[..., :-1]
 
 
-def _preprocess_kron(S):
+def _eigh_and_rank(S):
     S = 0.5 * (S + S.T)
     eig, U = jnp.linalg.eigh(S)
     thresh = jnp.finfo(float).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
@@ -179,7 +179,7 @@ class PenaltyHandler:
         # TODO: Make sure data is already column-dropped
         if isinstance(data, list):
             # KRONECKER
-            results = [_preprocess_kron(S) for S in data]
+            results = [_eigh_and_rank(S) for S in data]
             eigs = [eig for eig, _, _ in results]
             Us = [U for _, U, _ in results]
             ranks = [rank for _, _, rank in results]
@@ -204,7 +204,7 @@ class PenaltyHandler:
 
         if data.ndim == 2:
             # SINGLE
-            eig, U, rank = _preprocess_kron(data)
+            eig, U, rank = _eigh_and_rank(data)
             has_null = penalize_null_space and bool(rank < data.shape[0])
             method = SqrtMethod.SINGLE_WITH_NULL if has_null else SqrtMethod.SINGLE
             log_det_S = jnp.sum(
