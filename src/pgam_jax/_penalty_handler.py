@@ -212,7 +212,28 @@ class PenaltyHandler:
             log_det_S = jnp.sum(
                 jnp.where(eig > 0, jnp.log(jnp.where(eig > 0, eig, 1.0)), 0.0)
             )
-            cache = {"eig": eig, "U": U, "rank": rank, "log_det_S": log_det_S}
+            # Schur-correction precompute for id_fn=_drop_last_col on SINGLE_WITH_NULL:
+            # log|A[:-1,:-1]| = log|A| + log((A^-1)[-1,-1])
+            #                 = log|A| + log(alpha * e^-rho0 + beta * e^-rho1)
+            # alpha = sum_{eig>0} U[-1,i]^2 / eig[i], beta = sum_{eig=0} U[-1,i]^2.
+            # Always stored (cheap); only consumed when id_fn drops the last row.
+            last_sq = U[-1, :] ** 2
+            pos = eig > 0
+            alpha = jnp.sum(jnp.where(pos, last_sq / jnp.where(pos, eig, 1.0), 0.0))
+            beta = jnp.sum(jnp.where(pos, 0.0, last_sq))
+
+            def _safe_log(x):
+                # log(x) for x > 0, -inf for x == 0; no log(0) ever evaluated.
+                return jnp.where(x > 0, jnp.log(jnp.where(x > 0, x, 1.0)), -jnp.inf)
+
+            cache = {
+                "eig": eig,
+                "U": U,
+                "rank": rank,
+                "log_det_S": log_det_S,
+                "log_alpha": _safe_log(alpha),
+                "log_beta": _safe_log(beta),
+            }
             if method is SqrtMethod.SINGLE_WITH_NULL:
                 cache["rank_null"] = data.shape[0] - rank
             return cache, method
@@ -316,10 +337,20 @@ class PenaltyHandler:
                 return log_det, jnp.full_like(rho, rank)
 
             case SqrtMethod.SINGLE_WITH_NULL:
-                # log|lam0*S + lam1*P_null|_+ = rank*rho0 + log_det_S + rank_null*rho1
+                # Full-basis: log|lam0*S + lam1*P_null| = rank*rho0 + log_det_S + rank_null*rho1
                 rank, rank_null = cache["rank"], cache["rank_null"]
-                log_det = rank * rho[0] + cache["log_det_S"] + rank_null * rho[1]
-                return log_det, jnp.stack([rank, rank_null]).astype(rho.dtype)
+                log_det_full = rank * rho[0] + cache["log_det_S"] + rank_null * rho[1]
+                grad_full = jnp.stack([rank, rank_null]).astype(rho.dtype)
+                if id_fn is _drop_last_col:
+                    # Schur correction: log|A[:-1,:-1]| = log|A| + log((A^-1)[-1,-1])
+                    # (A^-1)[-1,-1] = alpha * exp(-rho0) + beta * exp(-rho1)
+                    log_terms = jnp.stack(
+                        [cache["log_alpha"] - rho[0], cache["log_beta"] - rho[1]]
+                    )
+                    c = jax.scipy.special.logsumexp(log_terms)
+                    weights = jnp.exp(log_terms - c)  # softmax weights, sum to 1
+                    return log_det_full + c, grad_full - weights
+                return log_det_full, grad_full
 
             case SqrtMethod.KRONECKER:
                 lams = jnp.exp(rho)
