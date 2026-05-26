@@ -16,6 +16,8 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
+from .concurvity import concurvity as _concurvity
+from .concurvity import design_with_intercept, term_blocks_for_gam
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
 from .iterative_optim import (
@@ -583,6 +585,113 @@ class GAM:
         """
         params = (self.coef_, self.intercept_)
         return self._predict(params, xi)
+
+    def concurvity(
+        self,
+        xi: tuple[ArrayLike, ...],
+        full: bool = True,
+        as_dataframe: bool = False,
+    ):
+        r"""Concurvity diagnostics for this GAM.
+
+        Concurvity generalizes collinearity to smooth terms: it measures the
+        fraction of a smooth's fitted curve that can be reproduced by some
+        combination of the other terms in the model. High concurvity makes
+        individual smooths weakly identifiable and their coefficient
+        estimates unstable, even though the model as a whole can fit well.
+
+        For each term, the contribution
+        :math:`\mathbf{f}_i = \mathbf{X}_i \boldsymbol{\beta}_i` is split as
+        :math:`\mathbf{f}_i = \mathbf{g}_i + (\mathbf{f}_i - \mathbf{g}_i)`,
+        where :math:`\mathbf{g}_i` is the projection of
+        :math:`\mathbf{f}_i` onto the column space of the *other* terms.
+        Three indices summarize :math:`\|\mathbf{g}_i\|^2/\|\mathbf{f}_i\|^2`,
+        all in :math:`[0, 1]` (0 = identifiable, 1 = fully redundant):
+
+        - ``worst`` — :math:`\sup_{\boldsymbol{\beta}_i}
+          \|\mathbf{g}_i\|^2/\|\mathbf{f}_i\|^2`. Worst case over coefficient
+          space; pessimistic but coefficient-free.
+        - ``estimate`` — the Frobenius-norm ratio
+          :math:`\|\mathbf{R}_{12}\|_F^2/\|\mathbf{R}_{:,2}\|_F^2` from the
+          block-QR of :math:`[\mathbf{X}_{-i} \mid \mathbf{X}_i]`. Free of
+          both pessimism and optimism; depends only on the design matrix.
+        - ``observed`` — the ratio evaluated at the fitted
+          :math:`\hat{\boldsymbol{\beta}}_i`. Most direct interpretation, but
+          can be over-optimistic if shrinkage pushed :math:`\hat{\boldsymbol{\beta}}_i`
+          away from the worst-case direction. **Only available after fit.**
+
+        Callable in two states:
+
+        - **Before** ``fit``: returns ``worst`` and ``estimate`` only (these
+          are properties of the design matrix and don't need
+          :math:`\hat{\boldsymbol{\beta}}`). Side effect: ``basis.setup_basis``
+          is called on ``xi`` to make the basis usable for evaluation; a
+          later ``fit(xi_train, …)`` will overwrite this state.
+        - **After** ``fit``: returns all three measures using the cached
+          ``feature_mean_`` and the fitted coefficients.
+
+        Parameters
+        ----------
+        xi :
+            Inputs at which to evaluate concurvity, one array per basis
+            dimension. After ``fit`` you almost always want to pass the
+            training inputs; before ``fit``, pass the inputs you plan to
+            train on (so the design matrix is the one the actual fit will
+            see).
+        full :
+            If ``True`` (default), decompose each term against the rest of
+            the model. If ``False``, return pairwise concurvity between
+            every ordered pair of terms; the diagonal is 1 by convention.
+        as_dataframe :
+            If ``True``, return pandas DataFrames instead of raw arrays.
+            See *Returns*.
+
+        Returns
+        -------
+        dict[str, jax.Array] | pandas.DataFrame | dict[str, pandas.DataFrame]
+            Layout depends on ``full`` and ``as_dataframe``; ``observed``
+            is included only post-fit.
+
+            - ``full=True, as_dataframe=False``: dict of 1-D arrays of
+              length ``m`` (one entry per term, parametric block included
+              as the first entry labelled ``'para'``).
+            - ``full=False, as_dataframe=False``: dict of ``(m, m)`` arrays
+              where ``M[i, j]`` = fraction of term ``j`` explained by term
+              ``i`` (i.e. row = explainer, column = focal).
+            - ``full=True, as_dataframe=True``: single ``DataFrame``,
+              one row per term, columns are the available measures.
+            - ``full=False, as_dataframe=True``: ``dict[measure -> DataFrame]``,
+              each frame ``(m, m)`` with term labels on both axes.
+
+        Notes
+        -----
+        ``worst`` is symmetric in the pairwise case (a property of
+        principal angles between subspaces); ``observed`` and ``estimate``
+        are not.
+
+        References
+        ----------
+        - Wood, S. N. (2017). *Generalized Additive Models: An Introduction
+          with R*, 2nd ed., §5.6.3. CRC Press.
+        - `mgcv` source: ``R/mgcv.r``, function ``concurvity``. The exact
+          formulas implemented here are derived from that source and
+          documented in ``docs/concurvity_mgcv.md``.
+        """
+        if hasattr(self, "coef_"):
+            # Post-fit: reuse the cached centering and the fitted β.
+            X = design_with_intercept(self, xi)
+            beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
+        else:
+            # Pre-fit: set up the basis on `xi` and center on-the-fly.
+            # No β yet, so the underlying call skips the `observed` measure.
+            X_raw = self._compute_uncentered_design_matrix(xi, setup_basis=True)
+            X_smooths = X_raw - X_raw.mean(axis=0)
+            intercept_col = jnp.ones((X_smooths.shape[0], 1))
+            X = jnp.concatenate([intercept_col, X_smooths], axis=1)
+            beta = None
+        blocks = term_blocks_for_gam(self)
+        return _concurvity(X, blocks, beta=beta, full=full,
+                           as_dataframe=as_dataframe)
 
     # TODO: Test against original implementation
     def smooth_compute(
