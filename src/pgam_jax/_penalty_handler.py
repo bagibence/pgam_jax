@@ -356,7 +356,12 @@ class PenaltyHandler:
                     c = jax.scipy.special.logsumexp(log_terms)
                     weights = jnp.exp(log_terms - c)  # softmax weights, sum to 1
                     return log_det_full + c, grad_full - weights
-                return log_det_full, grad_full
+                elif id_fn is identity:
+                    return log_det_full, grad_full
+                else:
+                    raise NotImplementedError(
+                        f"SINGLE_WITH_NULL log_det not implemented for id_fn={id_fn}"
+                    )
 
             case SqrtMethod.KRONECKER:
                 lams = jnp.exp(rho)
@@ -412,7 +417,12 @@ class PenaltyHandler:
                             [*factor_grad_corrs, null_grad_corr]
                         ).astype(rho.dtype),
                     )
-                return log_det_full, grad_full
+                elif id_fn is identity:
+                    return log_det_full, grad_full
+                else:
+                    raise NotImplementedError(
+                        f"KRONECKER_WITH_NULL log_det not implemented for id_fn={id_fn}"
+                    )
 
             case SqrtMethod.GENERAL:
                 S_i_out = transform_slam(cache["full_rank_S"], rho)
