@@ -301,8 +301,13 @@ class PenaltyHandler:
             )
         return log_det_pos, factor_grads, jnp.sum(pos)
 
-    def _log_det_and_grad(self, method, cache, rho):
-        """Return (log|S_lam|_+, d log|S_lam|_+ / d rho) for one penalty."""
+    def _log_det_and_grad(self, method, cache, rho, id_fn):
+        """Return (log|S_lam|_+, d log|S_lam|_+ / d rho) for one penalty.
+
+        ``id_fn`` is the identifiability map (``identity`` or ``_drop_last_col``);
+        methods that have a Schur correction for the restricted log-det use it
+        to decide whether to apply the correction.
+        """
         match method:
             case SqrtMethod.SINGLE:
                 # log|lam*S|_+ = rank*rho + log_det_S,  grad = rank
@@ -409,7 +414,9 @@ class PenaltyHandler:
                             )
                         ),
                         "vmapped_ld": jax.vmap(
-                            lambda cache, rho, _m=method: _ld_fn(_m, cache, rho)
+                            lambda cache, rho, _m=method, _f=id_fn: _ld_fn(
+                                _m, cache, rho, _f
+                            )
                         ),
                     }
                 )
@@ -435,7 +442,9 @@ class PenaltyHandler:
             grads = [None] * n
             for g in group_data:
                 if g["singleton"]:
-                    ld, gr = _ld_fn(g["method"], g["cache"], rhos[g["idx"]])
+                    ld, gr = _ld_fn(
+                        g["method"], g["cache"], rhos[g["idx"]], g["id_fn"]
+                    )
                     log_dets[g["idx"]] = ld
                     grads[g["idx"]] = gr
                 else:
