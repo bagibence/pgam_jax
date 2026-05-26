@@ -197,11 +197,17 @@ class PenaltyHandler:
                 for eig in eigs
             ]
             kron_U = reduce(jnp.kron, Us)
+            # Schur-correction precompute for id_fn=_drop_last_col on KRONECKER_WITH_NULL:
+            # store w[i] = U_kron[-1, i]^2 reshaped to factor dims so per-factor grads
+            # can broadcast eig_j along axis j (same trick as _kron_log_det_factor_grads).
+            factor_shape = tuple(eig.shape[0] for eig in eigs)
+            u_kron_last_sq = (kron_U[-1, :] ** 2).reshape(factor_shape)
             return {
                 "eigs": eigs,
                 "kron_U": kron_U,
                 "ranks": ranks,
                 "log_det_S": log_det_S,
+                "u_kron_last_sq": u_kron_last_sq,
             }, method
 
         if data.ndim == 2:
@@ -368,8 +374,45 @@ class PenaltyHandler:
                     lambda a, b: a * b, [eig.shape[0] for eig in cache["eigs"]]
                 )
                 n_null = total - n_pos
-                log_det = log_det_pos + n_null * rho[-1]
-                return log_det, jnp.stack([*factor_grads, n_null.astype(rho.dtype)])
+                log_det_full = log_det_pos + n_null * rho[-1]
+                grad_full = jnp.stack([*factor_grads, n_null.astype(rho.dtype)])
+                if id_fn is _drop_last_col:
+                    eigs = cache["eigs"]
+                    w = cache["u_kron_last_sq"]  # shape = factor_shape
+                    # Kron-sum eigenvalues, reshaped to factor dims.
+                    combined = reduce(
+                        jnp.add.outer,
+                        [lam * eig for lam, eig in zip(lams[:-1], eigs)],
+                    )  # shape = factor_shape
+                    pos = combined > 0
+                    # d_lam: lam_null on null modes, combined on positive modes.
+                    d_lam = jnp.where(
+                        pos, jnp.where(pos, combined, 1.0), lams[-1]
+                    )
+                    D = jnp.sum(w / d_lam)  # = (A^-1)[-1, -1], strictly positive
+                    c = jnp.log(D)
+                    # Per-factor grad: -sum_{pos} w * lam_j * eig_j / d_lam^2 / D
+                    ndim = len(eigs)
+                    d_sq_inv = 1.0 / (d_lam ** 2)
+                    factor_grad_corrs = []
+                    for j, (lam, eig) in enumerate(zip(lams[:-1], eigs)):
+                        shape = [1] * ndim
+                        shape[j] = -1
+                        term = jnp.where(
+                            pos, w * lam * eig.reshape(shape) * d_sq_inv, 0.0
+                        )
+                        factor_grad_corrs.append(-jnp.sum(term) / D)
+                    # Null grad: -beta / (lam_null * D) where beta = sum_{null} w
+                    beta = jnp.sum(jnp.where(pos, 0.0, w))
+                    null_grad_corr = -beta / (lams[-1] * D)
+                    return (
+                        log_det_full + c,
+                        grad_full
+                        + jnp.stack(
+                            [*factor_grad_corrs, null_grad_corr]
+                        ).astype(rho.dtype),
+                    )
+                return log_det_full, grad_full
 
             case SqrtMethod.GENERAL:
                 S_i_out = transform_slam(cache["full_rank_S"], rho)
