@@ -847,3 +847,188 @@ class TestBuild:
             np.array(ph1.compute_sqrt([rho_b]).T @ ph1.compute_sqrt([rho_b])),
             atol=ATOL,
         )
+
+
+# ---------------------------------------------------------------------------
+# _group_key discrimination (negative cases)
+# ---------------------------------------------------------------------------
+
+
+class TestGroupKeyDiscrimination:
+    """
+    Lock _group_key's contract: penalties that can't be vmap-batched must not group.
+
+    Existing tests cover the positive case (same method + same shape + same id_fn
+    -> group together). These cover the negative case so a future _group_key
+    refactor cannot silently lump together penalties whose caches aren't stackable.
+    """
+
+    @staticmethod
+    def _spd(n, seed):
+        rng = np.random.default_rng(seed)
+        A = rng.standard_normal((n, n))
+        return jnp.array(A @ A.T + 0.1 * np.eye(n))
+
+    @staticmethod
+    def _stack_with_joint_rank(q, joint_rank, seed):
+        """
+        (2, q, q) tensor whose summed range has exactly ``joint_rank`` dimensions.
+
+        Both matrices are built in the column span of a single ``q × joint_rank``
+        basis, so they share that range and the joint rank equals ``joint_rank``
+        (rather than min(2*rank, q) as with independent draws).
+        """
+        rng = np.random.default_rng(seed)
+        B = rng.standard_normal((q, joint_rank))
+        M1 = rng.standard_normal((joint_rank, joint_rank))
+        M2 = rng.standard_normal((joint_rank, joint_rank))
+        S1 = B @ (M1 @ M1.T) @ B.T
+        S2 = B @ (M2 @ M2.T) @ B.T
+        return jnp.array(np.stack([S1, S2]))
+
+    def test_single_different_q(self):
+        """Two SINGLE penalties with different q must land in different groups."""
+        S_a = _diff2_penalty(8)
+        S_b = _diff2_penalty(10)
+        ph = PenaltyHandler()
+        ph.add(S_a, penalize_null_space=False, identifiability_fn=identity)
+        ph.add(S_b, penalize_null_space=False, identifiability_fn=identity)
+        assert ph._penalties[0]._group_key != ph._penalties[1]._group_key
+
+    def test_kronecker_same_product_different_factors(self):
+        """
+        KRONECKER penalties with equal prod(q_i) but different factor shapes must split.
+
+        (3, 4) and (2, 6) both give q = 12, so the old shape-only key would not have
+        distinguished them on that axis, even thoug their per-factor eig arrays are not stackable.
+        """
+        factors_a = [self._spd(3, 0), self._spd(4, 1)]
+        factors_b = [self._spd(2, 2), self._spd(6, 3)]
+        ph = PenaltyHandler()
+        ph.add_kron(factors_a, penalize_null_space=False, identifiability_fn=identity)
+        ph.add_kron(factors_b, penalize_null_space=False, identifiability_fn=identity)
+        assert ph._penalties[0]._group_key != ph._penalties[1]._group_key
+
+    def test_general_different_retained_rank(self):
+        """GENERAL penalties with the same (k, q, q) but different precompute r must split."""
+        t_low = self._stack_with_joint_rank(q=8, joint_rank=4, seed=0)
+        t_high = self._stack_with_joint_rank(q=8, joint_rank=8, seed=1)
+        ph = PenaltyHandler()
+        ph.add(t_low, penalize_null_space=False, identifiability_fn=identity)
+        ph.add(t_high, penalize_null_space=False, identifiability_fn=identity)
+        r_low = ph._penalties[0].cache["full_rank_S"].shape[1]
+        r_high = ph._penalties[1].cache["full_rank_S"].shape[1]
+        assert r_low != r_high, "fixtures must produce different retained ranks"
+        assert ph._penalties[0]._group_key != ph._penalties[1]._group_key
+
+    def test_single_mixed_id_fn(self, S1):
+        """Same method/shape, different id_fn must split."""
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False, identifiability_fn=identity)
+        ph.add(S1, penalize_null_space=False, identifiability_fn=_drop_last_col)
+        assert ph._penalties[0]._group_key != ph._penalties[1]._group_key
+
+    def test_single_with_null_mixed_id_fn(self, S1):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True, identifiability_fn=identity)
+        ph.add(S1, penalize_null_space=True, identifiability_fn=_drop_last_col)
+        assert ph._penalties[0]._group_key != ph._penalties[1]._group_key
+
+    def test_kronecker_with_null_mixed_id_fn(self, S1):
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=identity)
+        ph.add_kron(
+            [S1, S1], penalize_null_space=True, identifiability_fn=_drop_last_col
+        )
+        assert ph._penalties[0]._group_key != ph._penalties[1]._group_key
+
+    def test_general_mixed_id_fn(self, S_kron):
+        ph = PenaltyHandler()
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=identity)
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=_drop_last_col)
+        assert ph._penalties[0]._group_key != ph._penalties[1]._group_key
+
+    def _check_split_matches_singletons(self, add_a, add_b, rho_a, rho_b):
+        """
+        Verify two penalties forced into separate groups produce correct blocks.
+
+        Same shape + differing axis (id_fn here) must split via _group_key. If
+        the key wrongly merged them, tree_map(jnp.stack) would succeed (shapes
+        match), vmap would apply one id_fn to both members, and the resulting
+        block would be silently wrong. Each block of the combined sqrt must
+        match what a solo handler produces for the same penalty.
+        """
+        ph = PenaltyHandler()
+        add_a(ph)
+        add_b(ph)
+        B = ph.compute_sqrt([rho_a, rho_b])
+
+        ph_a = PenaltyHandler()
+        add_a(ph_a)
+        B_a_solo = ph_a.compute_sqrt([rho_a])
+
+        ph_b = PenaltyHandler()
+        add_b(ph_b)
+        B_b_solo = ph_b.compute_sqrt([rho_b])
+
+        ra, ca = B_a_solo.shape
+        B_a = B[:ra, :ca]
+        B_b = B[ra:, ca:]
+        np.testing.assert_allclose(
+            np.array(B_a.T @ B_a), np.array(B_a_solo.T @ B_a_solo), atol=ATOL
+        )
+        np.testing.assert_allclose(
+            np.array(B_b.T @ B_b), np.array(B_b_solo.T @ B_b_solo), atol=ATOL
+        )
+
+    def test_single_mixed_id_fn_blocks_match_solo(self, S1):
+        """SINGLE: blocks of the combined sqrt match per-id_fn solo handlers."""
+        self._check_split_matches_singletons(
+            lambda ph: ph.add(
+                S1, penalize_null_space=False, identifiability_fn=identity
+            ),
+            lambda ph: ph.add(
+                S1, penalize_null_space=False, identifiability_fn=_drop_last_col
+            ),
+            jnp.array([0.5]),
+            jnp.array([-0.5]),
+        )
+
+    def test_single_with_null_mixed_id_fn_blocks_match_solo(self, S1):
+        """SINGLE_WITH_NULL: blocks of the combined sqrt match per-id_fn solo handlers."""
+        self._check_split_matches_singletons(
+            lambda ph: ph.add(
+                S1, penalize_null_space=True, identifiability_fn=identity
+            ),
+            lambda ph: ph.add(
+                S1, penalize_null_space=True, identifiability_fn=_drop_last_col
+            ),
+            jnp.array([0.5, -0.5]),
+            jnp.array([-0.3, 0.7]),
+        )
+
+    def test_kronecker_with_null_mixed_id_fn_blocks_match_solo(self, S1):
+        """KRONECKER_WITH_NULL: blocks of the combined sqrt match per-id_fn solo handlers."""
+        self._check_split_matches_singletons(
+            lambda ph: ph.add_kron(
+                [S1, S1], penalize_null_space=True, identifiability_fn=identity
+            ),
+            lambda ph: ph.add_kron(
+                [S1, S1], penalize_null_space=True, identifiability_fn=_drop_last_col
+            ),
+            jnp.array([0.5, -0.5, 0.0]),
+            jnp.array([-0.3, 0.7, -0.2]),
+        )
+
+    def test_general_mixed_id_fn_blocks_match_solo(self, S_kron):
+        """GENERAL: blocks of the combined sqrt match per-id_fn solo handlers."""
+        self._check_split_matches_singletons(
+            lambda ph: ph.add(
+                S_kron, penalize_null_space=True, identifiability_fn=identity
+            ),
+            lambda ph: ph.add(
+                S_kron, penalize_null_space=True, identifiability_fn=_drop_last_col
+            ),
+            jnp.array([0.5, -0.5]),
+            jnp.array([-0.3, 0.7]),
+        )
