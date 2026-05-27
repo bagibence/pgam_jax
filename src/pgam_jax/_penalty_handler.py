@@ -232,6 +232,7 @@ class PenaltyHandler:
             # can broadcast eig_j along axis j (same trick as _kron_log_det_factor_grads).
             factor_shape = tuple(eig.shape[0] for eig in eigs)
             u_kron_last_sq = (kron_U[-1, :] ** 2).reshape(factor_shape)
+
             return {
                 "eigs": eigs,
                 "kron_U": kron_U,
@@ -246,26 +247,28 @@ class PenaltyHandler:
             has_null = penalize_null_space and bool(rank < data.shape[0])
             method = SqrtMethod.SINGLE_WITH_NULL if has_null else SqrtMethod.SINGLE
             log_det_S = _log_pseudo_det_from_eigvals(eig)
-            # Schur-correction precompute for id_fn=_drop_last_col on SINGLE_WITH_NULL:
-            # log|A[:-1,:-1]| = log|A| + log((A^-1)[-1,-1])
-            #                 = log|A| + log(alpha * e^-rho0 + beta * e^-rho1)
-            # alpha = sum_{eig>0} U[-1,i]^2 / eig[i], beta = sum_{eig=0} U[-1,i]^2.
-            # Always stored (cheap); only consumed when id_fn drops the last row.
-            last_sq = U[-1, :] ** 2
-            pos = eig > 0
-            alpha = jnp.sum(jnp.where(pos, last_sq / jnp.where(pos, eig, 1.0), 0.0))
-            beta = jnp.sum(jnp.where(pos, 0.0, last_sq))
-
             cache = {
                 "eig": eig,
                 "U": U,
                 "rank": rank,
                 "log_det_S": log_det_S,
-                "log_alpha": _safe_log(alpha),
-                "log_beta": _safe_log(beta),
             }
+
             if method is SqrtMethod.SINGLE_WITH_NULL:
                 cache["rank_null"] = data.shape[0] - rank
+
+            # Schur-correction precompute for id_fn=_drop_last_col on SINGLE_WITH_NULL:
+            # log|A[:-1,:-1]| = log|A| + log((A^-1)[-1,-1])
+            #                 = log|A| + log(alpha * e^-rho0 + beta * e^-rho1)
+            # alpha = sum_{eig>0} U[-1,i]^2 / eig[i], beta = sum_{eig=0} U[-1,i]^2.
+            if method is SqrtMethod.SINGLE_WITH_NULL and id_fn is _drop_last_col:
+                last_sq = U[-1, :] ** 2
+                pos = eig > 0
+                alpha = jnp.sum(jnp.where(pos, last_sq / jnp.where(pos, eig, 1.0), 0.0))
+                beta = jnp.sum(jnp.where(pos, 0.0, last_sq))
+                cache["log_alpha"] = _safe_log(alpha)
+                cache["log_beta"] = _safe_log(beta)
+
             # Restricted precompute for id_fn=_drop_last_col on SINGLE only.
             # (SINGLE_WITH_NULL uses Schur instead; see _log_det_and_grad.)
             if method is SqrtMethod.SINGLE and id_fn is _drop_last_col:
@@ -273,6 +276,7 @@ class PenaltyHandler:
                 eig_r, _, rank_r = _eigh_and_rank(S_r)
                 cache["rank_r"] = rank_r
                 cache["log_det_S_r"] = _log_pseudo_det_from_eigvals(eig_r)
+
             return cache, method
 
         # GENERAL (ndim == 3)
