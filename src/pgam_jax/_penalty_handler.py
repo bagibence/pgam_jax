@@ -82,30 +82,19 @@ class _Penalty:
 
     @property
     def _group_key(self):
-        """Key for identifying stackable groups."""
-        if self.method is SqrtMethod.GENERAL:
-            # U_keep is (q, r) and full_rank_S is (k, r, r), where r is the
-            # retained rank identified during precompute.
-            # Two (k, q, q) tensors with the same q can have different r,
-            # so keying on the original tensor shape is not enough.
-            # Instead, include the actual cache shape so GENERAL penalties only
-            # batch when their caches are truly stackable.
-            # When id_fn drops a column we also stash a restricted full_rank_S_r
-            # whose shape (k, r_r, r_r) may not match across penalties even when
-            # the unrestricted shape does — include it in the key so vmap groups
-            # stay tree-stackable.
-            keys = [self.method, self.cache["full_rank_S"].shape, self.id_fn]
-            if "full_rank_S_r" in self.cache:
-                keys.append(self.cache["full_rank_S_r"].shape)
-            return tuple(keys)
+        """Key for identifying stackable groups.
 
-        if self.method in {SqrtMethod.KRONECKER, SqrtMethod.KRONECKER_WITH_NULL}:
-            # same product q is not enough: 2x6 and 3x4 both produce q=12
-            # but have non-stackable per-factor eig arrays
-            eig_shapes = tuple(eig.shape for eig in self.cache["eigs"])
-            return (self.method, eig_shapes, self.id_fn)
-
-        return (self.method, self.shape, self.id_fn)
+        Two penalties can be vmap-batched iff their caches have the same
+        pytree structure with identical per-leaf shapes. That's what
+        ``tree_map(jnp.stack)`` requires.
+        Two penalties with identical cache structure might need different
+        computations, so ``method`` and ``id_fn`` are also part of the key.
+        E.g. KRONECKER and KRONECKER_WITH_NULL have the same cache structure,
+        but do different computations.
+        """
+        leaves, treedef = jax.tree_util.tree_flatten(self.cache)
+        leaf_shapes = tuple(jnp.shape(leaf) for leaf in leaves)
+        return (self.method, self.id_fn, treedef, leaf_shapes)
 
 
 class PenaltyHandler:
@@ -544,10 +533,11 @@ class PenaltyHandler:
             stack_groups[p._group_key].append(i)
 
         group_data = []
-        for key, members in stack_groups.items():
-            method, _shape, id_fn, *_ = key
-            if len(members) == 1:
-                i = members[0]
+        for member_indices in stack_groups.values():
+            sample_member = penalties[member_indices[0]]
+            method, id_fn = sample_member.method, sample_member.id_fn
+            if len(member_indices) == 1:
+                i = member_indices[0]
                 group_data.append(
                     {
                         "singleton": True,
@@ -559,14 +549,15 @@ class PenaltyHandler:
                 )
             else:
                 stacked = jax.tree_util.tree_map(
-                    lambda *a: jnp.stack(a), *[penalties[i].cache for i in members]
+                    lambda *a: jnp.stack(a),
+                    *[penalties[i].cache for i in member_indices],
                 )
                 group_data.append(
                     {
                         "singleton": False,
                         "method": method,
                         "id_fn": id_fn,
-                        "members": members,
+                        "member_indices": member_indices,
                         "stacked_cache": stacked,
                         "vmapped_sqrt": jax.vmap(
                             lambda cache, lams, _m=method, _f=id_fn: _sqrt_fn(
@@ -591,9 +582,9 @@ class PenaltyHandler:
                     )
                 else:
                     # all members share method, shape, and id_fn, so they can be batched with vmap
-                    batched_lams = jnp.stack([lams[i] for i in g["members"]])
+                    batched_lams = jnp.stack([lams[i] for i in g["member_indices"]])
                     batched_out = g["vmapped_sqrt"](g["stacked_cache"], batched_lams)
-                    for k, idx in enumerate(g["members"]):
+                    for k, idx in enumerate(g["member_indices"]):
                         out[idx] = batched_out[k]
             return block_diag(*out)
 
@@ -606,11 +597,11 @@ class PenaltyHandler:
                     log_dets[g["idx"]] = ld
                     grads[g["idx"]] = gr
                 else:
-                    batched_rhos = jnp.stack([rhos[i] for i in g["members"]])
+                    batched_rhos = jnp.stack([rhos[i] for i in g["member_indices"]])
                     batched_ld, batched_g = g["vmapped_ld"](
                         g["stacked_cache"], batched_rhos
                     )
-                    for k, idx in enumerate(g["members"]):
+                    for k, idx in enumerate(g["member_indices"]):
                         log_dets[idx] = batched_ld[k]
                         grads[idx] = batched_g[k]
             return log_dets, grads
