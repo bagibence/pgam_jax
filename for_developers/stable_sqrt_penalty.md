@@ -91,7 +91,7 @@ No sum is needed. $S_\lambda = \lambda_1 S_1$.
 
 Applies when $S_1 S_2 = 0$ and $\operatorname{range}(S_1) \perp \operatorname{range}(S_2)$.
 The canonical instance is the **derivative + null-space** pair for 1D B-spline smooths:
-$S_\mathrm{der}$ penalises curvature, $S_\mathrm{null}$ regularises the null space, and the
+$S_\mathrm{der}$ penalizes curvature, $S_\mathrm{null}$ regularizes the null space, and the
 two ranges are complementary.
 
 **sqrt:** Stack per-component roots — no sum needed:
@@ -130,7 +130,7 @@ $$
 ### Case 4 — General overlapping penalties (App.B rotation)
 
 No special structure; the ranges of $S_k$ overlap and neither orthogonality
-nor Kronecker factorisation applies.
+nor Kronecker factorization applies.
 
 The Wood (2011) Appendix B algorithm (`transform_slam`) constructs a
 cumulative orthogonal rotation $Q$ such that in the rotated basis
@@ -156,9 +156,9 @@ because $B_{\mathrm{orig}}^\top B_{\mathrm{orig}}
 
 **log-det:** already handled by `log_det_slam` / `transform_slam` as currently implemented.
 
-**Gap in current code:** `transform_slam` does not track or return $Q$,
-so $B_{\mathrm{orig}}$ cannot be formed. $Q$ must be accumulated in the
-`lax.scan` state alongside `S_i_out`.
+**Current implementation:** `transform_slam_with_Q` tracks the accumulated
+rotation matrix $Q$ alongside `S_i_out`, so the sqrt can be rotated back to
+the original basis after the stable App.B transform.
 
 ---
 
@@ -226,6 +226,185 @@ shape, and identifiability function are batched with `jax.vmap`
 
 Both callables close only over JAX arrays (the pre-stacked caches) and
 vmapped functions, so they are `jax.jit`-safe without any static args.
+
+#### Restricted-basis log-det and Schur correction
+
+Identifiability constraints remove the unidentifiable constant from each
+smooth.  The default constraint, `_drop_last_col`, drops the last column of
+the design matrix; `compute_sqrt` mirrors this by dropping the last column of
+the square-root factor, so
+
+$$
+B^\top B = S_\lambda[:-1, :-1].
+$$
+
+The score path therefore needs $\log|S_\lambda[:-1, :-1]|_+$, not the
+full-basis $\log|S_\lambda|_+$ that the cached eigendecomposition gives
+directly.  Recomputing an eigendecomposition of the restricted matrix at
+every `rho` would defeat the point of caching.
+
+When $S_\lambda$ is invertible, cofactor expansion along the last row gives
+the standard identity
+
+$$
+\det(S_\lambda[:-1, :-1]) = \det(S_\lambda)\,(S_\lambda^{-1})[-1, -1],
+\qquad
+\log\det(S_\lambda[:-1, :-1]) = \log\det(S_\lambda) + \log(S_\lambda^{-1})[-1, -1].
+$$
+
+Both terms on the right are closed-form in `rho` once the eigendecomposition
+of $S_\lambda$ is cached, so the restricted log-det costs no extra
+factorization.
+
+`PenaltyHandler` uses this Schur correction for the two null-penalized
+methods, where the explicit null-space penalty makes $S_\lambda$ invertible.
+For the other methods, $S_\lambda$ is singular and Schur does not apply;
+they precompute a restricted eigendecomposition at `add()` time instead.
+
+**`SINGLE_WITH_NULL`**
+
+Let $S = U \operatorname{diag}(d) U^\top$, with positive eigenvalues
+$d_i > 0$ for the penalized range and zero eigenvalues for the null space.
+The full-basis penalty adds a scalar penalty on the null space,
+
+$$
+S_\lambda = \lambda_0 S + \lambda_1 P_0,
+\qquad
+P_0 = \sum_{d_i = 0} U[:, i]\, U[:, i]^\top,
+$$
+
+where $P_0$ is the orthogonal projector onto the null space of $S$.  Because
+$S$ and $P_0$ share eigenvectors, $S_\lambda$ is diagonal in the basis $U$
+with eigenvalues $\lambda_0 d_i$ on the range and $\lambda_1$ on the null
+space.  In particular $S_\lambda$ is invertible for $\lambda_1 > 0$.
+
+The full-basis log-determinant is
+
+$$
+\log\det(S_\lambda) = r\,\rho_0 + \log|S|_+ + r_0\,\rho_1,
+$$
+
+where $r$ is the rank of $S$, $r_0$ is the null-space dimension, and
+$\lambda_j = \exp(\rho_j)$.  The inverse diagonal entry needed for Schur is
+
+$$
+(S_\lambda^{-1})[-1, -1]
+  = \sum_i \frac{U[-1, i]^2}{\lambda_0 d_i + \lambda_1\,[d_i = 0]}
+  = \alpha\, e^{-\rho_0} + \beta\, e^{-\rho_1},
+$$
+
+with
+
+$$
+\alpha = \sum_{d_i > 0} \frac{U[-1, i]^2}{d_i},
+\qquad
+\beta = \sum_{d_i = 0} U[-1, i]^2.
+$$
+
+`alpha` and `beta` are computed at `add()` time and cached as `log_alpha`
+and `log_beta` (via `_safe_log`, which returns `-inf` when the underlying
+sum is exactly zero; this is harmless because `logsumexp` treats `-inf` as a
+dropped term).  The run-time Schur term and its gradient are
+
+$$
+c = \log\!\left(\alpha\, e^{-\rho_0} + \beta\, e^{-\rho_1}\right)
+  = \operatorname{logsumexp}\!\left(\log\alpha - \rho_0,\ \log\beta - \rho_1\right),
+$$
+
+$$
+\nabla_\rho c = -\operatorname{softmax}
+  \left(\log\alpha - \rho_0,\ \log\beta - \rho_1\right).
+$$
+
+The function returns `log_det_full + c` and `grad_full - weights`, where
+`weights` is the softmax vector above.
+
+**`KRONECKER_WITH_NULL`**
+
+For a tensor-product smooth with an explicit null-space penalty, the
+full-basis penalty is diagonal in the Kronecker eigenbasis
+$U_\otimes = U_1 \otimes \cdots \otimes U_M$.  Index the basis by a
+multi-index $m = (m_1, \ldots, m_M)$, and write $d^j_{m_j}$ for the $m_j$-th
+eigenvalue of factor $j$.  Call a multi-index a **positive mode** if at least
+one $d^j_{m_j} > 0$, and a **null mode** if $d^j_{m_j} = 0$ for every $j$
+(the joint null space of all factors).  The eigenvalue of $S_\lambda$ at
+mode $m$ is then
+
+$$
+d_m =
+\begin{cases}
+\sum_j \lambda_j\, d^j_{m_j}, & m \text{ is a positive mode},\\
+\lambda_{\mathrm{null}}, & m \text{ is a null mode}.
+\end{cases}
+$$
+
+$S_\lambda$ is invertible for $\lambda_{\mathrm{null}} > 0$, so Schur applies.
+The cache stores the squared last row of $U_\otimes$,
+
+$$
+w_m = U_\otimes[-1, m]^2,
+$$
+
+reshaped to the factor dimensions so that per-factor sums can broadcast
+along one axis (same trick as `_kron_log_det_factor_grads`).  The Schur
+term is
+
+$$
+D = (S_\lambda^{-1})[-1, -1] = \sum_m \frac{w_m}{d_m},
+\qquad
+c = \log D.
+$$
+
+Differentiating $c = \log D$ uses $\partial d_m / \partial \rho_j = \lambda_j\, d^j_{m_j}$
+on positive modes (and zero on null modes), giving, for each non-null
+factor $j$,
+
+$$
+\frac{\partial c}{\partial \rho_j}
+  = -\frac{1}{D}
+    \sum_{m\ \text{positive}}
+    \frac{w_m\,\lambda_j\,d^j_{m_j}}{d_m^2}.
+$$
+
+On null modes $d_m = \lambda_{\mathrm{null}}$ and $\partial d_m / \partial \rho_{\mathrm{null}} = \lambda_{\mathrm{null}}$,
+so
+
+$$
+\frac{\partial c}{\partial \rho_{\mathrm{null}}}
+  = -\frac{\beta}{\lambda_{\mathrm{null}} D},
+\qquad
+\beta = \sum_{m\ \text{null}} w_m.
+$$
+
+The returned value and gradient are the full-basis Kronecker log-det and
+gradient plus these Schur corrections.
+
+**Methods without a Schur path**
+
+When $S_\lambda$ is singular the Schur identity does not apply: $S_\lambda^{-1}$
+does not exist, and $\det(S_\lambda[:-1, :-1])$ has to be obtained some other
+way.
+
+- `SINGLE` (no null penalty): $S$ is singular by assumption.  At `add()` time
+  the handler does a one-off `eigh` of `S[:-1, :-1]` and caches its rank and
+  pseudo-log-det.  At run-time the restricted log-det is just
+  `rank_r * rho + log_det_S_r`, with gradient `rank_r`.
+- `GENERAL`: $\sum_k \lambda_k S_k$ may be singular (any joint null direction
+  of the $S_k$ remains unpenalized).  At `add()` time the full-rank precompute
+  is repeated on `S_tensor[:, :-1, :-1]`, producing `full_rank_S_r`, and the
+  run-time path routes through the usual `transform_slam` /
+  `log_det_and_grad_slam` on this restricted tensor.  `compute_sqrt` is
+  unaffected.
+- `KRONECKER` (no null penalty): raises `NotImplementedError` under
+  `_drop_last_col`.  Two separate obstructions hit at once.  First,
+  restricting $\sum_k \lambda_k S_k$ to `[:-1, :-1]` destroys the
+  Kronecker-sum factorization, so the cheap closed-form path via
+  `_kron_log_det_factor_grads` no longer applies.  Second, $S_\lambda$ is
+  still singular, so Schur cannot rescue it either.  Falling back to a
+  generic `eigh` of the restricted matrix would defeat the point of the
+  Kronecker path.  In practice, callers should opt into a null-space penalty
+  via `add_kron(..., penalize_null_space=True)`, which routes to
+  `KRONECKER_WITH_NULL` and is supported.
 
 #### Integration with GCV / REML
 
