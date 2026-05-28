@@ -25,7 +25,7 @@ from .iterative_optim import (
     model_constructors_for_weights_and_pseudo_data,
     pql_outer_iteration,
 )
-from .penalty_utils import compute_energy_penalty_tensor
+from .penalty_utils import compute_energy_penalty_factors, compute_energy_penalty_tensor
 
 
 # TODO: Should any other observation model be supported?
@@ -249,17 +249,27 @@ class GAM:
     def _build_penalty_handler(self, penalty_tree: list) -> PenaltyHandler:
         """Construct a PenaltyHandler from the penalty tensor list."""
         ph = PenaltyHandler()
-        id_fns = [
-            (
+        for S_tensor, basis_comp in zip(penalty_tree, self.basis):
+            id_fn = (
                 _drop_last_col
-                if _should_drop_basis_col(b, self.drop_conv_basis_col)
+                if _should_drop_basis_col(basis_comp, self.drop_conv_basis_col)
                 else _id_no_drop
             )
-            for b in self.basis
-        ]
-        for S_tensor, id_fn in zip(penalty_tree, id_fns):
-            # null-space penalty already incorporated into S_tensor by compute_energy_penalty_tensor
-            ph.add(S_tensor, penalize_null_space=False, identifiability_fn=id_fn)
+            if isinstance(basis_comp, MultiplicativeBasis):
+                factors = compute_energy_penalty_factors(
+                    basis_comp, self.n_simpson_sample
+                )
+                ph.add_kron(
+                    factors,
+                    penalize_null_space=True,
+                    identifiability_fn=id_fn,
+                )
+            else:
+                ph.add(
+                    S_tensor[0],
+                    penalize_null_space=True,
+                    identifiability_fn=id_fn,
+                )
         return ph
 
     def _make_inner_func(self, penalty_tree, compute_sqrt, compute_log_det_and_grad):

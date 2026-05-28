@@ -137,8 +137,6 @@ class PenaltyHandler:
                 S_tensor, penalize_null_space, identifiability_fn
             )
 
-        print(method)
-
         self._penalties.append(
             _Penalty(
                 method=method,
