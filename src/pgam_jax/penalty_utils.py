@@ -300,7 +300,8 @@ def compute_penalty_null_space_numpy(penalty):
     # original algorith summed (null-space should be the same)
     penalty = penalty.sum(axis=0)
     eig, U = np.linalg.eigh(penalty)
-    zero_idx = np.abs(eig) < np.finfo(float).eps * np.max(eig)
+    thresh = np.finfo(float).eps ** 0.7 * max(np.abs(eig).max(), 1e-300)
+    zero_idx = eig <= thresh
     U = U[:, zero_idx]
     return np.dot(U, U.T)
 
@@ -321,7 +322,8 @@ def compute_penalty_null_space_jax(penalty):
     """
     penalty = (penalty / jnp.sum(penalty**2, axis=(1, 2), keepdims=True)).mean(axis=0)
     eig, U = jnp.linalg.eigh(penalty)
-    zero_idx = jnp.abs(eig) < jnp.finfo(float).eps * jnp.max(eig)
+    thresh = jnp.finfo(float).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
+    zero_idx = eig <= thresh
     U = U[:, zero_idx]
     return jnp.dot(U, U.T)
 
