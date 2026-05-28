@@ -463,6 +463,45 @@ def ndim_tensor_product_basis_penalty(*penalty: jnp.ndarray) -> jnp.ndarray:
     return ndim_penalty_tensor
 
 
+def compute_energy_penalty_factors(
+    basis_component: BSplineEval | MultiplicativeBasis,
+    n_simpson_samples: int = 10**4,
+) -> list[jnp.ndarray]:
+    """
+    Compute the one-dimensional energy-penalty factors for an additive component.
+
+    Parameters
+    ----------
+    basis_component:
+        Additive component of a basis.
+    n_simpson_samples:
+        Number of samples for the numerical approximation of the integral.
+
+    Returns
+    -------
+    :
+        One penalty matrix per factor in ``basis_component``.
+    """
+    components = list(basis_component._iterate_over_components())
+    if isinstance(basis_component, MultiplicativeBasis):
+        bad = [c for c in components if get_n_inputs(c) != 1]
+        if bad:
+            raise ValueError(
+                f"MultiplicativeBasis contains {len(bad)} factor(s) with _n_inputs != 1 "
+                f"({[type(c).__name__ for c in bad]}). "
+                "The Kronecker stable sqrt requires every factor to be a 1-D basis."
+            )
+
+    return [
+        compute_energy_penalty(
+            n_simpson_samples,
+            b.derivative,
+            getattr(b, "bounds", None) or (0.0, 1.0),
+        )
+        for b in components
+    ]
+
+
 def compute_energy_penalty_tensor_additive_component(
     basis_component: BSplineEval | MultiplicativeBasis,
     n_samples: int = 10**4,
@@ -493,24 +532,7 @@ def compute_energy_penalty_tensor_additive_component(
     - For 2-dimensional predictors, it adds a penalty to ..math:`a + b \cdot x + c \cdot y + d \cdot xy`.
 
     """
-    if isinstance(basis_component, MultiplicativeBasis):
-        components = list(basis_component._iterate_over_components())
-        bad = [c for c in components if get_n_inputs(c) != 1]
-        if bad:
-            raise ValueError(
-                f"MultiplicativeBasis contains {len(bad)} factor(s) with _n_inputs != 1 "
-                f"({[type(c).__name__ for c in bad]}). "
-                "The Kronecker stable sqrt requires every factor to be a 1-D basis."
-            )
-
-    one_dim_pen = (
-        compute_energy_penalty(
-            n_samples,
-            b.derivative,
-            getattr(b, "bounds", None) or (0.0, 1.0),
-        )
-        for b in basis_component._iterate_over_components()
-    )
+    one_dim_pen = compute_energy_penalty_factors(basis_component, n_samples)
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)
     if penalize_null_space:
         # In GAMs one penalizes the null space of a linear combinations of positive-semidefinite
