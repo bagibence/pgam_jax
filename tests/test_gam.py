@@ -54,3 +54,33 @@ def test_fit_runs_end_to_end(method):
 
     # sanity: the fitted smooth tracks the true signal rather than being flat
     assert np.corrcoef(pred, np.exp(eta))[0, 1] > 0.5
+
+
+@pytest.mark.parametrize("method", ["gcv", "reml"])
+def test_tensor_product_fit_runs_end_to_end(method):
+    """End-to-end tensor-product fit through the KRONECKER_WITH_NULL penalty route."""
+    rng = np.random.default_rng(1)
+    n = 350
+    x1 = rng.uniform(-1.0, 1.0, size=n)
+    x2 = rng.uniform(-1.0, 1.0, size=n)
+    eta = 0.8 * np.sin(2.0 * x1) + 0.5 * np.cos(2.5 * x2)
+    y = rng.poisson(np.exp(eta - eta.mean()))
+    basis = nmo.basis.BSplineEval(
+        n_basis_funcs=6, order=4, bounds=(-1.0, 1.0)
+    ) * nmo.basis.BSplineEval(n_basis_funcs=5, order=4, bounds=(-1.0, 1.0))
+    gam = GAM(basis, method=method, maxiter=10)
+
+    gam.fit((x1, x2), y)
+
+    # the identifiability constraint drops one column from the full tensor product
+    assert gam.coef_.shape == (6 * 5 - 1,)
+    assert len(gam.regularizer_strength_) == 1
+    assert gam.regularizer_strength_[0].shape == (3,)
+    assert np.all(np.isfinite(np.asarray(gam.coef_)))
+    assert np.all(np.isfinite(np.asarray(gam.intercept_)))
+    assert np.all(np.isfinite(np.asarray(gam.regularizer_strength_[0])))
+
+    pred = np.asarray(gam.predict((x1, x2)))
+    assert pred.shape == (n,)
+    assert np.all(np.isfinite(pred))
+    assert np.all(pred > 0)
