@@ -8,8 +8,12 @@ from jax.scipy.linalg import block_diag
 
 from pgam_jax._penalty_handler import (
     PenaltyHandler,
-    SqrtMethod,
     _drop_last_col,
+    _GeneralPenalty,
+    _KroneckerPenalty,
+    _KroneckerWithNullPenalty,
+    _SinglePenalty,
+    _SingleWithNullPenalty,
     identity,
 )
 from pgam_jax.penalty_utils import (
@@ -83,13 +87,13 @@ class TestSINGLE:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
         ph.add(S1, penalize_null_space=False, identifiability_fn=identity)
-        assert SqrtMethod.SINGLE in {p.method for p in ph._penalties}
+        assert any(type(p) is _SinglePenalty for p in ph._penalties)
 
     def test_full_rank_stays_single_with_penalize_null(self, S_full_rank):
         ph = PenaltyHandler()
         ph.add(S_full_rank, penalize_null_space=True, identifiability_fn=identity)
-        assert SqrtMethod.SINGLE in {p.method for p in ph._penalties}
-        assert SqrtMethod.SINGLE_WITH_NULL not in {p.method for p in ph._penalties}
+        assert any(type(p) is _SinglePenalty for p in ph._penalties)
+        assert not any(isinstance(p, _SingleWithNullPenalty) for p in ph._penalties)
 
     @pytest.mark.parametrize("rho", [-2.0, 0.0, 2.0])
     def test_round_trip(self, S1, rho):
@@ -140,7 +144,7 @@ class TestSINGLE_WITH_NULL:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
         ph.add(S1, penalize_null_space=True, identifiability_fn=identity)
-        assert SqrtMethod.SINGLE_WITH_NULL in {p.method for p in ph._penalties}
+        assert any(isinstance(p, _SingleWithNullPenalty) for p in ph._penalties)
 
     @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5), (2.0, 1.0)])
     def test_round_trip(self, S1, S1_null, rho_pen, rho_null):
@@ -177,16 +181,16 @@ class TestKRONECKER:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
         ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=identity)
-        assert SqrtMethod.KRONECKER in {p.method for p in ph._penalties}
+        assert any(type(p) is _KroneckerPenalty for p in ph._penalties)
 
     def test_not_fired_when_one_factor_full_rank(self, S1, S_full_rank):
         ph = PenaltyHandler()
         ph.add_kron(
             [S1, S_full_rank], penalize_null_space=True, identifiability_fn=identity
         )
-        methods = {p.method for p in ph._penalties}
-        assert SqrtMethod.KRONECKER in methods
-        assert SqrtMethod.KRONECKER_WITH_NULL not in methods
+        classes = {type(p) for p in ph._penalties}
+        assert _KroneckerPenalty in classes
+        assert _KroneckerWithNullPenalty not in classes
 
     @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0), (1.5, -0.5)])
     def test_round_trip(self, S1, S_kron, rho0, rho1):
@@ -230,14 +234,14 @@ class TestKRONECKER_WITH_NULL:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
         ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=identity)
-        assert SqrtMethod.KRONECKER_WITH_NULL in {p.method for p in ph._penalties}
+        assert any(isinstance(p, _KroneckerWithNullPenalty) for p in ph._penalties)
 
     def test_requires_all_factors_rank_deficient(self, S1, S_full_rank):
         ph = PenaltyHandler()
         ph.add_kron(
             [S1, S_full_rank], penalize_null_space=True, identifiability_fn=identity
         )
-        assert SqrtMethod.KRONECKER_WITH_NULL not in {p.method for p in ph._penalties}
+        assert not any(isinstance(p, _KroneckerWithNullPenalty) for p in ph._penalties)
 
     @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
     def test_round_trip(self, S1, S_kron, S_kron_null, rho0, rho1, rho_null):
@@ -273,7 +277,7 @@ class TestGENERAL:
     def test_method_selected(self, S_kron):
         ph = PenaltyHandler()
         ph.add(S_kron, penalize_null_space=True, identifiability_fn=identity)
-        assert SqrtMethod.GENERAL in {p.method for p in ph._penalties}
+        assert any(isinstance(p, _GeneralPenalty) for p in ph._penalties)
 
     @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.5, 2.0), (0.0, 0.0)])
     def test_round_trip(self, S_kron, rho0, rho1):
@@ -916,8 +920,8 @@ class TestGroupKeyDiscrimination:
         ph = PenaltyHandler()
         ph.add(t_low, penalize_null_space=False, identifiability_fn=identity)
         ph.add(t_high, penalize_null_space=False, identifiability_fn=identity)
-        r_low = ph._penalties[0].cache["full_rank_S"].shape[1]
-        r_high = ph._penalties[1].cache["full_rank_S"].shape[1]
+        r_low = ph._penalties[0].full_rank_S.shape[1]
+        r_high = ph._penalties[1].full_rank_S.shape[1]
         assert r_low != r_high, "fixtures must produce different retained ranks"
         assert ph._penalties[0]._group_key != ph._penalties[1]._group_key
 
@@ -1065,3 +1069,324 @@ class TestRhoLengthValidation:
         ph.add(S1, penalize_null_space=False, identifiability_fn=identity)
         with pytest.raises(ValueError, match="length 1"):
             ph.compute_sqrt([jnp.array(0.0)])
+
+
+# ---------------------------------------------------------------------------
+# New-class golden tests (compared against existing PenaltyHandler)
+# ---------------------------------------------------------------------------
+
+
+class TestSinglePenaltyClass:
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho_val", [-1.0, 0.0, 1.5])
+    def test_sqrt_matches_handler(self, S1, id_fn, rho_val):
+        from pgam_jax._penalty_handler import _SinglePenalty
+
+        rho = jnp.array([rho_val])
+
+        p = _SinglePenalty.from_S(S1, id_fn)
+        B_new = p.sqrt(rho)
+
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False, identifiability_fn=id_fn)
+        B_ref = ph.compute_sqrt([rho])
+
+        np.testing.assert_allclose(
+            np.array(B_new.T @ B_new), np.array(B_ref.T @ B_ref), atol=ATOL
+        )
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho_val", [-1.0, 0.0, 1.5])
+    def test_log_det_matches_handler(self, S1, id_fn, rho_val):
+        from pgam_jax._penalty_handler import _SinglePenalty
+
+        rho = jnp.array([rho_val])
+
+        p = _SinglePenalty.from_S(S1, id_fn)
+        ld_new, g_new = p.log_det_and_grad(rho)
+
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False, identifiability_fn=id_fn)
+        ld_ref, g_ref = ph.compute_log_det_and_grad([rho])
+
+        np.testing.assert_allclose(float(ld_new), float(ld_ref[0]), atol=ATOL)
+        np.testing.assert_allclose(np.array(g_new), np.array(g_ref[0]), atol=ATOL)
+
+    def test_rho_len(self, S1):
+        from pgam_jax._penalty_handler import _SinglePenalty
+
+        p = _SinglePenalty.from_S(S1, identity)
+        assert p.rho_len == 1
+
+    def test_base_class_cannot_be_instantiated(self):
+        from pgam_jax._penalty_handler import _AbstractPenalty
+
+        with pytest.raises(TypeError, match="abstract"):
+            _AbstractPenalty()
+
+
+class TestSingleWithNullPenaltyClass:
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho", [(0.5, -0.5), (-1.0, 0.0), (2.0, 1.0)])
+    def test_sqrt_matches_handler(self, S1, id_fn, rho):
+        from pgam_jax._penalty_handler import _SingleWithNullPenalty
+
+        rho_arr = jnp.array(rho)
+
+        p = _SingleWithNullPenalty.from_S(S1, id_fn)
+        B_new = p.sqrt(rho_arr)
+
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True, identifiability_fn=id_fn)
+        B_ref = ph.compute_sqrt([rho_arr])
+
+        np.testing.assert_allclose(
+            np.array(B_new.T @ B_new), np.array(B_ref.T @ B_ref), atol=ATOL
+        )
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho", [(0.5, -0.5), (-1.0, 0.0), (2.0, 1.0)])
+    def test_log_det_matches_handler(self, S1, id_fn, rho):
+        from pgam_jax._penalty_handler import _SingleWithNullPenalty
+
+        rho_arr = jnp.array(rho)
+
+        p = _SingleWithNullPenalty.from_S(S1, id_fn)
+        ld_new, g_new = p.log_det_and_grad(rho_arr)
+
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True, identifiability_fn=id_fn)
+        ld_ref, g_ref = ph.compute_log_det_and_grad([rho_arr])
+
+        np.testing.assert_allclose(float(ld_new), float(ld_ref[0]), atol=ATOL)
+        np.testing.assert_allclose(np.array(g_new), np.array(g_ref[0]), atol=ATOL)
+
+    def test_rho_len(self, S1):
+        from pgam_jax._penalty_handler import _SingleWithNullPenalty
+
+        p = _SingleWithNullPenalty.from_S(S1, identity)
+        assert p.rho_len == 2
+
+
+class TestKronPenaltyClass:
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.0, 0.0), (1.5, -0.5)])
+    def test_sqrt_matches_handler(self, S1, id_fn, rho0, rho1):
+        from pgam_jax._penalty_handler import _KroneckerPenalty
+
+        rho = jnp.array([rho0, rho1])
+
+        p = _KroneckerPenalty.from_factors([S1, S1], id_fn)
+        B_new = p.sqrt(rho)
+
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=id_fn)
+        B_ref = ph.compute_sqrt([rho])
+
+        np.testing.assert_allclose(
+            np.array(B_new.T @ B_new), np.array(B_ref.T @ B_ref), atol=ATOL
+        )
+
+    def test_log_det_matches_handler_identity_only(self, S1):
+        # KRONECKER under _drop_last_col raises by design; only identity here.
+        from pgam_jax._penalty_handler import _KroneckerPenalty
+
+        rho = jnp.array([0.5, -0.5])
+
+        p = _KroneckerPenalty.from_factors([S1, S1], identity)
+        ld_new, g_new = p.log_det_and_grad(rho)
+
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=identity)
+        ld_ref, g_ref = ph.compute_log_det_and_grad([rho])
+
+        np.testing.assert_allclose(float(ld_new), float(ld_ref[0]), atol=ATOL)
+        np.testing.assert_allclose(np.array(g_new), np.array(g_ref[0]), atol=ATOL)
+
+    def test_log_det_drop_last_col_raises(self, S1):
+        from pgam_jax._penalty_handler import _KroneckerPenalty
+
+        p = _KroneckerPenalty.from_factors([S1, S1], _drop_last_col)
+        with pytest.raises(NotImplementedError, match="KRONECKER log_det"):
+            p.log_det_and_grad(jnp.array([0.5, -0.5]))
+
+    def test_rho_len(self, S1):
+        from pgam_jax._penalty_handler import _KroneckerPenalty
+
+        p = _KroneckerPenalty.from_factors([S1, S1, S1], identity)
+        assert p.rho_len == 3
+
+    def test_abstract_kron_cannot_be_instantiated(self, S1):
+        from pgam_jax._penalty_handler import _AbstractKronecker
+
+        with pytest.raises(TypeError, match="abstract"):
+            _AbstractKronecker.from_factors([S1], identity)  # cls is abstract
+
+
+class TestKronWithNullPenaltyClass:
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho0,rho1,rn", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
+    def test_sqrt_matches_handler(self, S1, id_fn, rho0, rho1, rn):
+        from pgam_jax._penalty_handler import _KroneckerWithNullPenalty
+
+        rho = jnp.array([rho0, rho1, rn])
+
+        p = _KroneckerWithNullPenalty.from_factors([S1, S1], id_fn)
+        B_new = p.sqrt(rho)
+
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=id_fn)
+        B_ref = ph.compute_sqrt([rho])
+
+        np.testing.assert_allclose(
+            np.array(B_new.T @ B_new), np.array(B_ref.T @ B_ref), atol=ATOL
+        )
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho0,rho1,rn", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
+    def test_log_det_matches_handler(self, S1, id_fn, rho0, rho1, rn):
+        from pgam_jax._penalty_handler import _KroneckerWithNullPenalty
+
+        rho = jnp.array([rho0, rho1, rn])
+
+        p = _KroneckerWithNullPenalty.from_factors([S1, S1], id_fn)
+        ld_new, g_new = p.log_det_and_grad(rho)
+
+        ph = PenaltyHandler()
+        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=id_fn)
+        ld_ref, g_ref = ph.compute_log_det_and_grad([rho])
+
+        np.testing.assert_allclose(float(ld_new), float(ld_ref[0]), atol=ATOL)
+        np.testing.assert_allclose(np.array(g_new), np.array(g_ref[0]), atol=ATOL)
+
+    def test_rho_len(self, S1):
+        from pgam_jax._penalty_handler import _KroneckerWithNullPenalty
+
+        p = _KroneckerWithNullPenalty.from_factors([S1, S1], identity)
+        assert p.rho_len == 3
+
+
+class TestGeneralPenaltyClass:
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.5, 2.0), (0.0, 0.0)])
+    def test_sqrt_matches_handler(self, S_kron, id_fn, rho0, rho1):
+        from pgam_jax._penalty_handler import _GeneralPenalty
+
+        rho = jnp.array([rho0, rho1])
+
+        p = _GeneralPenalty.from_S(S_kron, id_fn)
+        B_new = p.sqrt(rho)
+
+        ph = PenaltyHandler()
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=id_fn)
+        B_ref = ph.compute_sqrt([rho])
+
+        np.testing.assert_allclose(
+            np.array(B_new.T @ B_new), np.array(B_ref.T @ B_ref), atol=ATOL
+        )
+
+    @pytest.mark.parametrize("id_fn", [identity, _drop_last_col])
+    @pytest.mark.parametrize("rho0,rho1", [(-1.0, 0.5), (0.5, 2.0)])
+    def test_log_det_matches_handler(self, S_kron, id_fn, rho0, rho1):
+        from pgam_jax._penalty_handler import _GeneralPenalty
+
+        rho = jnp.array([rho0, rho1])
+
+        p = _GeneralPenalty.from_S(S_kron, id_fn)
+        ld_new, g_new = p.log_det_and_grad(rho)
+
+        ph = PenaltyHandler()
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=id_fn)
+        ld_ref, g_ref = ph.compute_log_det_and_grad([rho])
+
+        np.testing.assert_allclose(float(ld_new), float(ld_ref[0]), atol=ATOL)
+        np.testing.assert_allclose(np.array(g_new), np.array(g_ref[0]), atol=ATOL)
+
+    def test_rho_len_matches_k(self, S_kron):
+        from pgam_jax._penalty_handler import _GeneralPenalty
+
+        p = _GeneralPenalty.from_S(S_kron, identity)
+        assert p.rho_len == S_kron.shape[0]
+
+
+# ---------------------------------------------------------------------------
+# Legacy parity oracle: the new equinox-based PenaltyHandler must reproduce the
+# numerics of the frozen pre-refactor (dispatch-style) handler. TEMPORARY audit
+# (Commit 2); removed in Commit 3 together with tests/_legacy_penalty_handler.py.
+#
+# id_fn note: ``identity`` is shared (both modules import it from nemos), but
+# ``_drop_last_col`` is a distinct object per module, so each handler must be
+# given its own to keep the ``is`` dispatch working. KRONECKER (no null) under
+# _drop_last_col raises NotImplementedError on log_det by design in both, so it
+# is excluded from the log-det parity matrix below.
+# ---------------------------------------------------------------------------
+
+
+_PARITY_KINDS = ["single", "single_null", "kron", "kron_null", "general"]
+
+
+def _build_parity_handler(handler_cls, drop_fn, kind, id_kind, S1, S_kron):
+    id_fn = drop_fn if id_kind == "drop" else identity
+    ph = handler_cls()
+    if kind == "single":
+        ph.add(S1, penalize_null_space=False, identifiability_fn=id_fn)
+        rho = [jnp.array([0.5])]
+    elif kind == "single_null":
+        ph.add(S1, penalize_null_space=True, identifiability_fn=id_fn)
+        rho = [jnp.array([0.5, -0.5])]
+    elif kind == "kron":
+        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=id_fn)
+        rho = [jnp.array([0.5, -0.5])]
+    elif kind == "kron_null":
+        ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=id_fn)
+        rho = [jnp.array([0.5, -0.5, 0.2])]
+    elif kind == "general":
+        ph.add(S_kron, penalize_null_space=True, identifiability_fn=id_fn)
+        rho = [jnp.array([0.5, -0.5])]
+    else:
+        raise ValueError(f"unknown parity kind {kind}")
+    return ph, rho
+
+
+class TestLegacyParityOracle:
+    @pytest.mark.parametrize("id_kind", ["identity", "drop"])
+    @pytest.mark.parametrize("kind", _PARITY_KINDS)
+    def test_sqrt_parity(self, S1, S_kron, kind, id_kind):
+        from _legacy_penalty_handler import PenaltyHandler as LegacyPenaltyHandler
+        from _legacy_penalty_handler import _drop_last_col as legacy_drop
+
+        ph_new, rho = _build_parity_handler(
+            PenaltyHandler, _drop_last_col, kind, id_kind, S1, S_kron
+        )
+        ph_leg, _ = _build_parity_handler(
+            LegacyPenaltyHandler, legacy_drop, kind, id_kind, S1, S_kron
+        )
+        B_new = ph_new.compute_sqrt(rho)
+        B_leg = ph_leg.compute_sqrt(rho)
+        np.testing.assert_allclose(
+            np.array(B_new.T @ B_new), np.array(B_leg.T @ B_leg), atol=ATOL
+        )
+
+    @pytest.mark.parametrize(
+        "kind,id_kind",
+        [
+            (k, idk)
+            for k in _PARITY_KINDS
+            for idk in ("identity", "drop")
+            if not (k == "kron" and idk == "drop")
+        ],
+    )
+    def test_log_det_parity(self, S1, S_kron, kind, id_kind):
+        from _legacy_penalty_handler import PenaltyHandler as LegacyPenaltyHandler
+        from _legacy_penalty_handler import _drop_last_col as legacy_drop
+
+        ph_new, rho = _build_parity_handler(
+            PenaltyHandler, _drop_last_col, kind, id_kind, S1, S_kron
+        )
+        ph_leg, _ = _build_parity_handler(
+            LegacyPenaltyHandler, legacy_drop, kind, id_kind, S1, S_kron
+        )
+        ld_new, g_new = ph_new.compute_log_det_and_grad(rho)
+        ld_leg, g_leg = ph_leg.compute_log_det_and_grad(rho)
+        np.testing.assert_allclose(float(ld_new[0]), float(ld_leg[0]), atol=ATOL)
+        np.testing.assert_allclose(np.array(g_new[0]), np.array(g_leg[0]), atol=ATOL)

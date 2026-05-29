@@ -1,23 +1,15 @@
-import enum
+import abc
 from collections import defaultdict
-from dataclasses import dataclass
 from functools import reduce
-from typing import Callable
+from typing import Callable, Optional
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import block_diag
 from nemos.inverse_link_function_utils import identity
 
 from ._slam_compute import log_det_and_grad_slam, transform_slam, transform_slam_with_Q
-
-
-class SqrtMethod(enum.Enum):
-    SINGLE = 0
-    SINGLE_WITH_NULL = 1
-    KRONECKER = 2
-    KRONECKER_WITH_NULL = 3
-    GENERAL = 4
 
 
 def _drop_last_col(x):
@@ -54,67 +46,410 @@ def _safe_log(x):
     return jnp.where(x > 0, jnp.log(jnp.where(x > 0, x, 1.0)), -jnp.inf)
 
 
-@dataclass(frozen=True, eq=False)
-class _Penalty:
-    # method for computing the sqrt penalty
-    method: SqrtMethod
-    # method-specific precomputed arrays
-    cache: dict[str, jnp.ndarray | list[jnp.ndarray] | int]
-    # identity or _drop_last_col
-    id_fn: Callable
-    # S_tensor shape
-    shape: tuple[int, ...]
+def _kron_log_det_factor_grads(lams, eigs):
+    """
+    Shared core for KRONECKER* log-det.
+
+    Returns
+    -------
+    log_det_pos : scalar
+        log|S_lam|_+ restricted to the positive-eigenvalue subspace.
+    factor_grads : list[scalar]
+        d log_det_pos / d rho[j] for each factor j.
+    n_pos : scalar
+        Number of positive eigenvalues (= total - null-space dim).
+    """
+    combined_nd = reduce(jnp.add.outer, [lam * eig for lam, eig in zip(lams, eigs)])
+    pos = combined_nd > 0
+    safe = jnp.where(pos, combined_nd, 1.0)
+    log_det_pos = jnp.sum(jnp.where(pos, jnp.log(safe), 0.0))
+    # d/drho[j] = lam_j * sum_{pos} eig_j[i_j] / combined[multi-index]
+    ndim = len(eigs)
+    factor_grads = []
+    for j, (lam, eig) in enumerate(zip(lams, eigs)):
+        shape = [1] * ndim
+        shape[j] = -1
+        factor_grads.append(
+            lam * jnp.sum(jnp.where(pos, eig.reshape(shape) / safe, 0.0))
+        )
+    return log_det_pos, factor_grads, jnp.sum(pos)
+
+
+def _full_rank_precompute(S_in):
+    """
+    Frobenius-averaging + eigh + null-space drop. Returns (U_keep, full_rank_S).
+    """
+    frobs = jnp.sqrt(jnp.sum(S_in**2, axis=(1, 2), keepdims=True))
+    norm_avg = jnp.sum(S_in / frobs, axis=0)
+    ev, U = jnp.linalg.eigh(norm_avg)
+    eps = float(jnp.finfo(float).eps ** 0.8)
+    keep = ev > ev[-1] * eps  # eager boolean index, precompute only
+    U_keep = U[:, keep]
+    full_rank_S = U_keep.T[None] @ S_in @ U_keep[None]
+    return U_keep, full_rank_S
+
+
+class _AbstractPenalty(eqx.Module):
+    """
+    Abstract base. Subclasses own their precompute + sqrt + log_det_and_grad.
+    """
+
+    @abc.abstractmethod
+    def sqrt(self, rho): ...
+
+    @abc.abstractmethod
+    def log_det_and_grad(self, rho): ...
 
     @property
-    def rho_len(self) -> int:
-        # len(rhos[i]), so how many regularization strengths it needs
-        match self.method:
-            case SqrtMethod.SINGLE:
-                return 1
-            case SqrtMethod.SINGLE_WITH_NULL:
-                return 2
-            case SqrtMethod.KRONECKER:
-                return len(self.cache["eigs"])
-            case SqrtMethod.KRONECKER_WITH_NULL:
-                return len(self.cache["eigs"]) + 1
-            case SqrtMethod.GENERAL:
-                return self.cache["full_rank_S"].shape[0]
+    @abc.abstractmethod
+    def rho_len(self) -> int: ...
 
     @property
     def _group_key(self):
-        """Key for identifying stackable groups.
+        leaves, treedef = jax.tree_util.tree_flatten(self)
+        return (treedef, tuple(jnp.shape(leaf) for leaf in leaves))
 
-        Two penalties can be vmap-batched iff their caches have the same
-        pytree structure with identical per-leaf shapes. That's what
-        ``tree_map(jnp.stack)`` requires.
-        Two penalties with identical cache structure might need different
-        computations, so ``method`` and ``id_fn`` are also part of the key.
-        E.g. KRONECKER and KRONECKER_WITH_NULL have the same cache structure,
-        but do different computations.
+
+class _SinglePenalty(_AbstractPenalty):
+    id_fn: Callable = eqx.field(static=True)
+    eig: jnp.ndarray
+    U: jnp.ndarray
+    rank: jnp.ndarray
+    log_det_S: jnp.ndarray
+    rank_r: Optional[jnp.ndarray] = None
+    log_det_S_r: Optional[jnp.ndarray] = None
+
+    @classmethod
+    def from_S(cls, S, id_fn):
+        eig, U, rank = _eigh_and_rank(S)
+        log_det_S = _log_pseudo_det_from_eigvals(eig)
+        rank_r = log_det_S_r = None
+        if id_fn is _drop_last_col:
+            eig_r, _, rank_r = _eigh_and_rank(S[:-1, :-1])
+            log_det_S_r = _log_pseudo_det_from_eigvals(eig_r)
+        return cls(
+            id_fn=id_fn,
+            eig=eig,
+            U=U,
+            rank=rank,
+            log_det_S=log_det_S,
+            rank_r=rank_r,
+            log_det_S_r=log_det_S_r,
+        )
+
+    @property
+    def rho_len(self) -> int:
+        return 1
+
+    def sqrt(self, rho):
+        sqrt_d = jnp.sqrt(jnp.exp(rho[0]) * self.eig)
+        return sqrt_d[:, None] * self.id_fn(self.U.T)
+
+    def log_det_and_grad(self, rho):
+        if self.id_fn is _drop_last_col:
+            rank, log_det_S = self.rank_r, self.log_det_S_r
+        elif self.id_fn is identity:
+            rank, log_det_S = self.rank, self.log_det_S
+        else:
+            raise NotImplementedError(
+                f"SINGLE log_det not implemented for id_fn={self.id_fn}"
+            )
+        return rank * rho[0] + log_det_S, jnp.full_like(rho, rank)
+
+
+class _SingleWithNullPenalty(_AbstractPenalty):
+    id_fn: Callable = eqx.field(static=True)
+    eig: jnp.ndarray
+    U: jnp.ndarray
+    rank: jnp.ndarray
+    rank_null: jnp.ndarray
+    log_det_S: jnp.ndarray
+    log_alpha: Optional[jnp.ndarray] = None
+    log_beta: Optional[jnp.ndarray] = None
+
+    @classmethod
+    def from_S(cls, S, id_fn):
+        eig, U, rank = _eigh_and_rank(S)
+        log_det_S = _log_pseudo_det_from_eigvals(eig)
+        rank_null = S.shape[0] - rank
+        log_alpha = log_beta = None
+        if id_fn is _drop_last_col:
+            last_sq = U[-1, :] ** 2
+            pos = eig > 0
+            alpha = jnp.sum(jnp.where(pos, last_sq / jnp.where(pos, eig, 1.0), 0.0))
+            beta = jnp.sum(jnp.where(pos, 0.0, last_sq))
+            log_alpha = _safe_log(alpha)
+            log_beta = _safe_log(beta)
+        return cls(
+            id_fn=id_fn,
+            eig=eig,
+            U=U,
+            rank=rank,
+            rank_null=rank_null,
+            log_det_S=log_det_S,
+            log_alpha=log_alpha,
+            log_beta=log_beta,
+        )
+
+    @property
+    def rho_len(self) -> int:
+        return 2
+
+    def sqrt(self, rho):
+        lams = jnp.exp(rho)
+        sqrt_d = jnp.where(
+            self.eig > 0, jnp.sqrt(lams[0] * self.eig), jnp.sqrt(lams[1])
+        )
+        return sqrt_d[:, None] * self.id_fn(self.U.T)
+
+    def log_det_and_grad(self, rho):
+        log_det_full = self.rank * rho[0] + self.log_det_S + self.rank_null * rho[1]
+        grad_full = jnp.stack([self.rank, self.rank_null]).astype(rho.dtype)
+        if self.id_fn is _drop_last_col:
+            log_det_corr, grad_corr = self._drop_last_col_correction(rho)
+            return log_det_full + log_det_corr, grad_full + grad_corr
+        elif self.id_fn is identity:
+            return log_det_full, grad_full
+        else:
+            raise NotImplementedError(
+                f"SINGLE_WITH_NULL log_det not implemented for id_fn={self.id_fn}"
+            )
+
+    def _drop_last_col_correction(self, rho):
         """
-        leaves, treedef = jax.tree_util.tree_flatten(self.cache)
-        leaf_shapes = tuple(jnp.shape(leaf) for leaf in leaves)
-        return (self.method, self.id_fn, treedef, leaf_shapes)
+        Schur correction terms for _drop_last_col on SINGLE_WITH_NULL.
+
+        Returns ``(log_det_correction, grad_correction)`` to be added to the
+        uncorrected full-space log-det and gradient.
+        """
+        log_terms = jnp.stack([self.log_alpha - rho[0], self.log_beta - rho[1]])
+        log_det_corr = jax.scipy.special.logsumexp(log_terms)
+        weights = jnp.exp(log_terms - log_det_corr)
+        return log_det_corr, -weights
+
+
+class _AbstractKronecker(_AbstractPenalty):
+    """
+    Abstract intermediate. Declares the shared fields as eqx.AbstractVar
+    so the type-checker enforces presence in concrete leaves and the shared
+    from_factors classmethod (inherited by both concrete leaves).
+    """
+
+    id_fn: eqx.AbstractVar[Callable]
+    eigs: eqx.AbstractVar[tuple]
+    kron_U: eqx.AbstractVar[jnp.ndarray]
+    ranks: eqx.AbstractVar[tuple]
+    log_det_S: eqx.AbstractVar[tuple]
+    u_kron_last_sq: eqx.AbstractVar[jnp.ndarray]
+
+    @classmethod
+    def from_factors(cls, factor_list, id_fn):
+        results = [_eigh_and_rank(S) for S in factor_list]
+        eigs = tuple(eig for eig, _, _ in results)
+        Us = [U for _, U, _ in results]
+        ranks = tuple(rank for _, _, rank in results)
+        log_det_S = tuple(_log_pseudo_det_from_eigvals(eig) for eig in eigs)
+        kron_U = reduce(jnp.kron, Us)
+        factor_shape = tuple(eig.shape[0] for eig in eigs)
+        u_kron_last_sq = (kron_U[-1, :] ** 2).reshape(factor_shape)
+        return cls(
+            id_fn=id_fn,
+            eigs=eigs,
+            kron_U=kron_U,
+            ranks=ranks,
+            log_det_S=log_det_S,
+            u_kron_last_sq=u_kron_last_sq,
+        )
+
+
+class _KroneckerPenalty(_AbstractKronecker):
+    id_fn: Callable = eqx.field(static=True)
+    eigs: tuple
+    kron_U: jnp.ndarray
+    ranks: tuple
+    log_det_S: tuple
+    u_kron_last_sq: jnp.ndarray
+
+    @property
+    def rho_len(self) -> int:
+        return len(self.eigs)
+
+    def sqrt(self, rho):
+        lams = jnp.exp(rho)
+        combined = reduce(
+            jnp.add.outer, [lam * eig for lam, eig in zip(lams, self.eigs)]
+        ).ravel()
+        return jnp.sqrt(combined)[:, None] * self.id_fn(self.kron_U.T)
+
+    def log_det_and_grad(self, rho):
+        if self.id_fn is _drop_last_col:
+            raise NotImplementedError(
+                "KRONECKER log_det not implemented under _drop_last_col; "
+                "use add_kron(..., penalize_null_space=True) for KRONECKER_WITH_NULL."
+            )
+        elif self.id_fn is identity:
+            lams = jnp.exp(rho)
+            log_det, factor_grads, _ = _kron_log_det_factor_grads(lams, self.eigs)
+            return log_det, jnp.stack(factor_grads)
+        else:
+            raise NotImplementedError(
+                f"KRONECKER log_det not implemented for id_fn={self.id_fn}"
+            )
+
+
+class _KroneckerWithNullPenalty(_AbstractKronecker):
+    id_fn: Callable = eqx.field(static=True)
+    eigs: tuple
+    kron_U: jnp.ndarray
+    ranks: tuple
+    log_det_S: tuple
+    u_kron_last_sq: jnp.ndarray
+
+    @property
+    def rho_len(self) -> int:
+        return len(self.eigs) + 1
+
+    def sqrt(self, rho):
+        lams = jnp.exp(rho)
+        combined = reduce(
+            jnp.add.outer, [lam * eig for lam, eig in zip(lams[:-1], self.eigs)]
+        ).ravel()
+        sqrt_d = jnp.where(combined > 0, jnp.sqrt(combined), jnp.sqrt(lams[-1]))
+        return sqrt_d[:, None] * self.id_fn(self.kron_U.T)
+
+    def log_det_and_grad(self, rho):
+        lams = jnp.exp(rho)
+        log_det_pos, factor_grads, n_pos = _kron_log_det_factor_grads(
+            lams[:-1], self.eigs
+        )
+        total = reduce(lambda a, b: a * b, [eig.shape[0] for eig in self.eigs])
+        n_null = total - n_pos
+        log_det_full = log_det_pos + n_null * rho[-1]
+        grad_full = jnp.stack([*factor_grads, n_null.astype(rho.dtype)])
+        if self.id_fn is _drop_last_col:
+            log_det_corr, grad_corr = self._drop_last_col_correction(lams)
+            return log_det_full + log_det_corr, grad_full + grad_corr
+        elif self.id_fn is identity:
+            return log_det_full, grad_full
+        else:
+            raise NotImplementedError(
+                f"KRONECKER_WITH_NULL log_det not implemented for id_fn={self.id_fn}"
+            )
+
+    def _drop_last_col_correction(self, lams):
+        """
+        Schur correction terms for _drop_last_col on KRONECKER_WITH_NULL.
+
+        Returns ``(log_det_correction, grad_correction)`` to be added to the
+        uncorrected full-space log-det and gradient.
+        """
+        eigs = self.eigs
+        w = self.u_kron_last_sq
+        combined = reduce(
+            jnp.add.outer, [lam * eig for lam, eig in zip(lams[:-1], eigs)]
+        )
+        pos = combined > 0
+        d_lam = jnp.where(pos, jnp.where(pos, combined, 1.0), lams[-1])
+        D = jnp.sum(w / d_lam)
+        log_det_corr = jnp.log(D)
+        ndim = len(eigs)
+        d_sq_inv = 1.0 / (d_lam**2)
+        factor_grad_corrs = []
+        for j, (lam, eig) in enumerate(zip(lams[:-1], eigs)):
+            shape = [1] * ndim
+            shape[j] = -1
+            term = jnp.where(pos, w * lam * eig.reshape(shape) * d_sq_inv, 0.0)
+            factor_grad_corrs.append(-jnp.sum(term) / D)
+        beta = jnp.sum(jnp.where(pos, 0.0, w))
+        null_grad_corr = -beta / (lams[-1] * D)
+        grad_corr = jnp.stack([*factor_grad_corrs, null_grad_corr]).astype(lams.dtype)
+        return log_det_corr, grad_corr
+
+
+class _GeneralPenalty(_AbstractPenalty):
+    id_fn: Callable = eqx.field(static=True)
+    U_keep: jnp.ndarray  # (q, r)
+    full_rank_S: jnp.ndarray  # (k, r, r)
+    full_rank_S_r: Optional[jnp.ndarray] = None  # (k, r', r') when id_fn=_drop_last_col
+
+    @classmethod
+    def from_S(cls, S, id_fn):
+        U_keep, full_rank_S = _full_rank_precompute(S)
+        full_rank_S_r = None
+        if id_fn is _drop_last_col:
+            _, full_rank_S_r = _full_rank_precompute(S[:, :-1, :-1])
+        return cls(
+            id_fn=id_fn,
+            U_keep=U_keep,
+            full_rank_S=full_rank_S,
+            full_rank_S_r=full_rank_S_r,
+        )
+
+    @property
+    def rho_len(self) -> int:
+        return self.full_rank_S.shape[0]
+
+    def sqrt(self, rho):
+        lams = jnp.exp(rho)
+        S_i_out, Q_s = transform_slam_with_Q(self.full_rank_S, lams)
+        S_full = jnp.einsum("i,ijk->jk", lams, S_i_out)
+        S_full = 0.5 * (S_full + S_full.T)
+        ev, U = jnp.linalg.eigh(S_full)
+        safe_ev = jnp.where(ev > 0, ev, 1.0)
+        sqrt_d = jnp.where(ev > 0, jnp.sqrt(safe_ev), 0.0)
+        B_rot = sqrt_d[:, None] * U.T
+        return (B_rot @ Q_s.T) @ self.id_fn(self.U_keep.T)
+
+    def log_det_and_grad(self, rho):
+        if self.id_fn is _drop_last_col:
+            full_rank_S = self.full_rank_S_r
+        elif self.id_fn is identity:
+            full_rank_S = self.full_rank_S
+        else:
+            raise NotImplementedError(
+                f"GENERAL log_det not implemented for id_fn={self.id_fn}"
+            )
+        S_i_out = transform_slam(full_rank_S, rho)
+        return log_det_and_grad_slam(rho, S_i_out)
+
+
+def _check_rho_lengths(rhos, penalties):
+    """
+    Fail loudly when ``rhos`` does not match the registered penalties.
+
+    Without this, ``sqrt`` silently drops trailing entries via ``zip`` and
+    ``log_det_and_grad`` returns a wrong-shaped gradient.
+    """
+    n = len(penalties)
+    if len(rhos) != n:
+        raise ValueError(
+            f"PenaltyHandler has {n} penalties but got {len(rhos)} "
+            "regularization-strength vectors."
+        )
+    for i, (rho, pen) in enumerate(zip(rhos, penalties)):
+        shape = jnp.shape(rho)
+        if len(shape) != 1 or shape[0] != pen.rho_len:
+            raise ValueError(
+                f"Penalty {i} ({type(pen).__name__}) expects a rho "
+                f"vector of length {pen.rho_len}, got shape {tuple(shape)}."
+            )
 
 
 class PenaltyHandler:
     def __init__(self):
-        self._penalties = []
+        self._penalties: list[_AbstractPenalty] = []
 
-    def add(
-        self,
-        S_tensor,
-        penalize_null_space: bool,
-        identifiability_fn: Callable,
-    ):
+    def add(self, S_tensor, penalize_null_space: bool, identifiability_fn: Callable):
         """
+        Register a single (possibly stacked) penalty matrix.
+
         Parameters
         ----------
         S_tensor :
-            Shape (k, q, q) or (q, q) stacked penalty matrices.  The penalty
+            Shape (k, q, q) or (q, q) stacked penalty matrices. The penalty
             is ``sum_j lambda_j * S_tensor[j]``.
         penalize_null_space :
-            Only relevant when k == 1.  For k > 1 the GENERAL method removes
+            Only relevant when k == 1. For k > 1 the general method removes
             the null space implicitly via the full-rank precompute projection.
         identifiability_fn :
             Must be a module-level callable (not a lambda) so that object
@@ -122,40 +457,27 @@ class PenaltyHandler:
             Use ``identity`` (no-op) or ``_drop_last_col``, or define your own
             at module level.
         """
-        S_tensor = jnp.asarray(S_tensor)
-        if S_tensor.ndim == 2:
-            S_tensor = S_tensor[None, :, :]
-
-        # TODO: Give a more meaningful name to cache
-        if S_tensor.shape[0] == 1:
-            cache, method = self._compute_cache(
-                S_tensor[0], penalize_null_space, identifiability_fn
-            )
+        S = jnp.asarray(S_tensor)
+        if S.ndim == 2 or S.shape[0] == 1:
+            S2d = S if S.ndim == 2 else S[0]
+            _, _, rank = _eigh_and_rank(S2d)
+            has_null = penalize_null_space and bool(rank < S2d.shape[0])
+            cls = _SingleWithNullPenalty if has_null else _SinglePenalty
+            p = cls.from_S(S2d, identifiability_fn)
         else:
-            cache, method = self._compute_cache(
-                S_tensor, penalize_null_space, identifiability_fn
-            )
-
-        self._penalties.append(
-            _Penalty(
-                method=method,
-                cache=cache,
-                id_fn=identifiability_fn,
-                shape=S_tensor.shape,
-            )
-        )
+            p = _GeneralPenalty.from_S(S, identifiability_fn)
+        self._penalties.append(p)
 
     def add_kron(
-        self,
-        factor_list,
-        penalize_null_space: bool,
-        identifiability_fn: Callable,
+        self, factor_list, penalize_null_space: bool, identifiability_fn: Callable
     ):
         """
+        Register a Kronecker-sum penalty from its factor matrices.
+
         Parameters
         ----------
         factor_list :
-            List of (q_i, q_i) 1D factor penalty matrices.  Exploits the
+            List of (q_i, q_i) factor penalty matrices. Exploits the
             Kronecker-sum structure to compute the sqrt via per-factor
             eigendecompositions, avoiding the full (prod_q, prod_q) eigh.
         penalize_null_space :
@@ -164,463 +486,71 @@ class PenaltyHandler:
         identifiability_fn :
             See ``add``.
         """
-        cache, method = self._compute_cache(
-            factor_list, penalize_null_space, identifiability_fn
+        has_null = penalize_null_space and all(
+            bool(_eigh_and_rank(S)[2] < S.shape[0]) for S in factor_list
         )
-        q = reduce(lambda a, b: a * b, [S.shape[0] for S in factor_list])
-        shape = (len(factor_list), q, q)
-        self._penalties.append(
-            _Penalty(
-                method=method,
-                cache=cache,
-                id_fn=identifiability_fn,
-                shape=shape,
-            )
-        )
+        cls = _KroneckerWithNullPenalty if has_null else _KroneckerPenalty
+        self._penalties.append(cls.from_factors(factor_list, identifiability_fn))
 
-    def _compute_cache(
-        self,
-        data,
-        penalize_null_space: bool,
-        id_fn: Callable,
-    ) -> tuple[dict, SqrtMethod]:
-        """
-        Compute the precomputed cache and select the sqrt method in a single pass.
+    def compute_log_det_and_grad(self, rhos):
+        _, fn = self.build()
+        return fn(rhos)
 
-        Parameters
-        ----------
-        data :
-            - 2-D array (q, q)     → SINGLE / SINGLE_WITH_NULL
-            - list of 2-D arrays   → KRONECKER / KRONECKER_WITH_NULL
-            - 3-D array (k, q, q)  → GENERAL
-        penalize_null_space :
-            Ignored for GENERAL (null space dropped by the precompute projection).
-        """
-        if isinstance(data, list):
-            # KRONECKER
-            results = [_eigh_and_rank(S) for S in data]
-            eigs = [eig for eig, _, _ in results]
-            Us = [U for _, U, _ in results]
-            ranks = [rank for _, _, rank in results]
-            # Kronecker-sum null space exists iff every factor has its own null space.
-            has_null = penalize_null_space and all(
-                bool(rank < S.shape[0]) for rank, S in zip(ranks, data)
-            )
-            method = (
-                SqrtMethod.KRONECKER_WITH_NULL if has_null else SqrtMethod.KRONECKER
-            )
-            log_det_S = [_log_pseudo_det_from_eigvals(eig) for eig in eigs]
-            kron_U = reduce(jnp.kron, Us)
-            # Schur-correction precompute for id_fn=_drop_last_col on KRONECKER_WITH_NULL:
-            # store w[i] = U_kron[-1, i]^2 reshaped to factor dims so per-factor grads
-            # can broadcast eig_j along axis j (same trick as _kron_log_det_factor_grads).
-            factor_shape = tuple(eig.shape[0] for eig in eigs)
-            u_kron_last_sq = (kron_U[-1, :] ** 2).reshape(factor_shape)
+    def compute_sqrt(self, rhos):
+        fn, _ = self.build()
+        return fn(rhos)
 
-            return {
-                "eigs": eigs,
-                "kron_U": kron_U,
-                "ranks": ranks,
-                "log_det_S": log_det_S,
-                "u_kron_last_sq": u_kron_last_sq,
-            }, method
-
-        if data.ndim == 2:
-            # SINGLE
-            eig, U, rank = _eigh_and_rank(data)
-            has_null = penalize_null_space and bool(rank < data.shape[0])
-            method = SqrtMethod.SINGLE_WITH_NULL if has_null else SqrtMethod.SINGLE
-            log_det_S = _log_pseudo_det_from_eigvals(eig)
-            cache = {
-                "eig": eig,
-                "U": U,
-                "rank": rank,
-                "log_det_S": log_det_S,
-            }
-
-            if method is SqrtMethod.SINGLE_WITH_NULL:
-                cache["rank_null"] = data.shape[0] - rank
-
-            # Schur-correction precompute for id_fn=_drop_last_col on SINGLE_WITH_NULL:
-            # log|A[:-1,:-1]| = log|A| + log((A^-1)[-1,-1])
-            #                 = log|A| + log(alpha * e^-rho0 + beta * e^-rho1)
-            # alpha = sum_{eig>0} U[-1,i]^2 / eig[i], beta = sum_{eig=0} U[-1,i]^2.
-            if method is SqrtMethod.SINGLE_WITH_NULL and id_fn is _drop_last_col:
-                last_sq = U[-1, :] ** 2
-                pos = eig > 0
-                alpha = jnp.sum(jnp.where(pos, last_sq / jnp.where(pos, eig, 1.0), 0.0))
-                beta = jnp.sum(jnp.where(pos, 0.0, last_sq))
-                cache["log_alpha"] = _safe_log(alpha)
-                cache["log_beta"] = _safe_log(beta)
-
-            # Restricted precompute for id_fn=_drop_last_col on SINGLE only.
-            # (SINGLE_WITH_NULL uses Schur instead; see _log_det_and_grad.)
-            if method is SqrtMethod.SINGLE and id_fn is _drop_last_col:
-                S_r = data[:-1, :-1]
-                eig_r, _, rank_r = _eigh_and_rank(S_r)
-                cache["rank_r"] = rank_r
-                cache["log_det_S_r"] = _log_pseudo_det_from_eigvals(eig_r)
-
-            return cache, method
-
-        # GENERAL (ndim == 3)
-        def _full_rank_precompute(S_in):
-            """Frobenius-averaging + eigh + null-space drop. Returns (U_keep, full_rank_S)."""
-            frobs = jnp.sqrt(jnp.sum(S_in**2, axis=(1, 2), keepdims=True))
-            norm_avg = jnp.sum(S_in / frobs, axis=0)
-            ev, U = jnp.linalg.eigh(norm_avg)
-            eps = float(jnp.finfo(float).eps ** 0.8)
-            keep = ev > ev[-1] * eps  # eager boolean index — precompute only
-            U_keep = U[:, keep]
-            full_rank_S = U_keep.T[None] @ S_in @ U_keep[None]
-            return U_keep, full_rank_S
-
-        S = data
-        U_keep, full_rank_S = _full_rank_precompute(S)
-        cache = {"U_keep": U_keep, "full_rank_S": full_rank_S}
-        # Restricted precompute for id_fn=_drop_last_col on GENERAL.
-        # Only full_rank_S_r is needed (log-det path); compute_sqrt is unaffected.
-        if id_fn is _drop_last_col:
-            _, full_rank_S_r = _full_rank_precompute(S[:, :-1, :-1])
-            cache["full_rank_S_r"] = full_rank_S_r
-        return cache, SqrtMethod.GENERAL
-
-    def _sqrt(self, method, cache, lams, id_fn):
-        match method:
-            case SqrtMethod.SINGLE:
-                sqrt_d = jnp.sqrt(lams[0] * cache["eig"])
-                return sqrt_d[:, None] * id_fn(cache["U"].T)  # (q, q)
-
-            case SqrtMethod.SINGLE_WITH_NULL:
-                eig = cache["eig"]
-                sqrt_d = jnp.where(eig > 0, jnp.sqrt(lams[0] * eig), jnp.sqrt(lams[1]))
-                return sqrt_d[:, None] * id_fn(cache["U"].T)  # (q, q)
-
-            case SqrtMethod.KRONECKER:
-                combined = reduce(
-                    jnp.add.outer, [lam * eig for lam, eig in zip(lams, cache["eigs"])]
-                ).ravel()
-                return jnp.sqrt(combined)[:, None] * id_fn(
-                    cache["kron_U"].T
-                )  # (prod_q, prod_q)
-
-            case SqrtMethod.KRONECKER_WITH_NULL:
-                combined = reduce(
-                    jnp.add.outer,
-                    [lam * eig for lam, eig in zip(lams[:-1], cache["eigs"])],
-                ).ravel()
-                sqrt_d = jnp.where(combined > 0, jnp.sqrt(combined), jnp.sqrt(lams[-1]))
-                return sqrt_d[:, None] * id_fn(cache["kron_U"].T)  # (prod_q, prod_q)
-
-            case SqrtMethod.GENERAL:
-                U_keep = cache["U_keep"]  # (q, r)
-                full_rank_S = cache["full_rank_S"]  # (k, r, r) — formally full rank
-                S_i_out, Q_s = transform_slam_with_Q(full_rank_S, lams)
-                S_full = jnp.einsum("i,ijk->jk", lams, S_i_out)  # (r, r) stable
-                S_full = 0.5 * (S_full + S_full.T)
-                ev, U = jnp.linalg.eigh(S_full)
-                safe_ev = jnp.where(ev > 0, ev, 1.0)
-                sqrt_d = jnp.where(ev > 0, jnp.sqrt(safe_ev), 0.0)
-                B_rot = sqrt_d[:, None] * U.T  # (r, r) — sqrt in rotated basis
-                return (B_rot @ Q_s.T) @ id_fn(
-                    U_keep.T
-                )  # (r, q) — back to original basis
-
-            case _:
-                raise NotImplementedError(f"_sqrt not implemented for {method}.")
-
-    @staticmethod
-    def _kron_log_det_factor_grads(lams, eigs):
-        """
-        Shared core for KRONECKER* log-det.
-
-        Returns
-        -------
-        log_det_pos : scalar
-            log|S_lam|_+ restricted to the positive-eigenvalue subspace.
-        factor_grads : list[scalar]
-            d log_det_pos / d rho[j] for each factor j.
-        n_pos : scalar
-            Number of positive eigenvalues (= total - null-space dim).
-        """
-        combined_nd = reduce(jnp.add.outer, [lam * eig for lam, eig in zip(lams, eigs)])
-        pos = combined_nd > 0
-        safe = jnp.where(pos, combined_nd, 1.0)
-        log_det_pos = jnp.sum(jnp.where(pos, jnp.log(safe), 0.0))
-        # d/drho[j] = lam_j * sum_{pos} eig_j[i_j] / combined[multi-index]
-        ndim = len(eigs)
-        factor_grads = []
-        for j, (lam, eig) in enumerate(zip(lams, eigs)):
-            shape = [1] * ndim
-            shape[j] = -1
-            factor_grads.append(
-                lam * jnp.sum(jnp.where(pos, eig.reshape(shape) / safe, 0.0))
-            )
-        return log_det_pos, factor_grads, jnp.sum(pos)
-
-    def _log_det_and_grad(self, method, cache, rho, id_fn):
-        """Return (log|S_lam|_+, d log|S_lam|_+ / d rho) for one penalty.
-
-        ``id_fn`` is the identifiability map (``identity`` or ``_drop_last_col``);
-        methods that have a Schur correction for the restricted log-det use it
-        to decide whether to apply the correction.
-        """
-        match method:
-            case SqrtMethod.SINGLE:
-                # log|lam*S_id|_+ = rank(S_id)*rho + log|S_id|_+, with S_id = id_fn'd S.
-                if id_fn is _drop_last_col:
-                    rank = cache["rank_r"]
-                    log_det_S = cache["log_det_S_r"]
-                elif id_fn is identity:
-                    rank = cache["rank"]
-                    log_det_S = cache["log_det_S"]
-                else:
-                    raise NotImplementedError(
-                        f"SINGLE log_det not implemented for id_fn={id_fn}"
-                    )
-                log_det = rank * rho[0] + log_det_S
-                return log_det, jnp.full_like(rho, rank)
-
-            case SqrtMethod.SINGLE_WITH_NULL:
-                # Full-basis: log|lam0*S + lam1*P_null| = rank*rho0 + log_det_S + rank_null*rho1
-                rank, rank_null = cache["rank"], cache["rank_null"]
-                log_det_full = rank * rho[0] + cache["log_det_S"] + rank_null * rho[1]
-                grad_full = jnp.stack([rank, rank_null]).astype(rho.dtype)
-                if id_fn is _drop_last_col:
-                    # Schur correction: log|A[:-1,:-1]| = log|A| + log((A^-1)[-1,-1])
-                    # (A^-1)[-1,-1] = alpha * exp(-rho0) + beta * exp(-rho1)
-                    log_terms = jnp.stack(
-                        [cache["log_alpha"] - rho[0], cache["log_beta"] - rho[1]]
-                    )
-                    c = jax.scipy.special.logsumexp(log_terms)
-                    weights = jnp.exp(log_terms - c)  # softmax weights, sum to 1
-                    return log_det_full + c, grad_full - weights
-                elif id_fn is identity:
-                    return log_det_full, grad_full
-                else:
-                    raise NotImplementedError(
-                        f"SINGLE_WITH_NULL log_det not implemented for id_fn={id_fn}"
-                    )
-
-            case SqrtMethod.KRONECKER:
-                if id_fn is _drop_last_col:
-                    # Restricting Σ λ_k S_k to [:-1, :-1] destroys the Kron-sum
-                    # eigenvalue factorization and the matrix is rank-deficient
-                    # (Schur doesn't apply). The natural tensor-product smooth
-                    # routes to KRONECKER_WITH_NULL instead, which is supported.
-                    raise NotImplementedError(
-                        "KRONECKER log_det not implemented under _drop_last_col; "
-                        "use add_kron(..., penalize_null_space=True) for KRONECKER_WITH_NULL."
-                    )
-                elif id_fn is identity:
-                    lams = jnp.exp(rho)
-                    log_det, factor_grads, _ = self._kron_log_det_factor_grads(
-                        lams, cache["eigs"]
-                    )
-                    return log_det, jnp.stack(factor_grads)
-                else:
-                    raise NotImplementedError(
-                        f"KRONECKER log_det not implemented for id_fn={id_fn}"
-                    )
-
-            case SqrtMethod.KRONECKER_WITH_NULL:
-                lams = jnp.exp(rho)
-                log_det_pos, factor_grads, n_pos = self._kron_log_det_factor_grads(
-                    lams[:-1], cache["eigs"]
-                )
-                total = reduce(
-                    lambda a, b: a * b, [eig.shape[0] for eig in cache["eigs"]]
-                )
-                n_null = total - n_pos
-                log_det_full = log_det_pos + n_null * rho[-1]
-                grad_full = jnp.stack([*factor_grads, n_null.astype(rho.dtype)])
-                if id_fn is _drop_last_col:
-                    eigs = cache["eigs"]
-                    w = cache["u_kron_last_sq"]  # shape = factor_shape
-                    # Kron-sum eigenvalues, reshaped to factor dims.
-                    combined = reduce(
-                        jnp.add.outer,
-                        [lam * eig for lam, eig in zip(lams[:-1], eigs)],
-                    )  # shape = factor_shape
-                    pos = combined > 0
-                    # d_lam: lam_null on null modes, combined on positive modes.
-                    d_lam = jnp.where(pos, jnp.where(pos, combined, 1.0), lams[-1])
-                    D = jnp.sum(w / d_lam)  # = (A^-1)[-1, -1], strictly positive
-                    c = jnp.log(D)
-                    # Per-factor grad: -sum_{pos} w * lam_j * eig_j / d_lam^2 / D
-                    ndim = len(eigs)
-                    d_sq_inv = 1.0 / (d_lam**2)
-                    factor_grad_corrs = []
-                    for j, (lam, eig) in enumerate(zip(lams[:-1], eigs)):
-                        shape = [1] * ndim
-                        shape[j] = -1
-                        term = jnp.where(
-                            pos, w * lam * eig.reshape(shape) * d_sq_inv, 0.0
-                        )
-                        factor_grad_corrs.append(-jnp.sum(term) / D)
-                    # Null grad: -beta / (lam_null * D) where beta = sum_{null} w
-                    beta = jnp.sum(jnp.where(pos, 0.0, w))
-                    null_grad_corr = -beta / (lams[-1] * D)
-                    return (
-                        log_det_full + c,
-                        grad_full
-                        + jnp.stack([*factor_grad_corrs, null_grad_corr]).astype(
-                            rho.dtype
-                        ),
-                    )
-                elif id_fn is identity:
-                    return log_det_full, grad_full
-                else:
-                    raise NotImplementedError(
-                        f"KRONECKER_WITH_NULL log_det not implemented for id_fn={id_fn}"
-                    )
-
-            case SqrtMethod.GENERAL:
-                if id_fn is _drop_last_col:
-                    full_rank_S = cache["full_rank_S_r"]
-                elif id_fn is identity:
-                    full_rank_S = cache["full_rank_S"]
-                else:
-                    raise NotImplementedError(
-                        f"GENERAL log_det not implemented for id_fn={id_fn}"
-                    )
-                S_i_out = transform_slam(full_rank_S, rho)
-                return log_det_and_grad_slam(rho, S_i_out)
-
-            case _:
-                raise NotImplementedError(
-                    f"_log_det_and_grad not implemented for {method}."
-                )
-
-    def compute_log_det_and_grad(self, rhos: list[jnp.ndarray]) -> tuple[list, list]:
-        _, _compute_log_det_and_grad = self.build()
-        return _compute_log_det_and_grad(rhos)
-
-    def compute_sqrt(self, rhos: list[jnp.ndarray]) -> jnp.ndarray:
-        _compute_sqrt, _ = self.build()
-        return _compute_sqrt(rhos)
-
-    def build(self) -> tuple:
+    def build(self):
         """
         Snapshot the handler into two pure callables.
-
-        Returns
-        -------
-        compute_sqrt : callable
-            ``compute_sqrt(rhos) -> (total_pen_rows, n_params)`` block-diagonal matrix.
-        compute_log_det_and_grad : callable
-            ``compute_log_det_and_grad(rhos) -> (log_dets, grads)``
-            where
-                log_dets : list[scalar]
-                    log|S_lam_i|_+ for each registered penalty i.
-                grads : list[jnp.ndarray]
-                    d log|S_lam_i|_+ / d rho for each i; shape matches rhos[i].
         """
-        # create snapshots of these at the time of build
+        n = len(self._penalties)
         penalties = self._penalties
-        n = len(penalties)
-        _sqrt_fn = self._sqrt
-        _ld_fn = self._log_det_and_grad
 
-        def _check_rho_lengths(rhos):
-            """
-            Fail loudly when ``rhos`` does not match the registered penalties.
-
-            Without this, ``_sqrt`` silently drops trailing entries via ``zip``
-            and ``_log_det_and_grad`` returns a wrong-shaped gradient.
-            """
-            if len(rhos) != n:
-                raise ValueError(
-                    f"PenaltyHandler has {n} penalties but got {len(rhos)} "
-                    "regularization-strength vectors."
-                )
-            for i, (rho, pen) in enumerate(zip(rhos, penalties)):
-                shape = jnp.shape(rho)
-                if len(shape) != 1 or shape[0] != pen.rho_len:
-                    raise ValueError(
-                        f"Penalty {i} ({pen.method.name}) expects a rho vector of "
-                        f"length {pen.rho_len}, got shape {tuple(shape)}."
-                    )
-
-        # build stack groups
         stack_groups = defaultdict(list)
         for i, p in enumerate(penalties):
             stack_groups[p._group_key].append(i)
 
-        group_data = []
+        groups = []  # each: (tuple(member_indices), stacked_pytree, members)
         for member_indices in stack_groups.values():
-            sample_member = penalties[member_indices[0]]
-            method, id_fn = sample_member.method, sample_member.id_fn
-            if len(member_indices) == 1:
-                i = member_indices[0]
-                group_data.append(
-                    {
-                        "singleton": True,
-                        "method": method,
-                        "id_fn": id_fn,
-                        "idx": i,
-                        "cache": penalties[i].cache,
-                    }
-                )
-            else:
-                stacked = jax.tree_util.tree_map(
-                    lambda *a: jnp.stack(a),
-                    *[penalties[i].cache for i in member_indices],
-                )
-                group_data.append(
-                    {
-                        "singleton": False,
-                        "method": method,
-                        "id_fn": id_fn,
-                        "member_indices": member_indices,
-                        "stacked_cache": stacked,
-                        "vmapped_sqrt": jax.vmap(
-                            lambda cache, lams, _m=method, _f=id_fn: _sqrt_fn(
-                                _m, cache, lams, _f
-                            )
-                        ),
-                        "vmapped_ld": jax.vmap(
-                            lambda cache, rho, _m=method, _f=id_fn: _ld_fn(
-                                _m, cache, rho, _f
-                            )
-                        ),
-                    }
-                )
+            members = [penalties[i] for i in member_indices]
+            stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *members)
+            groups.append((tuple(member_indices), stacked, members))
+
+        vmapped_sqrt = jax.vmap(lambda m, rho: m.sqrt(rho))
+        vmapped_ld = jax.vmap(lambda m, rho: m.log_det_and_grad(rho))
 
         def compute_sqrt(rhos):
-            _check_rho_lengths(rhos)
-            lams = [jnp.exp(r) for r in rhos]
+            _check_rho_lengths(rhos, penalties)
             out = [None] * n
-            for g in group_data:
-                if g["singleton"]:
-                    out[g["idx"]] = _sqrt_fn(
-                        g["method"], g["cache"], lams[g["idx"]], g["id_fn"]
-                    )
+            for member_indices, stacked, members in groups:
+                # Singleton groups (the common case) call the penalty directly;
+                # vmap-of-1 measurably regresses the singleton-heavy path.
+                if len(member_indices) == 1:
+                    idx = member_indices[0]
+                    out[idx] = members[0].sqrt(rhos[idx])
                 else:
-                    # all members share method, shape, and id_fn, so they can be batched with vmap
-                    batched_lams = jnp.stack([lams[i] for i in g["member_indices"]])
-                    batched_out = g["vmapped_sqrt"](g["stacked_cache"], batched_lams)
-                    for k, idx in enumerate(g["member_indices"]):
-                        out[idx] = batched_out[k]
+                    batched_rhos = jnp.stack([rhos[i] for i in member_indices])
+                    B_batch = vmapped_sqrt(stacked, batched_rhos)
+                    for k, idx in enumerate(member_indices):
+                        out[idx] = B_batch[k]
             return block_diag(*out)
 
         def compute_log_det_and_grad(rhos):
-            _check_rho_lengths(rhos)
+            _check_rho_lengths(rhos, penalties)
             log_dets = [None] * n
             grads = [None] * n
-            for g in group_data:
-                if g["singleton"]:
-                    ld, gr = _ld_fn(g["method"], g["cache"], rhos[g["idx"]], g["id_fn"])
-                    log_dets[g["idx"]] = ld
-                    grads[g["idx"]] = gr
+            for member_indices, stacked, members in groups:
+                # Singleton fast-path: see compute_sqrt.
+                if len(member_indices) == 1:
+                    idx = member_indices[0]
+                    log_dets[idx], grads[idx] = members[0].log_det_and_grad(rhos[idx])
                 else:
-                    batched_rhos = jnp.stack([rhos[i] for i in g["member_indices"]])
-                    batched_ld, batched_g = g["vmapped_ld"](
-                        g["stacked_cache"], batched_rhos
-                    )
-                    for k, idx in enumerate(g["member_indices"]):
-                        log_dets[idx] = batched_ld[k]
-                        grads[idx] = batched_g[k]
+                    batched_rhos = jnp.stack([rhos[i] for i in member_indices])
+                    ld_batch, gr_batch = vmapped_ld(stacked, batched_rhos)
+                    for k, idx in enumerate(member_indices):
+                        log_dets[idx] = ld_batch[k]
+                        grads[idx] = gr_batch[k]
             return log_dets, grads
 
         return compute_sqrt, compute_log_det_and_grad
@@ -628,11 +558,10 @@ class PenaltyHandler:
     def __len__(self):
         return len(self._penalties)
 
-    def __repr__(self) -> str:
-        string = self.__class__.__name__ + "("
-        if len(self._penalties) == 0:
-            return string + ")"
-        for pen in self._penalties:
-            string += f"\n\tn_reg_strengths={pen.rho_len},"
-        string = string[:-1] + "\n)"
-        return string
+    def __repr__(self):
+        s = self.__class__.__name__ + "("
+        if not self._penalties:
+            return s + ")"
+        for p in self._penalties:
+            s += f"\n\tn_reg_strengths={p.rho_len},"
+        return s[:-1] + "\n)"
