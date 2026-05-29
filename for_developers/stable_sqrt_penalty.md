@@ -3,10 +3,12 @@ jupytext:
   text_representation:
     extension: .md
     format_name: myst
+    format_version: 0.13
+    jupytext_version: 1.19.3
 kernelspec:
-  display_name: Python 3
-  language: python
   name: python3
+  display_name: Python 3 (ipykernel)
+  language: python
 ---
 
 # Stable computation of `sqrt_penalty` for GCV and REML scores
@@ -76,6 +78,8 @@ Two compounding issues:
 The appropriate method depends on the algebraic structure of the penalties
 within a given smooth block ($S_\lambda = \sum_{k=1}^M \lambda_k S_k$,
 all matrices of size $q \times q$).
+
+See **Restricted-basis log-det and Schur correction** for corrections to these formulas when column-dropping for identifiability is applied.
 
 ### Case 1 — Single penalty ($M = 1$)
 
@@ -227,7 +231,35 @@ shape, and identifiability function are batched with `jax.vmap`
 Both callables close only over JAX arrays (the pre-stacked caches) and
 vmapped functions, so they are `jax.jit`-safe without any static args.
 
-#### Restricted-basis log-det and Schur correction
+#### Integration with GCV / REML
+
+`_pql_gcv._compute_gcv_and_states` and `_pql_reml._compute_reml_and_states`
+now receive `compute_sqrt` (and `compute_log_det_and_grad` for REML) as
+static callable arguments.  `tree_compute_sqrt_penalty` is no longer called
+on the hot path.
+
+#### `transform_slam_with_Q` (`_slam_compute.py`)
+
+The previously noted gap — `transform_slam` not tracking the accumulated
+rotation matrix Q — has been fixed.  `transform_slam_with_Q` returns
+`(S_i_out, Q)` and is used by `PenaltyHandler._sqrt` for the GENERAL case
+to rotate the sqrt back to the original basis:
+
+```python
+B_rot = sqrt_d[:, None] * U.T          # sqrt in rotated basis
+return (B_rot @ Q.T) @ id_fn(U_keep.T) # back to original basis
+```
+
+### Precision
+
+The masking thresholds use `jnp.finfo(float).eps`, which resolves to the
+*active* JAX float precision.  Any meaningful use of multi-penalty smooths
+requires float64.  The library should warn at fit time when float64 is not
+active and multi-penalty blocks are present.
+
+---
+
+## Restricted-basis log-det and Schur correction
 
 Identifiability constraints remove the unidentifiable constant from each
 smooth.  The default constraint, `_drop_last_col`, drops the last column of
@@ -261,7 +293,7 @@ methods, where the explicit null-space penalty makes $S_\lambda$ invertible.
 For the other methods, $S_\lambda$ is singular and Schur does not apply;
 they precompute a restricted eigendecomposition at `add()` time instead.
 
-**`SINGLE_WITH_NULL`**
+### `SINGLE_WITH_NULL`
 
 Let $S = U \operatorname{diag}(d) U^\top$, with positive eigenvalues
 $d_i > 0$ for the penalized range and zero eigenvalues for the null space.
@@ -319,7 +351,7 @@ $$
 The function returns `log_det_full + c` and `grad_full - weights`, where
 `weights` is the softmax vector above.
 
-**`KRONECKER_WITH_NULL`**
+### `KRONECKER_WITH_NULL`
 
 For a tensor-product smooth with an explicit null-space penalty, the
 full-basis penalty is diagonal in the Kronecker eigenbasis
@@ -379,7 +411,7 @@ $$
 The returned value and gradient are the full-basis Kronecker log-det and
 gradient plus these Schur corrections.
 
-**Methods without a Schur path**
+### Methods without a Schur path
 
 When $S_\lambda$ is singular the Schur identity does not apply: $S_\lambda^{-1}$
 does not exist, and $\det(S_\lambda[:-1, :-1])$ has to be obtained some other
@@ -406,31 +438,218 @@ way.
   via `add_kron(..., penalize_null_space=True)`, which routes to
   `KRONECKER_WITH_NULL` and is supported.
 
-#### Integration with GCV / REML
+---
 
-`_pql_gcv._compute_gcv_and_states` and `_pql_reml._compute_reml_and_states`
-now receive `compute_sqrt` (and `compute_log_det_and_grad` for REML) as
-static callable arguments.  `tree_compute_sqrt_penalty` is no longer called
-on the hot path.
+## Worked example: 2D tensor-product Schur correction
 
-#### `transform_slam_with_Q` (`_slam_compute.py`)
+The KRONECKER and KRONECKER_WITH_NULL math above is written for $M$ factors.
+This section walks through the two-factor (2D tensor product) case end to
+end, covering both the penalty structure and the Schur correction, to make
+the indexing concrete.
 
-The previously noted gap — `transform_slam` not tracking the accumulated
-rotation matrix Q — has been fixed.  `transform_slam_with_Q` returns
-`(S_i_out, Q)` and is used by `PenaltyHandler._sqrt` for the GENERAL case
-to rotate the sqrt back to the original basis:
+Set $S_x \in \mathbb{R}^{q_x \times q_x}$ and $S_y \in \mathbb{R}^{q_y \times q_y}$
+as the marginal 1D penalties, with eigendecompositions
+$S_x = U_x \operatorname{diag}(d^x) U_x^\top$ and
+$S_y = U_y \operatorname{diag}(d^y) U_y^\top$.  The penalty tensor for the
+2D smooth has two slices,
 
-```python
-B_rot = sqrt_d[:, None] * U.T          # sqrt in rotated basis
-return (B_rot @ Q.T) @ id_fn(U_keep.T) # back to original basis
-```
+$$
+S_1 = S_x \otimes I_{q_y}, \qquad S_2 = I_{q_x} \otimes S_y,
+$$
 
-### Precision
+and the total penalty is $S_\lambda = \lambda_1 S_1 + \lambda_2 S_2$.
 
-The masking thresholds use `jnp.finfo(float).eps`, which resolves to the
-*active* JAX float precision.  Any meaningful use of multi-penalty smooths
-requires float64.  The library should warn at fit time when float64 is not
-active and multi-penalty blocks are present.
+### Why both slices diagonalize in $U_x \otimes U_y$
+
+The goal is to write the eigendecomposition of *both* slices in the *same*
+outer basis $U_x \otimes U_y$.  Once we have that, their inner diagonal parts
+add directly and the joint spectrum can be read off without ever forming the
+big tensor.
+
+Two facts about Kronecker products do all the work.
+
+**Mixed-product identity.**  $(A \otimes B)(C \otimes D) = (AC) \otimes (BD)$.
+Applying it twice splits a Kronecker product of two triple-products into a
+triple-product of Kronecker products:
+
+$$
+(A_1 A_2 A_3) \otimes (B_1 B_2 B_3)
+  = (A_1 \otimes B_1)\,(A_2 \otimes B_2)\,(A_3 \otimes B_3).
+$$
+
+(Check: $(A_1 \otimes B_1)(A_2 \otimes B_2) = (A_1 A_2) \otimes (B_1 B_2)$ by
+the mixed-product rule, then right-multiply by $A_3 \otimes B_3$.)
+
+**Transpose distributes.**  $(A \otimes B)^\top = A^\top \otimes B^\top$, so
+$U_x^\top \otimes U_y^\top = (U_x \otimes U_y)^\top$.
+
+Now the one trick.  For *any* orthogonal $Q$ we have $Q\,I\,Q^\top = I$, so
+the identity block in $S_1 = S_x \otimes I$ can be replaced by the trivial
+eigendecomposition $I = U_y\, I\, U_y^\top$ at no cost. Substituting that alongside
+$S_x = U_x \operatorname{diag}(d^x) U_x^\top$,
+
+$$
+S_1 = S_x \otimes I
+    = \bigl(U_x\, \operatorname{diag}(d^x)\, U_x^\top\bigr)
+      \otimes
+      \bigl(U_y\, I\, U_y^\top\bigr).
+$$
+
+Each block is a triple product, so the triple-product identity applies with
+$(A_1, A_2, A_3) = (U_x, \operatorname{diag}(d^x), U_x^\top)$ and
+$(B_1, B_2, B_3) = (U_y, I, U_y^\top)$.  Using the transpose rule on the last
+factor,
+
+$$
+S_1
+  = (U_x \otimes U_y)\,(\operatorname{diag}(d^x) \otimes I)\,(U_x^\top \otimes U_y^\top)
+  = (U_x \otimes U_y)\,(\operatorname{diag}(d^x) \otimes I)\,(U_x \otimes U_y)^\top.
+$$
+
+This is a genuine eigendecomposition: $U_x \otimes U_y$ is orthogonal
+(a Kronecker product of orthogonals), and $\operatorname{diag}(d^x) \otimes I$
+is diagonal, with mode $(i, j)$ carrying eigenvalue $d^x_i$ for every $j$.
+
+Doing the mirror image on $S_2 = I \otimes S_y$ (write the *left* identity as
+$I = U_x\, I\, U_x^\top$ and keep the real eigendecomposition of $S_y$ on the
+right) lands the same outer basis:
+
+$$
+S_2 = I \otimes S_y
+    = (U_x \otimes U_y)\,(I \otimes \operatorname{diag}(d^y))\,(U_x \otimes U_y)^\top.
+$$
+
+Because both slices share the identical outer factor, the weighted sum
+collapses onto its inner diagonal parts:
+
+$$
+S_\lambda
+  = \lambda_1 S_1 + \lambda_2 S_2
+  = (U_x \otimes U_y)\,
+    \operatorname{diag}\!\bigl(\lambda_1 d^x_i + \lambda_2 d^y_j\bigr)\,
+    (U_x \otimes U_y)^\top.
+$$
+
+The takeaway: the full $(q_x q_y) \times (q_x q_y)$ penalty is *jointly*
+diagonal in a basis whose columns we can write down from the two small 1D
+eigendecompositions, without ever forming the big tensor.
+
+### Modes $(i, j)$
+
+The columns of $U_x \otimes U_y$ are the joint eigenvectors of $S_\lambda$.
+By the column rule that $A \otimes B$ has columns $A[:, i] \otimes B[:, j]$,
+column $(i, j)$ is
+
+$$
+v_{ij} = U_x[:, i] \otimes U_y[:, j] \in \mathbb{R}^{q_x q_y}.
+$$
+
+We call $(i, j)$ the "mode" indexing this eigenvector, with eigenvalue
+
+$$
+d_{ij} = \lambda_1 d^x_i + \lambda_2 d^y_j.
+$$
+
+A mode is **positive** when at least one of $d^x_i, d^y_j$ is nonzero
+(curvature already penalizes it).  A mode is **null** when
+$d^x_i = d^y_j = 0$; it sits in the joint null space of both marginal
+penalties.  For a 2nd-derivative penalty the marginal null space is
+$\{1, x\}$ (dimension 2 per axis), so the 2D joint null space has
+dimension 4: constants, linears in $x$, linears in $y$, and the bilinear
+term $xy$.
+
+### Schur correction step by step
+
+For KRONECKER_WITH_NULL the eigenvalues of $S_\lambda$ in the basis
+$U_x \otimes U_y$ are
+
+$$
+d_{ij} =
+\begin{cases}
+\lambda_1 d^x_i + \lambda_2 d^y_j, & (i, j) \text{ is a positive mode},\\
+\lambda_{\mathrm{null}},           & (i, j) \text{ is a null mode}.
+\end{cases}
+$$
+
+$S_\lambda$ is invertible (every $d_{ij} > 0$), so
+
+$$
+\log\det(S_\lambda[:-1, :-1])
+  = \log\det(S_\lambda) + \log (S_\lambda^{-1})[-1, -1].
+$$
+
+The full-basis log-det is the sum of $\log d_{ij}$ over all modes,
+computable from the two 1D spectra plus the null-mode count:
+
+$$
+\log\det(S_\lambda)
+  = \sum_{(i, j)\ \text{positive}} \log\!\bigl(\lambda_1 d^x_i + \lambda_2 d^y_j\bigr)
+  + n_{\mathrm{null}}\, \rho_{\mathrm{null}}.
+$$
+
+For the inverse diagonal, use the spectral identity
+$M[-1, -1] = \sum_k V[-1, k]^2\, e_k$ when $M = V \operatorname{diag}(e) V^\top$,
+applied to $S_\lambda^{-1}$ in the basis $V = U_x \otimes U_y$ with
+$e_k = 1 / d_{ij}$.  The last row of a Kronecker product factors,
+
+$$
+(U_x \otimes U_y)[-1,\, (i, j)] = U_x[-1, i]\, U_y[-1, j],
+$$
+
+so the squared last row factors too.  Define
+
+$$
+w_{ij} = U_x[-1, i]^2\, U_y[-1, j]^2.
+$$
+
+This is the cache entry `u_kron_last_sq`, computed once at `add()` time
+(it does not depend on the $\lambda$s).  Then
+
+$$
+D = (S_\lambda^{-1})[-1, -1]
+  = \sum_{(i, j)\ \text{positive}}
+      \frac{w_{ij}}{\lambda_1 d^x_i + \lambda_2 d^y_j}
+  + \sum_{(i, j)\ \text{null}}
+      \frac{w_{ij}}{\lambda_{\mathrm{null}}},
+\qquad
+c = \log D,
+$$
+
+and the restricted log-det is $\log\det(S_\lambda) + c$.
+
+The gradient pieces, with $\rho_k = \log \lambda_k$, use
+$\partial d_{ij} / \partial \rho_1 = \lambda_1 d^x_i$ on positive modes,
+$\partial d_{ij} / \partial \rho_2 = \lambda_2 d^y_j$ on positive modes,
+and $\partial d_{ij} / \partial \rho_{\mathrm{null}} = \lambda_{\mathrm{null}}$
+on null modes (and zero otherwise):
+
+$$
+\frac{\partial c}{\partial \rho_1}
+  = -\frac{1}{D} \sum_{(i, j)\ \text{positive}}
+    \frac{w_{ij}\,\lambda_1\,d^x_i}{d_{ij}^2},
+$$
+
+$$
+\frac{\partial c}{\partial \rho_2}
+  = -\frac{1}{D} \sum_{(i, j)\ \text{positive}}
+    \frac{w_{ij}\,\lambda_2\,d^y_j}{d_{ij}^2},
+$$
+
+$$
+\frac{\partial c}{\partial \rho_{\mathrm{null}}}
+  = -\frac{\beta}{\lambda_{\mathrm{null}} D},
+\qquad
+\beta = \sum_{(i, j)\ \text{null}} w_{ij}.
+$$
+
+These are exactly `factor_grad_corrs` and `null_grad_corr` in
+`_log_det_and_grad` for KRONECKER_WITH_NULL, specialized to two factors.
+
+**Cost.**  Nothing in this path ever materializes the
+$(q_x q_y) \times (q_x q_y)$ matrix $S_\lambda$ or its inverse.  The work
+runs over the two 1D spectra $(d^x, d^y)$ and the precomputed
+$(q_x, q_y)$ array $w_{ij}$, with cost $O(q_x q_y)$ instead of the
+$O((q_x q_y)^3)$ that a generic `eigh` of the restricted matrix would need.
 
 ---
 
