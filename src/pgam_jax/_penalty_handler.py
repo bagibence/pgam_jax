@@ -101,7 +101,6 @@ class PenaltyHandler:
     def __init__(self):
         self._penalties = []
 
-    # TODO: Review call sites now that defaults are gone
     def add(
         self,
         S_tensor,
@@ -146,7 +145,6 @@ class PenaltyHandler:
             )
         )
 
-    # TODO: add_kron is never called. Where should that be used?
     def add_kron(
         self,
         factor_list,
@@ -198,7 +196,6 @@ class PenaltyHandler:
         penalize_null_space :
             Ignored for GENERAL (null space dropped by the precompute projection).
         """
-        # TODO: Make sure data is already column-dropped
         if isinstance(data, list):
             # KRONECKER
             results = [_eigh_and_rank(S) for S in data]
