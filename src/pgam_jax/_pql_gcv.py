@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from numpy.typing import NDArray
 
-from . import penalty_utils
+from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
 
 FLOAT_EPS = jnp.finfo(jnp.float32).eps
 
@@ -27,9 +27,7 @@ def _compute_gcv_and_states(
     gamma=1.5,
 ):
     sqrt_penalty = compute_sqrt(regularization_strength)
-
-    # add a zero corresponding to not-penalizing the intercept
-    sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
+    sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
     n_obs = X.shape[0]
     U, s, V_T = jnp.linalg.svd(jnp.vstack((R, sqrt_penalty)), full_matrices=False)
@@ -90,7 +88,7 @@ def _gcv_grad_compute_from_states(
     y1 = U1.T @ (Q.T @ y)
     UTU = U1.T @ U1
 
-    blocks = penalty_utils.compute_penalty_blocks(
+    blocks = compute_penalty_blocks(
         penalty_tree,
         apply_identifiability=apply_identifiability,
         shift_by=1,

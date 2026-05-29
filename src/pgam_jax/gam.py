@@ -25,7 +25,11 @@ from .iterative_optim import (
     model_constructors_for_weights_and_pseudo_data,
     pql_outer_iteration,
 )
-from .penalty_utils import compute_energy_penalty_factors, compute_energy_penalty_tensor
+from .penalty_utils import (
+    compute_energy_penalty_factors,
+    compute_energy_penalty_tensor,
+    prepend_zeros_for_intercept,
+)
 
 
 # TODO: Should any other observation model be supported?
@@ -414,9 +418,7 @@ class GAM:
         R = jnp.linalg.qr(Xw, mode="r")
 
         sqrt_penalty = compute_sqrt(regularizer_strength)
-        sqrt_penalty = jnp.column_stack(
-            (jnp.zeros(sqrt_penalty.shape[0]), sqrt_penalty)
-        )
+        sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
         # SVD of A = [R; B],  A^T A = X^T W X + S_lambda
         # U1 = U[:k] (first k=R.shape[0] rows) encodes the hat matrix via A = Q_xw U1 U1' Q_xw'

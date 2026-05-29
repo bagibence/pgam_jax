@@ -14,6 +14,27 @@ from ._nemos_compat import get_n_inputs
 from .config import config
 
 
+def prepend_zeros_for_intercept(sqrt_penalty: jnp.ndarray) -> jnp.ndarray:
+    """
+    Prepend a zero column to a square-root penalty matrix.
+
+    Aligns the penalty with a design matrix whose first column is an
+    unpenalized intercept.
+
+    Parameters
+    ----------
+    sqrt_penalty :
+        Block-diagonal square-root penalty matrix of shape (rows, n_smooth_cols).
+
+    Returns
+    -------
+    :
+        Shape (rows, n_smooth_cols + 1) with a leading zero column.
+    """
+    zeros = jnp.zeros(sqrt_penalty.shape[0], dtype=sqrt_penalty.dtype)
+    return jnp.column_stack((zeros, sqrt_penalty))
+
+
 def symmetric_sqrt(symmetric_matrix):
     if config.DEBUG:
         return _symmetric_sqrt_numpy(symmetric_matrix)

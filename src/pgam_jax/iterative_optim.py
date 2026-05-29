@@ -15,6 +15,8 @@ from jaxopt import LBFGS, LBFGSB, ScipyBoundedMinimize, ScipyMinimize
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
 
+from .penalty_utils import prepend_zeros_for_intercept
+
 FLOAT_EPS = jnp.finfo(float).eps
 
 
@@ -285,9 +287,7 @@ def pql_outer_iteration(
     old_inner_score = None
     for i in range(max_iter):
         sqrt_penalty = compute_sqrt(reg_strength)
-
-        # add a zero corresponding to not-penalizing the intercept
-        sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
+        sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
         # TODO: Lift this out into an initialization step?
         # initialize coefficients by fitting a GLM

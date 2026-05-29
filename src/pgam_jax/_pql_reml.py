@@ -7,8 +7,8 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from numpy.typing import NDArray
 
-from . import penalty_utils
 from ._pql_gcv import FLOAT_EPS, _vmap_symm_mult, _vmap_trace, _vmap_where
+from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
 
 
 @partial(
@@ -76,7 +76,7 @@ def _compute_reml_and_states(
         Number of observations (scalar int).
     """
     sqrt_penalty = compute_sqrt(regularization_strength)
-    sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
+    sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
     n_obs = X.shape[0]
     U, s, V_T = jnp.linalg.svd(jnp.vstack((R, sqrt_penalty)), full_matrices=False)
@@ -136,7 +136,7 @@ def _reml_grad_compute_from_states(
     comp = V_T.T * s_inv  # (n_features, k)
     comp_y1 = comp @ y1.ravel()  # (n_features,)
 
-    blocks = penalty_utils.compute_penalty_blocks(
+    blocks = compute_penalty_blocks(
         penalty_tree,
         apply_identifiability=apply_identifiability,
         shift_by=1,
