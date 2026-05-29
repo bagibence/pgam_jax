@@ -143,28 +143,21 @@ def test_gradient_finite_diff(filename):
 
     # analytic gradient (flat)
     _, g_tree = jax.value_and_grad(reml_fn)(reg_strength, penalty_tree, X, Q, R, y)
-    g_analytic = np.concatenate([np.array(g) for g in g_tree])
+    g_analytic, _ = ravel_pytree(g_tree)
 
-    # flatten reg_strength for perturbation
-    rho_flat = np.concatenate([np.array(r) for r in reg_strength])
-    split_sizes = [len(r) for r in reg_strength]
+    rho_flat, unravel_rho = ravel_pytree(reg_strength)
 
     def _reml_from_flat(rho_f):
-        rho_f_splits = np.split(rho_f, np.cumsum(split_sizes[:-1]))
-        rs = [jnp.array(r) for r in rho_f_splits]
-        return float(reml_fn(rs, penalty_tree, X, Q, R, y))
+        return float(reml_fn(unravel_rho(rho_f), penalty_tree, X, Q, R, y))
 
     h = 1e-5
-    g_fd = np.zeros_like(rho_flat)
-    for j in range(len(rho_flat)):
-        rp = rho_flat.copy()
-        rp[j] += h
-        rm = rho_flat.copy()
-        rm[j] -= h
-        g_fd[j] = (_reml_from_flat(rp) - _reml_from_flat(rm)) / (2 * h)
+    g_fd = np.zeros_like(np.array(rho_flat))
+    for j in range(rho_flat.size):
+        up, down = rho_flat.at[j].add(h), rho_flat.at[j].add(-h)
+        g_fd[j] = (_reml_from_flat(up) - _reml_from_flat(down)) / (2 * h)
 
     np.testing.assert_allclose(
-        g_analytic,
+        np.array(g_analytic),
         g_fd,
         rtol=1e-5,
         atol=1e-8,

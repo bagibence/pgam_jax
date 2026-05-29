@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
+from jax.flatten_util import ravel_pytree
 
 from pgam_jax import GAM
 from pgam_jax._pql_gcv import gcv_compute_factory
@@ -70,22 +71,16 @@ def test_gcv_gradient_matches_finite_diff(make_basis):
     gcv_fn, rho, penalty_tree, X, Q, R, y = _gcv_setup(make_basis)
 
     _, g_tree = jax.value_and_grad(gcv_fn)(rho, penalty_tree, X, Q, R, y)
-    g_analytic = np.concatenate([np.array(g) for g in g_tree])
-
-    flat = np.concatenate([np.array(r) for r in rho])
-    sizes = [len(r) for r in rho]
+    g_analytic, _ = ravel_pytree(g_tree)
 
     def _from_flat(flat_rho):
-        splits = np.split(flat_rho, np.cumsum(sizes[:-1]))
-        rs = [jnp.array(s) for s in splits]
-        return float(gcv_fn(rs, penalty_tree, X, Q, R, y))
+        return float(gcv_fn(unravel_rho(flat_rho), penalty_tree, X, Q, R, y))
 
+    flat, unravel_rho = ravel_pytree(rho)
     h = 1e-6
-    g_fd = np.zeros_like(flat)
-    for j in range(len(flat)):
-        up, down = flat.copy(), flat.copy()
-        up[j] += h
-        down[j] -= h
+    g_fd = np.zeros_like(np.array(flat))
+    for j in range(flat.size):
+        up, down = flat.at[j].add(h), flat.at[j].add(-h)
         g_fd[j] = (_from_flat(up) - _from_flat(down)) / (2 * h)
 
-    np.testing.assert_allclose(g_analytic, g_fd, atol=1e-6, rtol=1e-4)
+    np.testing.assert_allclose(np.array(g_analytic), g_fd, atol=1e-6, rtol=1e-4)
