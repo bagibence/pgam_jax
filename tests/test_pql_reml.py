@@ -12,10 +12,13 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import nemos as nmo
 import numpy as np
 import pytest
+from jax.flatten_util import ravel_pytree
 from nemos.inverse_link_function_utils import identity as _identity
 
+from pgam_jax import GAM
 from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pql_reml import reml_compute_factory
 
@@ -41,6 +44,10 @@ def _build_ph_and_factory(penalty_tree):
         compute_sqrt,
         compute_log_det_and_grad,
     )
+
+
+def _bsp(n):
+    return nmo.basis.BSplineEval(n_basis_funcs=n, order=4, bounds=(-1.0, 1.0))
 
 
 def _load_and_run(filename):
@@ -163,3 +170,67 @@ def test_gradient_finite_diff(filename):
         atol=1e-8,
         err_msg=f"{filename}: analytic vs FD gradient mismatch",
     )
+
+
+# ---------------------------------------------------------------------------
+# Routed GAM-style REML gradient check
+# ---------------------------------------------------------------------------
+
+
+_ROUTED_BASIS_CASES = [
+    pytest.param(lambda: _bsp(8), id="eval"),
+    pytest.param(lambda: _bsp(8) + _bsp(7), id="eval+eval"),
+    pytest.param(lambda: _bsp(6) * _bsp(5), id="eval*eval"),
+    pytest.param(lambda: _bsp(7) + (_bsp(5) * _bsp(4)), id="eval+(eval*eval)"),
+]
+
+
+def _routed_reml_setup(make_basis, seed=0, n_obs=300):
+    """
+    Build REML exactly through GAM's penalty routing.
+
+    The fixture/reference tests above construct every block with ``ph.add(S)``,
+    which exercises the GENERAL path.  This setup goes through
+    ``GAM._build_penalty_handler`` so the finite-difference check covers the
+    production SINGLE_WITH_NULL and KRONECKER_WITH_NULL routes.
+    """
+    rng = np.random.default_rng(seed)
+    gam = GAM(make_basis(), method="reml")
+    penalty_tree = gam._get_penalty_tree()
+    ph = gam._build_penalty_handler(penalty_tree)
+    compute_sqrt, compute_log_det_and_grad = ph.build()
+
+    rho = [jnp.array(rng.uniform(-1.0, 1.0, size=p.rho_len)) for p in ph._penalties]
+
+    n_params = compute_sqrt(rho).shape[1] + 1
+    Xw = jnp.array(rng.standard_normal((n_obs, n_params)))
+    Q, R = jnp.linalg.qr(Xw)
+    y = jnp.array(rng.standard_normal(n_obs))
+
+    reml_fn = reml_compute_factory(
+        compute_sqrt=compute_sqrt,
+        compute_log_det_and_grad=compute_log_det_and_grad,
+        apply_identifiability_columns=gam._apply_identifiability_column,
+        apply_identifiability=gam._apply_identifiability_square,
+    )
+    return reml_fn, rho, penalty_tree, Xw, Q, R, y
+
+
+@pytest.mark.parametrize("make_basis", _ROUTED_BASIS_CASES)
+def test_routed_reml_gradient_matches_finite_diff(make_basis):
+    reml_fn, rho, penalty_tree, X, Q, R, y = _routed_reml_setup(make_basis)
+
+    _, g_tree = jax.value_and_grad(reml_fn)(rho, penalty_tree, X, Q, R, y)
+    g_analytic, _ = ravel_pytree(g_tree)
+
+    def _from_flat(flat_rho):
+        return float(reml_fn(unravel_rho(flat_rho), penalty_tree, X, Q, R, y))
+
+    flat, unravel_rho = ravel_pytree(rho)
+    h = 1e-5
+    g_fd = np.zeros_like(np.array(flat))
+    for j in range(flat.size):
+        up, down = flat.at[j].add(h), flat.at[j].add(-h)
+        g_fd[j] = (_from_flat(up) - _from_flat(down)) / (2 * h)
+
+    np.testing.assert_allclose(np.array(g_analytic), g_fd, atol=1e-7, rtol=1e-5)
