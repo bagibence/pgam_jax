@@ -26,6 +26,7 @@ classifiers = [
 
 # Define dependencies for the project
 dependencies = [
+    "equinox>=0.13.1",
     "jax",
     "jaxopt",
     "nemos",
