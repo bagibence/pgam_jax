@@ -1032,3 +1032,36 @@ class TestGroupKeyDiscrimination:
             jnp.array([0.5, -0.5]),
             jnp.array([-0.3, 0.7]),
         )
+
+
+# ---------------------------------------------------------------------------
+# rho-length validation: a mismatched rho must fail loudly, not silently
+# truncate via zip() or return a wrong-shaped gradient.
+# ---------------------------------------------------------------------------
+
+
+class TestRhoLengthValidation:
+    def test_compute_sqrt_too_short_raises(self, S1):
+        ph = PenaltyHandler()
+        # SINGLE_WITH_NULL needs rho_len == 2
+        ph.add(S1, penalize_null_space=True, identifiability_fn=identity)
+        with pytest.raises(ValueError, match="length 2"):
+            ph.compute_sqrt([jnp.zeros(1)])
+
+    def test_compute_log_det_too_long_raises(self, S1):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=True, identifiability_fn=identity)
+        with pytest.raises(ValueError, match="length 2"):
+            ph.compute_log_det_and_grad([jnp.zeros(3)])
+
+    def test_wrong_number_of_penalties_raises(self, S1):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False, identifiability_fn=identity)
+        with pytest.raises(ValueError, match="1 penalt"):
+            ph.compute_sqrt([jnp.zeros(1), jnp.zeros(1)])
+
+    def test_scalar_rho_raises(self, S1):
+        ph = PenaltyHandler()
+        ph.add(S1, penalize_null_space=False, identifiability_fn=identity)
+        with pytest.raises(ValueError, match="length 1"):
+            ph.compute_sqrt([jnp.array(0.0)])

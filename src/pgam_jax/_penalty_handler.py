@@ -522,6 +522,26 @@ class PenaltyHandler:
         _sqrt_fn = self._sqrt
         _ld_fn = self._log_det_and_grad
 
+        def _check_rho_lengths(rhos):
+            """
+            Fail loudly when ``rhos`` does not match the registered penalties.
+
+            Without this, ``_sqrt`` silently drops trailing entries via ``zip``
+            and ``_log_det_and_grad`` returns a wrong-shaped gradient.
+            """
+            if len(rhos) != n:
+                raise ValueError(
+                    f"PenaltyHandler has {n} penalties but got {len(rhos)} "
+                    "regularization-strength vectors."
+                )
+            for i, (rho, pen) in enumerate(zip(rhos, penalties)):
+                shape = jnp.shape(rho)
+                if len(shape) != 1 or shape[0] != pen.rho_len:
+                    raise ValueError(
+                        f"Penalty {i} ({pen.method.name}) expects a rho vector of "
+                        f"length {pen.rho_len}, got shape {tuple(shape)}."
+                    )
+
         # build stack groups
         stack_groups = defaultdict(list)
         for i, p in enumerate(penalties):
@@ -568,6 +588,7 @@ class PenaltyHandler:
                 )
 
         def compute_sqrt(rhos):
+            _check_rho_lengths(rhos)
             lams = [jnp.exp(r) for r in rhos]
             out = [None] * n
             for g in group_data:
@@ -584,6 +605,7 @@ class PenaltyHandler:
             return block_diag(*out)
 
         def compute_log_det_and_grad(rhos):
+            _check_rho_lengths(rhos)
             log_dets = [None] * n
             grads = [None] * n
             for g in group_data:
