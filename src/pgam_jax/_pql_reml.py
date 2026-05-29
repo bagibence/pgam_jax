@@ -40,9 +40,6 @@ def _compute_reml_and_states(
     ----------
     regularization_strength :
         Pytree of log-smoothing parameters (one leaf per penalty block).
-    penalty_tree :
-        Pytree of (M_i, q_i, q_i) penalty tensors, same structure as
-        regularization_strength.
     X, Q, R :
         Whitened design matrix and its QR factors (sqrt(W) X, Q, R).
     y :
