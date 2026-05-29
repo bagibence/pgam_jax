@@ -1,20 +1,19 @@
 """
 Pins the SqrtMethod that ``gam._build_penalty_handler`` selects per basis component.
 
-Currently every component is routed to ``SqrtMethod.GENERAL`` because
-``compute_energy_penalty_tensor`` bakes the null-space penalty into the same
-3-D tensor, so ``PenaltyHandler.add`` never sees a 2-D matrix or a Kronecker
-factor list.
+The production route dispatches one-dimensional smooths to SINGLE_WITH_NULL and
+tensor-product smooths to KRONECKER_WITH_NULL.  The tests also keep an
+always-GENERAL baseline so routing changes cannot silently alter lambda
+ordering, lambda count, factor order, or the resulting penalty math.
 
 Two test classes:
 
-* ``TestRoutedMethod``: currently RED, GREEN after the routing fix.
+* ``TestRoutedMethod``:
   Asserts the SqrtMethod that each basis component is dispatched to.
-* ``TestPenaltyMathInvariant``: GREEN before AND after the fix.
+* ``TestPenaltyMathInvariant``:
   Compares the routed handler's ``compute_sqrt`` and
   ``compute_log_det_and_grad`` outputs against a manually-constructed
-  "always GENERAL" baseline. Catches a routing fix that changes lambda
-  ordering, lambda count, factor order, or the math.
+  "always GENERAL" baseline.
 """
 
 import jax.numpy as jnp
