@@ -461,7 +461,7 @@ $\mathbf{r} \mapsto (r_1, r_2)$ is a bijection — so at least one of the two
 Kronecker deltas vanishes and the entry is $0$.  If $\mathbf{r} = \mathbf{c}$
 then $r_1 = c_1$, $r_2 = c_2$ and the entry is $a_{r_1} b_{r_2}$.  Hence
 $A \otimes B$ is diagonal, carrying $a_{r_1} b_{r_2}$ at flat index
-$\mathbf{r} \leftrightarrow (r_1, r_2)$.  Iterating over the $M$ factors —
+$(r1 n_b + r_2, r1 n_b + r_2)$.  Iterating over the $M$ factors —
 a flat index $\mathbf{m} \leftrightarrow (m_1, \ldots, m_M)$ now corresponding in
 mixed radix to its $M$ components — the product
 $D_1 \otimes \cdots \otimes D_M$ is diagonal with entry $\prod_k (D_k)_{m_k m_k}$.
