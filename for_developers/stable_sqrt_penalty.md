@@ -364,7 +364,7 @@ If we compute the element we need ($[S_{\lambda}^{-1}]_{-1-1}$), we obtain,
 
 $$
 \begin{aligned}
-\left[S_{\lambda}^{-1}\right]_{-1-1} &= \sum_j u_{-1j} \sum_k D^{-1}_{jk} u_{-1k} = \sum_j u_{-1j} D^{-1}_{jj} u_{-1j} \\
+\left[S_{\lambda}^{-1}\right]_{-1-1} &= \sum_j u_{-1j} \sum_k D^{-1}_{jk} u_{-1k} \overset{\mathrm{diag}}{=} \sum_j u_{-1j} D^{-1}_{jj} u_{-1j} \\
 &= \sum_{j=1}^r \frac{u_{-1j}^2}{\lambda_0 d_j} + \sum_{j=r+1}^n \frac{u_{-1j}^2}{\lambda_1}
 \end{aligned}
 $$
