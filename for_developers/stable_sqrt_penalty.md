@@ -321,7 +321,7 @@ $\lambda_j = \exp(\rho_j)$.  The inverse diagonal entry needed for Schur is
 
 $$
 (S_\lambda^{-1})[-1, -1]
-  = \sum_i \frac{U[-1, i]^2}{\lambda_0 d_i + \lambda_1\,[d_i = 0]}
+  = \sum_{d_i > 0} \frac{U[-1, i]^2}{\lambda_0 d_i} + \sum_{d_i = 0} \frac{U[-1, i]^2}{\lambda_1}
   = \alpha\, e^{-\rho_0} + \beta\, e^{-\rho_1},
 $$
 
@@ -332,6 +332,42 @@ $$
 \qquad
 \beta = \sum_{d_i = 0} U[-1, i]^2.
 $$
+
+:::{admonition} Proof
+:class: dropdown
+
+First let's note that,
+
+$$
+\begin{aligned}
+S_{\lambda} &= 
+U \cdot \begin{bmatrix}
+\lambda_0 \cdot d_1 & 0                   & \cdots & 0                   & 0           & \cdots & 0           \\
+0                   & \lambda_0 \cdot d_1 &        & \vdots              & \vdots      &        & \vdots      \\
+\vdots              &                     & \ddots & 0                   &             &        &             \\
+0                   & \cdots              & 0      & \lambda_0 \cdot d_r & 0           & \cdots & 0           \\
+0                   & \cdots              &        & 0                   & \lambda_1 &        & 0           \\
+\vdots              &        &              & \vdots              &             & \ddots &             \\
+0                   & \cdots              &        & 0                   & 0           &        & \lambda_1
+\end{bmatrix} \cdot U^{\top} \\
+&= U \cdot D \cdot U^{\top}
+\end{aligned}
+$$
+
+So $S_{\lambda}^{-1} =U \cdot D^{-1} \cdot U^{\top} $, and $D^{-1}_{ii} = \begin{cases} \frac{1}{\lambda_0 \cdot d_i} & i \le r \\  \frac{1}{\lambda_1} & \text{otherwise}\end{cases}$.
+
+If we compute the element we need ($[S_{\lambda}^{-1}]_{-1-1}$), we obtain,
+
+$$
+\begin{aligned}
+\left[S_{\lambda}^{-1}\right]_{-1-1} &= \sum_j u_{-1j} \sum_k D^{-1}_{jk} u_{-1k} = \sum_j u_{-1j} D^{-1}_{jj} u_{-1j} \\
+&= \sum_{j=1}^r \frac{u_{-1j}^2}{\lambda_0 d_j} + \sum_{j=r+1}^n \frac{u_{-1j}^2}{\lambda_1}
+\end{aligned}
+$$
+
+Which is exactly the identity above.
+
+:::
 
 `alpha` and `beta` are computed at `add()` time and cached as `log_alpha`
 and `log_beta` (via `_safe_log`, which returns `-inf` when the underlying
@@ -356,25 +392,103 @@ The function returns `log_det_full + c` and `grad_full - weights`, where
 For a tensor-product smooth with an explicit null-space penalty, the
 full-basis penalty is diagonal in the Kronecker eigenbasis
 $U_\otimes = U_1 \otimes \cdots \otimes U_M$.  Index the basis by a
-multi-index $m = (m_1, \ldots, m_M)$, and write $d^j_{m_j}$ for the $m_j$-th
-eigenvalue of factor $j$.  Call a multi-index a **positive mode** if at least
-one $d^j_{m_j} > 0$, and a **null mode** if $d^j_{m_j} = 0$ for every $j$
+amulti-index $\mathbf{m} = (m_1, \ldots, m_M)$, and write $d^j_{m_j}$ for the
+$m_j$-th eigenvalue of factor $j$.  Call a multi-index a **positive mode** if at
+least one $d^j_{m_j} > 0$, and a **null mode** if $d^j_{m_j} = 0$ for every $j$
 (the joint null space of all factors).  The eigenvalue of $S_\lambda$ at
-mode $m$ is then
+mode $\mathbf{m}$ is then
 
 $$
-d_m =
+d_{\mathbf{m}} =
 \begin{cases}
-\sum_j \lambda_j\, d^j_{m_j}, & m \text{ is a positive mode},\\
-\lambda_{\mathrm{null}}, & m \text{ is a null mode}.
+\sum_j \lambda_j\, d^j_{m_j}, & \mathbf{m} \text{ is a positive mode},\\
+\lambda_{\mathrm{null}}, & \mathbf{m} \text{ is a null mode}.
 \end{cases}
 $$
+
+:::{admonition} Proof — Kronecker-sum eigendecomposition
+:class: dropdown
+
+Write each factor's eigendecomposition as
+$S^{(j)} = U_j \operatorname{diag}(d^j) U_j^\top$ and each identity block as
+$I_{q_k} = U_k\, I\, U_k^\top$ (valid because $U_k$ is orthogonal).  The
+$M$-fold mixed-product identity
+
+$$
+(A_1 \otimes \cdots \otimes A_M)(B_1 \otimes \cdots \otimes B_M)
+  = (A_1 B_1) \otimes \cdots \otimes (A_M B_M)
+$$
+
+(induction on the two-factor rule $(A \otimes B)(C \otimes D) = AC \otimes BD$)
+pulls the orthogonal factors out of the slot-$j$ penalty
+$S_j = I \otimes \cdots \otimes S^{(j)} \otimes \cdots \otimes I$:
+
+$$
+S_j
+  = U_\otimes\,
+    \bigl(I \otimes \cdots \otimes \operatorname{diag}(d^j) \otimes \cdots \otimes I\bigr)\,
+    U_\otimes^\top,
+\qquad U_\otimes = U_1 \otimes \cdots \otimes U_M.
+$$
+
+The inner matrix is a Kronecker product of diagonal matrices, hence itself
+diagonal.  Make the index bookkeeping explicit, since that is what carries the
+argument.  For $A \in \mathbb{R}^{n_A \times n_A}$ and
+$B \in \mathbb{R}^{n_B \times n_B}$, a flat row index
+$\mathbf{r} \in \{0, \ldots, n_A n_B - 1\}$ decomposes *uniquely* by Euclidean
+division by $n_B$ as $\mathbf{r} = r_1 n_B + r_2$ with $r_1 \in \{0, \ldots, n_A - 1\}$
+and $r_2 \in \{0, \ldots, n_B - 1\}$; write this bijection as
+$\mathbf{r} \mapsto (r_1, r_2)$, and likewise $\mathbf{c} \mapsto (c_1, c_2)$ for
+columns.  In this notation the Kronecker product is *defined* entrywise by
+
+$$
+(A \otimes B)_{\mathbf{r}\mathbf{c}} = A_{r_1 c_1}\, B_{r_2 c_2}.
+$$
+
+For diagonal $A = \operatorname{diag}(a)$, $B = \operatorname{diag}(b)$ this reads
+
+$$
+(A \otimes B)_{\mathbf{r}\mathbf{c}}
+  = a_{r_1}\,\delta_{r_1 c_1}\; b_{r_2}\,\delta_{r_2 c_2}.
+$$
+
+If $\mathbf{r} \neq \mathbf{c}$ then $(r_1, r_2) \neq (c_1, c_2)$ — because
+$\mathbf{r} \mapsto (r_1, r_2)$ is a bijection — so at least one of the two
+Kronecker deltas vanishes and the entry is $0$.  If $\mathbf{r} = \mathbf{c}$
+then $r_1 = c_1$, $r_2 = c_2$ and the entry is $a_{r_1} b_{r_2}$.  Hence
+$A \otimes B$ is diagonal, carrying $a_{r_1} b_{r_2}$ at flat index
+$\mathbf{r} \leftrightarrow (r_1, r_2)$.  Iterating over the $M$ factors —
+a flat index $\mathbf{m} \leftrightarrow (m_1, \ldots, m_M)$ now corresponding in
+mixed radix to its $M$ components — the product
+$D_1 \otimes \cdots \otimes D_M$ is diagonal with entry $\prod_k (D_k)_{m_k m_k}$.
+In our case every factor is the identity except slot $j$, so this collapses to
+$1 \cdots d^j_{m_j} \cdots 1 = d^j_{m_j}$.  Summing with weights $\lambda_j$,
+
+$$
+\sum_j \lambda_j S_j
+  = U_\otimes\,
+    \operatorname{diag}\!\Bigl(\textstyle\sum_j \lambda_j d^j_{m_j}\Bigr)\,
+    U_\otimes^\top,
+$$
+
+which vanishes exactly on the joint null modes ($d^j_{m_j} = 0$ for all $j$).
+The null-space penalty is the orthogonal projector onto those modes,
+$P_0 = \sum_{\mathbf{m}\ \text{null}} v_{\mathbf{m}} v_{\mathbf{m}}^\top$ with
+$v_{\mathbf{m}} = U_\otimes[:, \mathbf{m}]$; since the $v_{\mathbf{m}}$ are
+columns of the orthogonal $U_\otimes$,
+$P_0 = U_\otimes \operatorname{diag}(\mathbf{1}[\mathbf{m}\ \text{null}]) U_\otimes^\top$.
+Adding $\lambda_{\mathrm{null}} P_0$ sets the eigenvalue to
+$\lambda_{\mathrm{null}}$ on the null modes and leaves the positive modes
+untouched, giving $d_{\mathbf{m}}$ as stated.  $U_\otimes$ is orthogonal (a Kronecker
+product of orthogonals), so this is a genuine eigendecomposition.
+
+:::
 
 $S_\lambda$ is invertible for $\lambda_{\mathrm{null}} > 0$, so Schur applies.
 The cache stores the squared last row of $U_\otimes$,
 
 $$
-w_m = U_\otimes[-1, m]^2,
+w_{\mathbf{m}} = U_\otimes[-1, \mathbf{m}]^2,
 $$
 
 reshaped to the factor dimensions so that per-factor sums can broadcast
@@ -382,31 +496,82 @@ along one axis (same trick as `_kron_log_det_factor_grads`).  The Schur
 term is
 
 $$
-D = (S_\lambda^{-1})[-1, -1] = \sum_m \frac{w_m}{d_m},
+D = (S_\lambda^{-1})[-1, -1] = \sum_{\mathbf{m}} \frac{w_{\mathbf{m}}}{d_{\mathbf{m}}},
 \qquad
 c = \log D.
 $$
 
-Differentiating $c = \log D$ uses $\partial d_m / \partial \rho_j = \lambda_j\, d^j_{m_j}$
+:::{admonition} Proof
+:class: dropdown
+
+By the eigendecomposition above $S_\lambda = U_\otimes \operatorname{diag}(d_{\mathbf{m}}) U_\otimes^\top$
+with every $d_{\mathbf{m}} > 0$, so $S_\lambda^{-1} = U_\otimes \operatorname{diag}(d_{\mathbf{m}}^{-1}) U_\otimes^\top$.
+Reading off the last diagonal entry (the same step as in the
+`SINGLE_WITH_NULL` proof, with the scalar index $i$ replaced by the
+multi-index $\mathbf{m}$),
+
+$$
+\left[S_\lambda^{-1}\right]_{-1,-1}
+  = \sum_{\mathbf{m}} U_\otimes[-1, \mathbf{m}] \, d_{\mathbf{m}}^{-1} \, U_\otimes[-1, \mathbf{m}]
+  = \sum_{\mathbf{m}} \frac{U_\otimes[-1, \mathbf{m}]^2}{d_{\mathbf{m}}}
+  = \sum_{\mathbf{m}} \frac{w_{\mathbf{m}}}{d_{\mathbf{m}}}.
+$$
+
+Splitting the modes into positive ($d_{\mathbf{m}} = \sum_j \lambda_j d^j_{m_j}$) and null
+($d_{\mathbf{m}} = \lambda_{\mathrm{null}}$) recovers the two pieces of $D$.
+
+:::
+
+Differentiating $c = \log D$ uses $\partial d_{\mathbf{m}} / \partial \rho_j = \lambda_j\, d^j_{m_j}$
 on positive modes (and zero on null modes), giving, for each non-null
 factor $j$,
 
 $$
 \frac{\partial c}{\partial \rho_j}
   = -\frac{1}{D}
-    \sum_{m\ \text{positive}}
-    \frac{w_m\,\lambda_j\,d^j_{m_j}}{d_m^2}.
+    \sum_{\mathbf{m}\ \text{positive}}
+    \frac{w_{\mathbf{m}}\,\lambda_j\,d^j_{m_j}}{d_{\mathbf{m}}^2}.
 $$
 
-On null modes $d_m = \lambda_{\mathrm{null}}$ and $\partial d_m / \partial \rho_{\mathrm{null}} = \lambda_{\mathrm{null}}$,
+On null modes $d_{\mathbf{m}} = \lambda_{\mathrm{null}}$ and $\partial d_{\mathbf{m}} / \partial \rho_{\mathrm{null}} = \lambda_{\mathrm{null}}$,
 so
 
 $$
 \frac{\partial c}{\partial \rho_{\mathrm{null}}}
   = -\frac{\beta}{\lambda_{\mathrm{null}} D},
 \qquad
-\beta = \sum_{m\ \text{null}} w_m.
+\beta = \sum_{\mathbf{m}\ \text{null}} w_{\mathbf{m}}.
 $$
+
+:::{admonition} Proof
+:class: dropdown
+
+Differentiate $c = \log D$ with $D = \sum_{\mathbf{m}} w_{\mathbf{m}} / d_{\mathbf{m}}$.
+Since $\lambda_j = e^{\rho_j}$ gives $\partial \lambda_j / \partial \rho_j = \lambda_j$,
+on a positive mode $d_{\mathbf{m}} = \sum_k \lambda_k d^k_{m_k}$ we have,
+
+$$\partial d_{\mathbf{m}} / \partial \rho_j = \lambda_j d^j_{m_j},$$
+and a mode that does not involve factor $j$ contributes nothing.  Applying the chain rule
+through $c = \log D$ and then through $D = \sum_{\mathbf{m}} w_{\mathbf{m}} / d_{\mathbf{m}}$,
+
+$$
+\frac{\partial c}{\partial \rho_j}
+  = \frac{1}{D}\,\frac{\partial D}{\partial \rho_j}
+  = \frac{1}{D} \sum_{\mathbf{m}} w_{\mathbf{m}} \Bigl(-\frac{1}{d_{\mathbf{m}}^2}\Bigr)\frac{\partial d_{\mathbf{m}}}{\partial \rho_j}
+  = -\frac{1}{D} \sum_{\mathbf{m}\ \text{positive}} \frac{w_{\mathbf{m}}\,\lambda_j\,d^j_{m_j}}{d_{\mathbf{m}}^2}.
+$$
+
+On a null mode $d_{\mathbf{m}} = \lambda_{\mathrm{null}}$ and
+$\partial d_{\mathbf{m}} / \partial \rho_{\mathrm{null}} = \lambda_{\mathrm{null}}$, so each
+null term contributes
+$-w_{\mathbf{m}}\,\lambda_{\mathrm{null}} / (D\,\lambda_{\mathrm{null}}^2)
+ = -w_{\mathbf{m}} / (\lambda_{\mathrm{null}} D)$.  
+Summing over null modes gives
+$$\frac{\partial c}{\partial \rho_{\mathrm{null}}} = -\beta / (\lambda_{\mathrm{null}} D),$$
+
+with $\beta = \sum_{\mathbf{m}\ \text{null}} w_{\mathbf{m}}$.
+
+:::
 
 The returned value and gradient are the full-basis Kronecker log-det and
 gradient plus these Schur corrections.
