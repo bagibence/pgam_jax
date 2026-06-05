@@ -336,14 +336,18 @@ $$
 :::{admonition} Proof
 :class: dropdown
 
-First let's note that,
+Order the eigenpairs so that $d_1, \ldots, d_r > 0$ (the range) and
+$d_{r+1} = \cdots = d_n = 0$ (the null space).  We are free to choose this
+ordering: reordering the columns of $U$ is an orthogonal permutation, and since
+$U$ is otherwise unspecified it leaves $S$, $S_\lambda$, and $(S_\lambda^{-1})[-1,-1]$
+unchanged.  With this ordering $i \le r \Leftrightarrow d_i > 0$, and
 
 $$
 \begin{aligned}
 S_{\lambda} &= 
 U \cdot \begin{bmatrix}
 \lambda_0 \cdot d_1 & 0                   & \cdots & 0                   & 0           & \cdots & 0           \\
-0                   & \lambda_0 \cdot d_1 &        & \vdots              & \vdots      &        & \vdots      \\
+0                   & \lambda_0 \cdot d_2 &        & \vdots              & \vdots      &        & \vdots      \\
 \vdots              &                     & \ddots & 0                   &             &        &             \\
 0                   & \cdots              & 0      & \lambda_0 \cdot d_r & 0           & \cdots & 0           \\
 0                   & \cdots              &        & 0                   & \lambda_1 &        & 0           \\
