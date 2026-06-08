@@ -48,9 +48,10 @@ fitting a GAM depends entirely on having an accurate $B$.**
 
 ---
 
-## The problem
+## The problem (pre-`PenaltyHandler`)
 
-The current production path is:
+This section describes the path that `PenaltyHandler` (the Implementation
+section below) replaced. It summed then factorized the penalty:
 
 ```python
 S_sum = compute_weighted_penalty(S_tensor, rho)   # naive float64 sum
@@ -158,7 +159,7 @@ because $B_{\mathrm{orig}}^\top B_{\mathrm{orig}}
   = Q B_{\mathrm{rot}}^\top B_{\mathrm{rot}} Q^\top
   = Q S_\lambda^{\mathrm{rot}} Q^\top = S_\lambda \;\checkmark$
 
-**log-det:** already handled by `log_det_slam` / `transform_slam` as currently implemented.
+**log-det:** already handled by `log_det_and_grad_slam` / `transform_slam` as currently implemented.
 
 **Current implementation:** `transform_slam_with_Q` tracks the accumulated
 rotation matrix $Q$ alongside `S_i_out`, so the sqrt can be rotated back to
@@ -174,30 +175,48 @@ The stable approaches above are implemented through `PenaltyHandler`, which
 detects structure at construction time, pre-caches eigendecompositions, and
 exposes two pure callables suitable for `jax.jit`.
 
-#### Method enum
+#### Penalty classes
+
+Each structural case is a concrete subclass of the abstract base `_AbstractPenalty` (an `equinox.Module`).
+Each subclass defines its precompute (`from_S` / `from_factors`), `sqrt`, and `log_det_and_grad`:
 
 ```python
-class SqrtMethod(enum.Enum):
-    SINGLE             = 0   # M=1, no null-space penalty
-    SINGLE_WITH_NULL   = 1   # M=1, plus a scalar λ on the null space
-    KRONECKER          = 2   # Kronecker-sum, no null-space penalty
-    KRONECKER_WITH_NULL= 3   # Kronecker-sum, plus a scalar λ on the null space
-    GENERAL            = 4   # overlapping multi-penalty → Wood App.B rotation
+class _AbstractPenalty(eqx.Module):                  # base: sqrt, log_det_and_grad, rho_len
+    ...
+
+class _SinglePenalty(_AbstractPenalty):              # M=1, no null-space penalty
+    ...
+class _SingleWithNullPenalty(_AbstractPenalty):      # M=1, plus a scalar lambda on the null space
+    ...
+
+class _AbstractKronecker(_AbstractPenalty):          # shared Kronecker precompute (from_factors)
+    ...
+class _KroneckerPenalty(_AbstractKronecker):         # Kronecker-sum, no null-space penalty
+    ...
+class _KroneckerWithNullPenalty(_AbstractKronecker): # Kronecker-sum, plus a scalar lambda on the null space
+    ...
+
+class _GeneralPenalty(_AbstractPenalty):             # overlapping multi-penalty, Wood App.B rotation
+    ...
 ```
 
 Mapping to the four cases described above:
 
-| Document case | `SqrtMethod` variant(s) |
+| Document case | Penalty class(es) |
 |---|---|
-| Case 1 — single penalty | `SINGLE` |
-| Case 2 — orthogonal (null-space pair) | `SINGLE_WITH_NULL` (1D); `GENERAL` (M>2) |
-| Case 3 — Kronecker-sum | `KRONECKER`, `KRONECKER_WITH_NULL` |
-| Case 4 — general overlapping | `GENERAL` |
+| Case 1 (single penalty) | `_SinglePenalty` |
+| Case 2 (orthogonal null-space pair) | `_SingleWithNullPenalty` (1D); `_GeneralPenalty` (M>2) |
+| Case 3 (Kronecker-sum) | `_KroneckerPenalty`, `_KroneckerWithNullPenalty` |
+| Case 4 (general overlapping) | `_GeneralPenalty` |
+
+Throughout the rest of this document the upper-case names (`SINGLE`,
+`SINGLE_WITH_NULL`, `KRONECKER`, `KRONECKER_WITH_NULL`, `GENERAL`) are
+shorthand for these classes.
 
 Note: the document's Case 2 "stacked-row" construction is replaced by
-`SINGLE_WITH_NULL`, which avoids forming the stacked matrix at all — it
-reuses the same eigenvectors as SINGLE and applies `sqrt(lam[1])` uniformly
-to the null-space modes.
+`_SingleWithNullPenalty`, which avoids forming the stacked matrix at all.  It
+reuses the same eigenvectors as `_SinglePenalty` and applies `sqrt(lam[1])`
+uniformly to the null-space modes.
 
 #### Construction: `add()` and `add_kron()`
 
@@ -210,8 +229,9 @@ to the null-space modes.
 selects KRONECKER or KRONECKER_WITH_NULL. The Kronecker-sum eigenvalues are
 never materialized as a full `(prod_q, prod_q)` matrix.
 
-All eigendecompositions are computed eagerly at `add()` time and stored in
-`_cache`.  Nothing shape-dynamic runs inside `jit`.
+All eigendecompositions are computed eagerly at `add()` time and stored as
+fields on the penalty module appended to `self._penalties`.  Nothing
+shape-dynamic runs inside `jit`.
 
 #### `build()` — pure callables for JIT
 
@@ -242,12 +262,12 @@ on the hot path.
 
 The previously noted gap — `transform_slam` not tracking the accumulated
 rotation matrix Q — has been fixed.  `transform_slam_with_Q` returns
-`(S_i_out, Q)` and is used by `PenaltyHandler._sqrt` for the GENERAL case
+`(S_i_out, Q)` and is used by `_GeneralPenalty.sqrt` for the GENERAL case
 to rotate the sqrt back to the original basis:
 
 ```python
-B_rot = sqrt_d[:, None] * U.T          # sqrt in rotated basis
-return (B_rot @ Q.T) @ id_fn(U_keep.T) # back to original basis
+B_rot = sqrt_d[:, None] * U.T               # sqrt in rotated basis
+return (B_rot @ Q_s.T) @ self.id_fn(self.U_keep.T)  # back to original basis
 ```
 
 ### Precision
@@ -812,7 +832,8 @@ $$
 $$
 
 These are exactly `factor_grad_corrs` and `null_grad_corr` in
-`_log_det_and_grad` for KRONECKER_WITH_NULL, specialized to two factors.
+`_KroneckerWithNullPenalty._drop_last_col_correction`, specialized to two
+factors.
 
 **Cost.**  Nothing in this path ever materializes the
 $(q_x q_y) \times (q_x q_y)$ matrix $S_\lambda$ or its inverse.  The work
@@ -899,7 +920,7 @@ def _logdet_from_B(B):
 
 def logdet_naive(lam1, lam2):
     rho = jnp.log(jnp.array([lam1, lam2]))
-    B = symmetric_sqrt(compute_weighted_penalty(S_tensor, rho, positive_mon_func=jnp.exp))
+    B = symmetric_sqrt(compute_weighted_penalty(S_tensor, rho))
     return _logdet_from_B(B)
 ```
 

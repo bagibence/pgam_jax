@@ -14,6 +14,21 @@ from ._nemos_compat import get_n_inputs
 from .config import config
 
 
+def DROP_LAST_COL(x):
+    """Drop the last column of the matrix/tensor."""
+    return x[..., :-1]
+
+
+def DROP_LAST_ROW_COL(x):
+    """Drop the last row and column of the matrix/tensor."""
+    return x[..., :-1, :-1]
+
+
+def IDENTITY(x):
+    """Return the input unchanged."""
+    return x
+
+
 def prepend_zeros_for_intercept(sqrt_penalty: jnp.ndarray) -> jnp.ndarray:
     """
     Prepend a zero column to a square-root penalty matrix.
@@ -123,7 +138,7 @@ def tree_compute_sqrt_penalty(
     tree_penalty: Any,
     reg_strength: Any,
     shift_by: int | None = 0,
-    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = DROP_LAST_COL,
     prepend_zeros_for_intercept: bool = False,
 ):
     """
@@ -193,9 +208,7 @@ def tree_compute_sqrt_penalty(
 def compute_penalty_blocks(
     tree_penalty: Any,
     shift_by: int | None = 0,
-    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[
-        ..., :-1, :-1
-    ],
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = DROP_LAST_ROW_COL,
 ):
     """
     Compute the penalty blocks for a pytree and apply weighting.
@@ -610,7 +623,7 @@ def compute_penalty_agumented_from_basis(
     n_samples: int = 10**4,
     penalize_null_space: bool = True,
     shift_by: int | None = 0,
-    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = DROP_LAST_COL,
 ):
     """
     Compute the block-diagonal penalization matrix.

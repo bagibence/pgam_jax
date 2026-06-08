@@ -135,11 +135,13 @@ In practice, we enforce this by **dropping one basis function** (column) from
 each smooth term. That basis function's effect gets absorbed into the intercept.
 
 ```python
+from pgam_jax.penalty_utils import DROP_LAST_COL, DROP_LAST_ROW_COL
+
 # The apply_identifiability function drops the last column
-apply_identifiability = lambda x: x[..., :-1]
+apply_identifiability = DROP_LAST_COL
 
 # For penalty matrices (which are square), we drop both last row and column
-apply_identifiability_penalty = lambda x: x[..., :-1, :-1]
+apply_identifiability_penalty = DROP_LAST_ROW_COL
 ```
 
 ## 6. Generalized Cross-Validation (GCV)

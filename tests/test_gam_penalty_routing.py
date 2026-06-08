@@ -1,5 +1,5 @@
 """
-Pins the SqrtMethod that ``gam._build_penalty_handler`` selects per basis component.
+Pins the penalty class that ``gam._build_penalty_handler`` selects per basis component.
 
 The production route dispatches one-dimensional smooths to SINGLE_WITH_NULL and
 tensor-product smooths to KRONECKER_WITH_NULL.  The tests also keep an
@@ -9,7 +9,7 @@ ordering, lambda count, factor order, or the resulting penalty math.
 Two test classes:
 
 * ``TestRoutedMethod``:
-  Asserts the SqrtMethod that each basis component is dispatched to.
+  Asserts the penalty class that each basis component is dispatched to.
 * ``TestPenaltyMathInvariant``:
   Compares the routed handler's ``compute_sqrt`` and
   ``compute_log_det_and_grad`` outputs against a manually-constructed
@@ -20,11 +20,15 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
-from nemos.inverse_link_function_utils import identity as _id_no_drop
 
 from pgam_jax import GAM
 from pgam_jax._identifiable_features import _should_drop_basis_col
-from pgam_jax._penalty_handler import PenaltyHandler, SqrtMethod, _drop_last_col
+from pgam_jax._penalty_handler import (
+    PenaltyHandler,
+    _KroneckerWithNullPenalty,
+    _SingleWithNullPenalty,
+)
+from pgam_jax.penalty_utils import DROP_LAST_COL, IDENTITY
 
 
 def _bsp_eval(n=10):
@@ -48,9 +52,9 @@ def _baseline_general_ph(basis, *, drop_conv_basis_col=False):
     ph = PenaltyHandler()
     for b, S in zip(basis, penalty_tree):
         id_fn = (
-            _drop_last_col
+            DROP_LAST_COL
             if _should_drop_basis_col(b, drop_conv_basis_col)
-            else _id_no_drop
+            else IDENTITY
         )
         ph.add(S, penalize_null_space=False, identifiability_fn=id_fn)
     return ph
@@ -77,26 +81,26 @@ def _rhos_for(basis):
 class TestRoutedMethod:
     def test_single_eval_routes_to_single_with_null(self):
         ph = _routed_ph(_bsp_eval())
-        assert [p.method for p in ph._penalties] == [SqrtMethod.SINGLE_WITH_NULL]
+        assert [type(p) for p in ph._penalties] == [_SingleWithNullPenalty]
 
     def test_additive_eval_eval_routes_to_two_single_with_null(self):
         ph = _routed_ph(_bsp_eval() + _bsp_eval())
-        assert [p.method for p in ph._penalties] == [SqrtMethod.SINGLE_WITH_NULL] * 2
+        assert [type(p) for p in ph._penalties] == [_SingleWithNullPenalty] * 2
 
     def test_multiplicative_eval_eval_routes_to_kronecker_with_null(self):
         ph = _routed_ph(_bsp_eval() * _bsp_eval())
-        assert [p.method for p in ph._penalties] == [SqrtMethod.KRONECKER_WITH_NULL]
+        assert [type(p) for p in ph._penalties] == [_KroneckerWithNullPenalty]
 
     def test_mixed_eval_plus_multiplicative_routes_one_of_each(self):
         ph = _routed_ph(_bsp_eval() + (_bsp_eval() * _bsp_eval()))
-        assert [p.method for p in ph._penalties] == [
-            SqrtMethod.SINGLE_WITH_NULL,
-            SqrtMethod.KRONECKER_WITH_NULL,
+        assert [type(p) for p in ph._penalties] == [
+            _SingleWithNullPenalty,
+            _KroneckerWithNullPenalty,
         ]
 
     def test_conv_routes_to_single_with_null(self):
         ph = _routed_ph(_bsp_conv(), drop_conv_basis_col=False)
-        assert [p.method for p in ph._penalties] == [SqrtMethod.SINGLE_WITH_NULL]
+        assert [type(p) for p in ph._penalties] == [_SingleWithNullPenalty]
 
 
 # ---------------------------------------------------------------------------
