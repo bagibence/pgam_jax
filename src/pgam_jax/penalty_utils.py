@@ -10,7 +10,29 @@ from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.tree_utils import pytree_map_and_reduce
 from scipy import sparse
 
+from ._nemos_compat import get_n_inputs
 from .config import config
+
+
+def prepend_zeros_for_intercept(sqrt_penalty: jnp.ndarray) -> jnp.ndarray:
+    """
+    Prepend a zero column to a square-root penalty matrix.
+
+    Aligns the penalty with a design matrix whose first column is an
+    unpenalized intercept.
+
+    Parameters
+    ----------
+    sqrt_penalty :
+        Block-diagonal square-root penalty matrix of shape (rows, n_smooth_cols).
+
+    Returns
+    -------
+    :
+        Shape (rows, n_smooth_cols + 1) with a leading zero column.
+    """
+    zeros = jnp.zeros(sqrt_penalty.shape[0], dtype=sqrt_penalty.dtype)
+    return jnp.column_stack((zeros, sqrt_penalty))
 
 
 def symmetric_sqrt(symmetric_matrix):
@@ -45,7 +67,7 @@ def _symmetric_sqrt_numpy(symmetric_matrix):
 @jax.jit
 def _symmetric_sqrt_jax(symmetric_matrix):
     """
-    Compute the square root of a symmetric matrix, truncating eigenvalues at float32 precision.
+    Compute the square root of a symmetric matrix.
 
     Parameters
     ----------
@@ -55,22 +77,15 @@ def _symmetric_sqrt_jax(symmetric_matrix):
     Returns
     -------
     :
-        The square root of the input matrix.
+        B of shape (N, N) such that B.T @ B = symmetric_matrix.
+        Rows corresponding to null-space modes are zero.
     """
     eig, U = jnp.linalg.eigh(symmetric_matrix)
-    sort_col = jnp.argsort(eig)
-    eig = eig[sort_col]
-    U = U[:, sort_col]
-
-    # matrix is sym should be positive
-    # numerical error can make some value small and negative, so pass through an abs.
+    # numerical noise can produce small negatives; abs before masking
     eig = jnp.abs(eig)
-
-    # crop the eig that are small relative to max
-    eig = eig * (eig > jnp.finfo(jnp.float32).eps * eig.max())
-    # compute the sqrt
-    Bx = U * jnp.sqrt(eig)
-    return Bx[:, ::-1].T
+    # mask eigenvalues below sqrt(eps_f64) * max — uses active float precision
+    eig = eig * (eig > jnp.finfo(float).eps ** 0.5 * eig.max())
+    return (U * jnp.sqrt(eig)).T
 
 
 def compute_start_block(tree_penalty: Any, shift_by=0):
@@ -306,7 +321,8 @@ def compute_penalty_null_space_numpy(penalty):
     # original algorith summed (null-space should be the same)
     penalty = penalty.sum(axis=0)
     eig, U = np.linalg.eigh(penalty)
-    zero_idx = np.abs(eig) < np.finfo(float).eps * np.max(eig)
+    thresh = np.finfo(float).eps ** 0.7 * max(np.abs(eig).max(), 1e-300)
+    zero_idx = eig <= thresh
     U = U[:, zero_idx]
     return np.dot(U, U.T)
 
@@ -325,9 +341,10 @@ def compute_penalty_null_space_jax(penalty):
     :
         Null space projection matrix of shape (K, K).
     """
-    penalty = penalty.mean(axis=0)
+    penalty = (penalty / jnp.sum(penalty**2, axis=(1, 2), keepdims=True)).mean(axis=0)
     eig, U = jnp.linalg.eigh(penalty)
-    zero_idx = jnp.abs(eig) < jnp.finfo(float).eps * jnp.max(eig)
+    thresh = jnp.finfo(float).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
+    zero_idx = eig <= thresh
     U = U[:, zero_idx]
     return jnp.dot(U, U.T)
 
@@ -467,6 +484,45 @@ def ndim_tensor_product_basis_penalty(*penalty: jnp.ndarray) -> jnp.ndarray:
     return ndim_penalty_tensor
 
 
+def compute_energy_penalty_factors(
+    basis_component: BSplineEval | MultiplicativeBasis,
+    n_simpson_samples: int = 10**4,
+) -> list[jnp.ndarray]:
+    """
+    Compute the one-dimensional energy-penalty factors for an additive component.
+
+    Parameters
+    ----------
+    basis_component:
+        Additive component of a basis.
+    n_simpson_samples:
+        Number of samples for the numerical approximation of the integral.
+
+    Returns
+    -------
+    :
+        One penalty matrix per factor in ``basis_component``.
+    """
+    components = list(basis_component._iterate_over_components())
+    if isinstance(basis_component, MultiplicativeBasis):
+        bad = [c for c in components if get_n_inputs(c) != 1]
+        if bad:
+            raise ValueError(
+                f"MultiplicativeBasis contains {len(bad)} factor(s) with _n_inputs != 1 "
+                f"({[type(c).__name__ for c in bad]}). "
+                "The Kronecker stable sqrt requires every factor to be a 1-D basis."
+            )
+
+    return [
+        compute_energy_penalty(
+            n_simpson_samples,
+            b.derivative,
+            getattr(b, "bounds", None) or (0.0, 1.0),
+        )
+        for b in components
+    ]
+
+
 def compute_energy_penalty_tensor_additive_component(
     basis_component: BSplineEval | MultiplicativeBasis,
     n_samples: int = 10**4,
@@ -487,6 +543,8 @@ def compute_energy_penalty_tensor_additive_component(
 
     Returns
     -------
+    tensor :
+        Shape (M, q, q).
 
     Notes
     -----
@@ -495,14 +553,7 @@ def compute_energy_penalty_tensor_additive_component(
     - For 2-dimensional predictors, it adds a penalty to ..math:`a + b \cdot x + c \cdot y + d \cdot xy`.
 
     """
-    one_dim_pen = (
-        compute_energy_penalty(
-            n_samples,
-            b.derivative,
-            getattr(b, "bounds", None) or (0.0, 1.0),
-        )
-        for b in basis_component._iterate_over_components()
-    )
+    one_dim_pen = compute_energy_penalty_factors(basis_component, n_samples)
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)
     if penalize_null_space:
         # In GAMs one penalizes the null space of a linear combinations of positive-semidefinite
@@ -542,8 +593,8 @@ def compute_energy_penalty_tensor(
 
     Returns
     -------
-        A list with the penalty tensors for each component.
-
+    penalty_tree :
+        List of (M_i, q_i, q_i) tensors, one per additive component.
     """
     return [
         compute_energy_penalty_tensor_additive_component(

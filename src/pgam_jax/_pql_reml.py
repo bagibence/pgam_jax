@@ -7,24 +7,22 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from numpy.typing import NDArray
 
-from . import penalty_utils
 from ._pql_gcv import FLOAT_EPS, _vmap_symm_mult, _vmap_trace, _vmap_where
-from ._slam_compute import _compute_log_det_slam_factory
+from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
 
 
 @partial(
     jax.jit,
-    static_argnames=("compute_log_det_and_grad", "apply_identifiability"),
+    static_argnames=("compute_log_det_and_grad", "compute_sqrt"),
 )
 def _compute_reml_and_states(
     regularization_strength: Any,
-    penalty_tree: Any,
     X: NDArray,
     Q: NDArray,
     R: NDArray,
     y: NDArray,
     compute_log_det_and_grad: Callable,
-    apply_identifiability: Callable | None = None,
+    compute_sqrt: Callable,
 ):
     """
     Forward pass for linearized REML.
@@ -42,18 +40,16 @@ def _compute_reml_and_states(
     ----------
     regularization_strength :
         Pytree of log-smoothing parameters (one leaf per penalty block).
-    penalty_tree :
-        Pytree of (M_i, q_i, q_i) penalty tensors, same structure as
-        regularization_strength.
     X, Q, R :
         Whitened design matrix and its QR factors (sqrt(W) X, Q, R).
     y :
         Augmented working response (length >= n_obs; only first n_obs rows used).
     compute_log_det_and_grad :
-        Static callable produced by _compute_log_det_slam_factory.  Receives
-        regularization_strength and returns (log_dets pytree, grads pytree).
-    apply_identifiability :
-        Per-leaf column-drop function (or None).
+        Static callable (from PenaltyHandler.build()) that receives
+        regularization_strength and returns (log_dets list, grads list).
+    compute_sqrt :
+        Static callable (from PenaltyHandler.build()) that receives
+        regularization_strength and returns the block-diagonal sqrt penalty matrix.
 
     Returns
     -------
@@ -76,14 +72,8 @@ def _compute_reml_and_states(
     n_obs :
         Number of observations (scalar int).
     """
-    # --- augmented penalty sqrt (identical to GCV) ---
-    sqrt_penalty = penalty_utils.tree_compute_sqrt_penalty(
-        penalty_tree,
-        regularization_strength,
-        shift_by=0,
-        apply_identifiability=apply_identifiability,
-        prepend_zeros_for_intercept=True,
-    )
+    sqrt_penalty = compute_sqrt(regularization_strength)
+    sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
     n_obs = X.shape[0]
     U, s, V_T = jnp.linalg.svd(jnp.vstack((R, sqrt_penalty)), full_matrices=False)
@@ -143,7 +133,7 @@ def _reml_grad_compute_from_states(
     comp = V_T.T * s_inv  # (n_features, k)
     comp_y1 = comp @ y1.ravel()  # (n_features,)
 
-    blocks = penalty_utils.compute_penalty_blocks(
+    blocks = compute_penalty_blocks(
         penalty_tree,
         apply_identifiability=apply_identifiability,
         shift_by=1,
@@ -174,22 +164,22 @@ def _reml_grad_compute_from_states(
 
 
 def reml_compute_factory(
-    penalty_tree: Any,
+    compute_sqrt: Callable,
+    compute_log_det_and_grad: Callable,
     apply_identifiability_columns: Callable | None,
     apply_identifiability: Callable | None,
 ):
     """
     Build a differentiable REML objective with a custom VJP.
 
-    Calls _compute_log_det_slam_factory once at Python level so the
-    block-grouping and rank-reduction are done statically.  The returned
-    callable mirrors the GCV equivalent in signature and structure.
-
     Parameters
     ----------
-    penalty_tree :
-        Static pytree of (M_i, q_i, q_i) penalty tensors.
-    apply_identifiability_columns, apply_identifiability :
+    compute_sqrt :
+        Static callable from ``PenaltyHandler.build()`` computing the block-diagonal
+        sqrt penalty matrix from regularization_strength.
+    compute_log_det_and_grad :
+        Static callable from ``PenaltyHandler.build()`` computing log|S_lam|_+ and
+        its gradient w.r.t. rho from regularization_strength.
         Same semantics as in gcv_compute_factory.
 
     Returns
@@ -199,7 +189,6 @@ def reml_compute_factory(
         _reml_compute(regularization_strength, penalty_tree, X, Q, R, y)
         returning the scalar REML objective with analytic reverse-mode gradient.
     """
-    compute_log_det_and_grad, _ = _compute_log_det_slam_factory(penalty_tree)
 
     @jax.custom_vjp
     def _reml_compute(
@@ -212,26 +201,24 @@ def reml_compute_factory(
     ):
         return _compute_reml_and_states(
             regularization_strength,
-            penalty_tree,
             X,
             Q,
             R,
             y,
             compute_log_det_and_grad=compute_log_det_and_grad,
-            apply_identifiability=apply_identifiability_columns,
+            compute_sqrt=compute_sqrt,
         )[0]
 
     def _reml_compute_fwd(regularization_strength, penalty_tree, X, Q, R, y):
         reml_val, RSS_reml, log_det_XtXpSl, y1, s_inv, V_T, log_det_sl_grads, n_obs = (
             _compute_reml_and_states(
                 regularization_strength,
-                penalty_tree,
                 X,
                 Q,
                 R,
                 y,
                 compute_log_det_and_grad=compute_log_det_and_grad,
-                apply_identifiability=apply_identifiability_columns,
+                compute_sqrt=compute_sqrt,
             )
         )
         return reml_val, (

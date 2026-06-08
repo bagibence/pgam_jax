@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from numpy.typing import NDArray
 
-from . import penalty_utils
+from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
 
 FLOAT_EPS = jnp.finfo(jnp.float32).eps
 
@@ -15,7 +15,7 @@ FLOAT_EPS = jnp.finfo(jnp.float32).eps
 _vmap_where = jax.vmap(jnp.where, (None, None, 0), out_axes=0)
 
 
-@partial(jax.jit, static_argnames=("apply_identifiability", "gamma"))
+@partial(jax.jit, static_argnames=("compute_sqrt", "gamma"))
 def _compute_gcv_and_states(
     regularization_strength: Any,
     penalty_tree: Any,
@@ -23,17 +23,11 @@ def _compute_gcv_and_states(
     Q: NDArray,
     R: NDArray,
     y: NDArray,
-    apply_identifiability: Callable | None = None,
+    compute_sqrt: Callable,
     gamma=1.5,
 ):
-    # identifiability constraint drops column by default
-    sqrt_penalty = penalty_utils.tree_compute_sqrt_penalty(
-        penalty_tree,
-        regularization_strength,
-        shift_by=0,
-        apply_identifiability=apply_identifiability,
-        prepend_zeros_for_intercept=True,
-    )
+    sqrt_penalty = compute_sqrt(regularization_strength)
+    sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
     n_obs = X.shape[0]
     U, s, V_T = jnp.linalg.svd(jnp.vstack((R, sqrt_penalty)), full_matrices=False)
@@ -94,7 +88,7 @@ def _gcv_grad_compute_from_states(
     y1 = U1.T @ (Q.T @ y)
     UTU = U1.T @ U1
 
-    blocks = penalty_utils.compute_penalty_blocks(
+    blocks = compute_penalty_blocks(
         penalty_tree,
         apply_identifiability=apply_identifiability,
         shift_by=1,
@@ -120,7 +114,9 @@ def _gcv_grad_compute_from_states(
     return gcv_grad
 
 
-def gcv_compute_factory(apply_identifiability_columns, apply_identifiability, gamma):
+def gcv_compute_factory(
+    compute_sqrt, apply_identifiability_columns, apply_identifiability, gamma
+):
     @jax.custom_vjp
     def _gcv_compute(
         regularization_strength: Any,
@@ -130,30 +126,6 @@ def gcv_compute_factory(apply_identifiability_columns, apply_identifiability, ga
         R: NDArray,
         y: NDArray,
     ):
-        """
-        Compute the Generalized Cross-validation score.
-
-        Parameters
-        ----------
-        regularization_strength:
-            Pytree containing the current penalization strengths
-        penalty_tree:
-            Pytree with the same struct as regularization_strength, containing the penalization matrices.
-        X:
-            Predictors
-        Q:
-            Q matrix of the QR decomposition of `np.vstack((X, penalty))`
-        R:
-            R matrix of the QR decomposition of `np.vstack((X, penalty))`
-        y:
-            Neural activity
-
-        Returns
-        -------
-        :
-            The GCV score
-
-        """
         gcv = _compute_gcv_and_states(
             regularization_strength,
             penalty_tree,
@@ -161,7 +133,7 @@ def gcv_compute_factory(apply_identifiability_columns, apply_identifiability, ga
             Q,
             R,
             y,
-            apply_identifiability=apply_identifiability_columns,
+            compute_sqrt=compute_sqrt,
             gamma=gamma,
         )[0]
         return gcv
@@ -174,7 +146,6 @@ def gcv_compute_factory(apply_identifiability_columns, apply_identifiability, ga
         R,
         y,
     ):
-        # Compute and return GCV + intermediates for backward
         gcv, alpha, delta, n_obs, U1, V_T, Q_, trA, Ay, s_inv, square_s_inv = (
             _compute_gcv_and_states(
                 regularization_strength,
@@ -183,7 +154,7 @@ def gcv_compute_factory(apply_identifiability_columns, apply_identifiability, ga
                 Q,
                 R,
                 y,
-                apply_identifiability=apply_identifiability_columns,
+                compute_sqrt=compute_sqrt,
                 gamma=gamma,
             )
         )

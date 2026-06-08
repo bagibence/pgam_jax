@@ -65,6 +65,7 @@ notebooks = [
     "jupyterlab-code-formatter",
     "jupytext",
     "jupyter-collaboration",
+    "jupyterlab-myst",
     "pandas",
     "pynapple",
     "seaborn",
