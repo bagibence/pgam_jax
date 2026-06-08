@@ -515,28 +515,30 @@ class PenaltyHandler:
         fn, _ = self.build()
         return fn(rhos)
 
-    def build(self):
-        """
-        Snapshot the handler into two pure callables.
-        """
-        n = len(self._penalties)
-        penalties = self._penalties
-
+    def _group_penalties(self):
+        """Build groups of penalties that can be stacked and vmapped over."""
         stack_groups = defaultdict(list)
-        for i, p in enumerate(penalties):
+        for i, p in enumerate(self._penalties):
             stack_groups[p._group_key].append(i)
 
         groups = []  # each: (tuple(member_indices), stacked_pytree, members)
         for member_indices in stack_groups.values():
-            members = [penalties[i] for i in member_indices]
+            members = [self._penalties[i] for i in member_indices]
             stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *members)
             groups.append((tuple(member_indices), stacked, members))
+
+        return groups
+
+    def build(self):
+        """Snapshot the handler into two pure callables."""
+        n = len(self._penalties)
+        groups = self._group_penalties()
 
         vmapped_sqrt = jax.vmap(lambda m, rho: m.sqrt(rho))
         vmapped_ld = jax.vmap(lambda m, rho: m.log_det_and_grad(rho))
 
         def compute_sqrt(rhos):
-            _check_rho_lengths(rhos, penalties)
+            _check_rho_lengths(rhos, self._penalties)
             out = [None] * n
             for member_indices, stacked, members in groups:
                 # Singleton groups (the common case) call the penalty directly;
@@ -552,7 +554,7 @@ class PenaltyHandler:
             return block_diag(*out)
 
         def compute_log_det_and_grad(rhos):
-            _check_rho_lengths(rhos, penalties)
+            _check_rho_lengths(rhos, self._penalties)
             log_dets = [None] * n
             grads = [None] * n
             for member_indices, stacked, members in groups:
