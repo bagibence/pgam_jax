@@ -20,16 +20,15 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
-from nemos.inverse_link_function_utils import identity as _id_no_drop
 
 from pgam_jax import GAM
 from pgam_jax._identifiable_features import _should_drop_basis_col
 from pgam_jax._penalty_handler import (
     PenaltyHandler,
-    _drop_last_col,
     _KroneckerWithNullPenalty,
     _SingleWithNullPenalty,
 )
+from pgam_jax.penalty_utils import DROP_LAST_COL, IDENTITY
 
 
 def _bsp_eval(n=10):
@@ -53,9 +52,9 @@ def _baseline_general_ph(basis, *, drop_conv_basis_col=False):
     ph = PenaltyHandler()
     for b, S in zip(basis, penalty_tree):
         id_fn = (
-            _drop_last_col
+            DROP_LAST_COL
             if _should_drop_basis_col(b, drop_conv_basis_col)
-            else _id_no_drop
+            else IDENTITY
         )
         ph.add(S, penalize_null_space=False, identifiability_fn=id_fn)
     return ph

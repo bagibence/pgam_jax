@@ -7,13 +7,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import block_diag
-from nemos.inverse_link_function_utils import identity
 
 from ._slam_compute import log_det_and_grad_slam, transform_slam, transform_slam_with_Q
-
-
-def _drop_last_col(x):
-    return x[..., :-1]
+from .penalty_utils import DROP_LAST_COL, IDENTITY
 
 
 def _eigh_and_rank(S):
@@ -124,7 +120,7 @@ class _SinglePenalty(_AbstractPenalty):
         eig, U, rank = _eigh_and_rank(S)
         log_det_S = _log_pseudo_det_from_eigvals(eig)
         rank_r = log_det_S_r = None
-        if id_fn is _drop_last_col:
+        if id_fn is DROP_LAST_COL:
             eig_r, _, rank_r = _eigh_and_rank(S[:-1, :-1])
             log_det_S_r = _log_pseudo_det_from_eigvals(eig_r)
         return cls(
@@ -146,9 +142,9 @@ class _SinglePenalty(_AbstractPenalty):
         return sqrt_d[:, None] * self.id_fn(self.U.T)
 
     def log_det_and_grad(self, rho):
-        if self.id_fn is _drop_last_col:
+        if self.id_fn is DROP_LAST_COL:
             rank, log_det_S = self.rank_r, self.log_det_S_r
-        elif self.id_fn is identity:
+        elif self.id_fn is IDENTITY:
             rank, log_det_S = self.rank, self.log_det_S
         else:
             raise NotImplementedError(
@@ -173,7 +169,7 @@ class _SingleWithNullPenalty(_AbstractPenalty):
         log_det_S = _log_pseudo_det_from_eigvals(eig)
         rank_null = S.shape[0] - rank
         log_alpha = log_beta = None
-        if id_fn is _drop_last_col:
+        if id_fn is DROP_LAST_COL:
             last_sq = U[-1, :] ** 2
             pos = eig > 0
             alpha = jnp.sum(jnp.where(pos, last_sq / jnp.where(pos, eig, 1.0), 0.0))
@@ -205,10 +201,10 @@ class _SingleWithNullPenalty(_AbstractPenalty):
     def log_det_and_grad(self, rho):
         log_det_full = self.rank * rho[0] + self.log_det_S + self.rank_null * rho[1]
         grad_full = jnp.stack([self.rank, self.rank_null]).astype(rho.dtype)
-        if self.id_fn is _drop_last_col:
+        if self.id_fn is DROP_LAST_COL:
             log_det_corr, grad_corr = self._drop_last_col_correction(rho)
             return log_det_full + log_det_corr, grad_full + grad_corr
-        elif self.id_fn is identity:
+        elif self.id_fn is IDENTITY:
             return log_det_full, grad_full
         else:
             raise NotImplementedError(
@@ -217,7 +213,7 @@ class _SingleWithNullPenalty(_AbstractPenalty):
 
     def _drop_last_col_correction(self, rho):
         """
-        Schur correction terms for _drop_last_col on SINGLE_WITH_NULL.
+        Schur correction terms for DROP_LAST_COL on SINGLE_WITH_NULL.
 
         Returns ``(log_det_correction, grad_correction)`` to be added to the
         uncorrected full-space log-det and gradient.
@@ -282,12 +278,12 @@ class _KroneckerPenalty(_AbstractKronecker):
         return jnp.sqrt(combined)[:, None] * self.id_fn(self.kron_U.T)
 
     def log_det_and_grad(self, rho):
-        if self.id_fn is _drop_last_col:
+        if self.id_fn is DROP_LAST_COL:
             raise NotImplementedError(
-                "KRONECKER log_det not implemented under _drop_last_col; "
+                "KRONECKER log_det not implemented under DROP_LAST_COL; "
                 "use add_kron(..., penalize_null_space=True) for KRONECKER_WITH_NULL."
             )
-        elif self.id_fn is identity:
+        elif self.id_fn is IDENTITY:
             lams = jnp.exp(rho)
             log_det, factor_grads, _ = _kron_log_det_factor_grads(lams, self.eigs)
             return log_det, jnp.stack(factor_grads)
@@ -326,10 +322,10 @@ class _KroneckerWithNullPenalty(_AbstractKronecker):
         n_null = total - n_pos
         log_det_full = log_det_pos + n_null * rho[-1]
         grad_full = jnp.stack([*factor_grads, n_null.astype(rho.dtype)])
-        if self.id_fn is _drop_last_col:
+        if self.id_fn is DROP_LAST_COL:
             log_det_corr, grad_corr = self._drop_last_col_correction(lams)
             return log_det_full + log_det_corr, grad_full + grad_corr
-        elif self.id_fn is identity:
+        elif self.id_fn is IDENTITY:
             return log_det_full, grad_full
         else:
             raise NotImplementedError(
@@ -338,7 +334,7 @@ class _KroneckerWithNullPenalty(_AbstractKronecker):
 
     def _drop_last_col_correction(self, lams):
         """
-        Schur correction terms for _drop_last_col on KRONECKER_WITH_NULL.
+        Schur correction terms for DROP_LAST_COL on KRONECKER_WITH_NULL.
 
         Returns ``(log_det_correction, grad_correction)`` to be added to the
         uncorrected full-space log-det and gradient.
@@ -370,13 +366,13 @@ class _GeneralPenalty(_AbstractPenalty):
     id_fn: Callable = eqx.field(static=True)
     U_keep: jnp.ndarray  # (q, r)
     full_rank_S: jnp.ndarray  # (k, r, r)
-    full_rank_S_r: Optional[jnp.ndarray] = None  # (k, r', r') when id_fn=_drop_last_col
+    full_rank_S_r: Optional[jnp.ndarray] = None  # (k, r', r') when id_fn=DROP_LAST_COL
 
     @classmethod
     def from_S(cls, S, id_fn):
         U_keep, full_rank_S = _full_rank_precompute(S)
         full_rank_S_r = None
-        if id_fn is _drop_last_col:
+        if id_fn is DROP_LAST_COL:
             _, full_rank_S_r = _full_rank_precompute(S[:, :-1, :-1])
         return cls(
             id_fn=id_fn,
@@ -401,9 +397,9 @@ class _GeneralPenalty(_AbstractPenalty):
         return (B_rot @ Q_s.T) @ self.id_fn(self.U_keep.T)
 
     def log_det_and_grad(self, rho):
-        if self.id_fn is _drop_last_col:
+        if self.id_fn is DROP_LAST_COL:
             full_rank_S = self.full_rank_S_r
-        elif self.id_fn is identity:
+        elif self.id_fn is IDENTITY:
             full_rank_S = self.full_rank_S
         else:
             raise NotImplementedError(
@@ -454,8 +450,8 @@ class PenaltyHandler:
         identifiability_fn :
             Must be a module-level callable (not a lambda) so that object
             identity is stable and can be used as a group key for vmap batching.
-            Use ``identity`` (no-op) or ``_drop_last_col``, or define your own
-            at module level.
+            Use ``penalty_utils.IDENTITY`` (no-op) or
+            ``penalty_utils.DROP_LAST_COL``, or define your own at module level.
         """
         S = jnp.asarray(S_tensor)
         if S.ndim == 2 or S.shape[0] == 1:

@@ -176,7 +176,7 @@ variance_func = lambda x: x
 compute_sqrt_penalty = lambda *args: pen_utils.tree_compute_sqrt_penalty(
     *args,
     shift_by=0,
-    apply_identifiability=lambda x: x[..., :-1],
+    apply_identifiability=pen_utils.DROP_LAST_COL,
 )
 
 # Factory function that creates the GCV (Generalized Cross-Validation) scorer.
@@ -191,7 +191,9 @@ compute_sqrt_penalty = lambda *args: pen_utils.tree_compute_sqrt_penalty(
 # 1. apply_identifiability for sqrt penalty (drop last column)
 # 2. apply_identifiability for full penalty (drop last row AND column)
 # 3. gamma=1.5: GCV correction factor (>1 gives more smoothing, reduces overfitting)
-inner_func = gcv_compute_factory(lambda x: x[..., :-1], lambda x: x[..., :-1, :-1], 1.5)
+inner_func = gcv_compute_factory(
+    pen_utils.DROP_LAST_COL, pen_utils.DROP_LAST_ROW_COL, 1.5
+)
 
 # =============================================================================
 # Step 4: Fit the ORIGINAL PGAM model

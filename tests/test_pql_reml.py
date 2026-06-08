@@ -16,11 +16,11 @@ import nemos as nmo
 import numpy as np
 import pytest
 from jax.flatten_util import ravel_pytree
-from nemos.inverse_link_function_utils import identity as _identity
 
 from pgam_jax import GAM
 from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pql_reml import reml_compute_factory
+from pgam_jax.penalty_utils import IDENTITY
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -30,10 +30,10 @@ def _build_ph_and_factory(penalty_tree):
     n_smooths = len(penalty_tree)
     ph = PenaltyHandler()
     for S in penalty_tree:
-        ph.add(S, penalize_null_space=False, identifiability_fn=_identity)
+        ph.add(S, penalize_null_space=False, identifiability_fn=IDENTITY)
     compute_sqrt, compute_log_det_and_grad = ph.build()
 
-    id_fns = tuple(_identity for _ in range(n_smooths))
+    id_fns = tuple(IDENTITY for _ in range(n_smooths))
     return (
         reml_compute_factory(
             compute_sqrt=compute_sqrt,

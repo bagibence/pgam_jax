@@ -5,7 +5,6 @@ from typing import Callable, Literal
 import jax.numpy as jnp
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
-from nemos.inverse_link_function_utils import identity as _id_no_drop
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
@@ -17,7 +16,7 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
-from ._penalty_handler import PenaltyHandler, _drop_last_col
+from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
 from .iterative_optim import (
@@ -26,6 +25,9 @@ from .iterative_optim import (
     pql_outer_iteration,
 )
 from .penalty_utils import (
+    DROP_LAST_COL,
+    DROP_LAST_ROW_COL,
+    IDENTITY,
     compute_energy_penalty_factors,
     compute_energy_penalty_tensor,
     prepend_zeros_for_intercept,
@@ -96,10 +98,10 @@ def _make_identifiability_dropper(
     ``square=True`` returns a function that drops both the last row and column for use on penalty matrices.
     """
     if not _should_drop_basis_col(basis_component, drop_conv_basis_col):
-        return lambda x: x
+        return IDENTITY
     if square:
-        return lambda x: x[..., :-1, :-1]
-    return lambda x: x[..., :-1]
+        return DROP_LAST_ROW_COL
+    return DROP_LAST_COL
 
 
 class GAM:
@@ -255,9 +257,9 @@ class GAM:
         ph = PenaltyHandler()
         for S_tensor, basis_comp in zip(penalty_tree, self.basis):
             id_fn = (
-                _drop_last_col
+                DROP_LAST_COL
                 if _should_drop_basis_col(basis_comp, self.drop_conv_basis_col)
-                else _id_no_drop
+                else IDENTITY
             )
             if isinstance(basis_comp, MultiplicativeBasis):
                 factors = compute_energy_penalty_factors(
