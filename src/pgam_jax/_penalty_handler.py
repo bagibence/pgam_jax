@@ -118,6 +118,11 @@ class _SinglePenalty(_AbstractPenalty):
     @classmethod
     def from_S(cls, S, id_fn):
         eig, U, rank = _eigh_and_rank(S)
+        return cls.from_eigh(S, eig, U, rank, id_fn)
+
+    @classmethod
+    def from_eigh(cls, S, eig, U, rank, id_fn):
+        """Build from a precomputed full-matrix eigendecomposition of ``S``."""
         log_det_S = _log_pseudo_det_from_eigvals(eig)
         rank_r = log_det_S_r = None
         if id_fn is DROP_LAST_COL:
@@ -166,6 +171,11 @@ class _SingleWithNullPenalty(_AbstractPenalty):
     @classmethod
     def from_S(cls, S, id_fn):
         eig, U, rank = _eigh_and_rank(S)
+        return cls.from_eigh(S, eig, U, rank, id_fn)
+
+    @classmethod
+    def from_eigh(cls, S, eig, U, rank, id_fn):
+        """Build from a precomputed full-matrix eigendecomposition of ``S``."""
         log_det_S = _log_pseudo_det_from_eigvals(eig)
         rank_null = S.shape[0] - rank
         log_alpha = log_beta = None
@@ -240,10 +250,15 @@ class _AbstractKronecker(_AbstractPenalty):
 
     @classmethod
     def from_factors(cls, factor_list, id_fn):
-        results = [_eigh_and_rank(S) for S in factor_list]
-        eigs = tuple(eig for eig, _, _ in results)
-        Us = [U for _, U, _ in results]
-        ranks = tuple(rank for _, _, rank in results)
+        eigh_and_rank_per_factor = [_eigh_and_rank(S) for S in factor_list]
+        return cls.from_eigh(eigh_and_rank_per_factor, id_fn)
+
+    @classmethod
+    def from_eigh(cls, eigh_and_rank_per_factor, id_fn):
+        """Build from one precomputed ``_eigh_and_rank`` result per factor."""
+        eigs = tuple(eig for eig, _, _ in eigh_and_rank_per_factor)
+        Us = [U for _, U, _ in eigh_and_rank_per_factor]
+        ranks = tuple(rank for _, _, rank in eigh_and_rank_per_factor)
         log_det_S = tuple(_log_pseudo_det_from_eigvals(eig) for eig in eigs)
         kron_U = reduce(jnp.kron, Us)
         factor_shape = tuple(eig.shape[0] for eig in eigs)
@@ -456,10 +471,10 @@ class PenaltyHandler:
         S = jnp.asarray(S_tensor)
         if S.ndim == 2 or S.shape[0] == 1:
             S2d = S if S.ndim == 2 else S[0]
-            _, _, rank = _eigh_and_rank(S2d)
+            eig, U, rank = _eigh_and_rank(S2d)
             has_null = penalize_null_space and bool(rank < S2d.shape[0])
             cls = _SingleWithNullPenalty if has_null else _SinglePenalty
-            p = cls.from_S(S2d, identifiability_fn)
+            p = cls.from_eigh(S2d, eig, U, rank, identifiability_fn)
         else:
             p = _GeneralPenalty.from_S(S, identifiability_fn)
         self._penalties.append(p)
@@ -482,11 +497,15 @@ class PenaltyHandler:
         identifiability_fn :
             See ``add``.
         """
+        eigh_and_rank_per_factor = [_eigh_and_rank(S) for S in factor_list]
         has_null = penalize_null_space and all(
-            bool(_eigh_and_rank(S)[2] < S.shape[0]) for S in factor_list
+            bool(rank < S.shape[0])
+            for (_, _, rank), S in zip(eigh_and_rank_per_factor, factor_list)
         )
         cls = _KroneckerWithNullPenalty if has_null else _KroneckerPenalty
-        self._penalties.append(cls.from_factors(factor_list, identifiability_fn))
+        self._penalties.append(
+            cls.from_eigh(eigh_and_rank_per_factor, identifiability_fn)
+        )
 
     def compute_log_det_and_grad(self, rhos):
         _, fn = self.build()
