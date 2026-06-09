@@ -1,0 +1,35 @@
+name: Test weekly with fresh dependency resolution
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  latest_dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # required or latest
+        with:
+          enable-cache: true
+          cache-suffix: "fresh-resolution-v1"
+
+      - name: Run tests against latest allowed dependencies
+        run: uv run --upgrade --extra dev pytest -n auto
