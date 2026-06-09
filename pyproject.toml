@@ -57,9 +57,11 @@ dev = [
     "pytest-cov",                   # Test coverage plugin for pytest
     "statsmodels",                  # Used to compare model pseudo-r2 in testing
     "matplotlib>=3.7",              # Used by comparison examples
+    "tox-uv",                       # Run tox with uv for faster installs
+]
+compare = [                         # Local-only: needs the ../PGAM checkout, not installable in CI
     "PGAM",                         # Used only for comparisons against the original implementation
     "docker",                       # Other way of running the original implementation
-    "tox-uv",                       # Run tox with uv for faster installs
 ]
 notebooks = [
     "jupyterlab",
