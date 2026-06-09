@@ -56,6 +56,20 @@ def test_fit_runs_end_to_end(method):
     assert np.corrcoef(pred, np.exp(eta))[0, 1] > 0.5
 
 
+def test_use_glm_init_reaches_same_solution():
+    """Regardless of use_glm_init, the converged fit must converge to the same result."""
+    x, y, _ = _poisson_data()
+    basis = nmo.basis.BSplineEval(n_basis_funcs=8, order=4, bounds=(-1.0, 1.0))
+
+    coefs = {}
+    for use_glm_init in (True, False):
+        gam = GAM(basis, method="gcv", maxiter=50, use_glm_init=use_glm_init)
+        gam.fit((x,), y)
+        coefs[use_glm_init] = np.asarray(gam.coef_)
+
+    np.testing.assert_allclose(coefs[True], coefs[False], rtol=1e-3, atol=1e-3)
+
+
 @pytest.mark.parametrize("method", ["gcv", "reml"])
 def test_tensor_product_fit_runs_end_to_end(method):
     """End-to-end tensor-product fit through the KRONECKER_WITH_NULL penalty route."""

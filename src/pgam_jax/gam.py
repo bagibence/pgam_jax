@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Callable, Literal
 
 import jax.numpy as jnp
+import jax.tree_util as jtu
+from jaxopt import LBFGS, ScipyMinimize
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.observation_models import Observations, PoissonObservations
@@ -145,6 +147,10 @@ class GAM:
         Smoothing-parameter selection criterion.  ``"gcv"`` (default) uses
         Generalized Cross-Validation; ``"reml"`` uses Restricted Maximum
         Likelihood on the linearized working model.
+    use_glm_init :
+        If no ``init_params`` are provided, ``fit`` initializes the parameters to
+        zeros. When this is True, it then fits a regularized GLM (starting from
+        those zeros) to warm-start the coefficients before the PQL iterations.
 
     Attributes
     ----------
@@ -182,6 +188,7 @@ class GAM:
         convergence_criterion: str = "gcv",
         drop_conv_basis_col: bool = False,
         method: Literal["gcv", "reml"] = "gcv",
+        use_glm_init: bool = True,
     ) -> None:
         # TODO: Make basis immutable
         if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
@@ -204,6 +211,7 @@ class GAM:
         self.convergence_criterion = convergence_criterion
         self.drop_conv_basis_col = drop_conv_basis_col
         self.n_simpson_sample = int(1e4)
+        self.use_glm_init = use_glm_init
 
         # Identifiability is applied per basis component to match how the design matrix is built:
         # BSplineConv leaves follow ``drop_conv_basis_col``; other leaves drop the last column.
@@ -249,6 +257,58 @@ class GAM:
 
         coef = jnp.zeros(in_ndim)
         intercept = jnp.zeros(out_ndim)
+
+        return (coef, intercept)
+
+    def _initialize_params_via_glm(
+        self,
+        X: jnp.ndarray,
+        y: jnp.ndarray,
+        init_params: tuple[jnp.ndarray, jnp.ndarray],
+        sqrt_penalty: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """
+        Warm-start the parameters by fitting a regularized GLM.
+
+        Runs L-BFGS on the penalized negative log-likelihood at fixed smoothing
+        parameters, starting from ``init_params``, to give the PQL iterations a
+        better-than-zero coefficient start.
+
+        Parameters
+        ----------
+        X :
+            Design matrix, shape ``(n_samples, n_features)``.
+        y :
+            Response variable, shape ``(n_samples,)`` or ``(n_samples, n_outputs)``.
+        init_params :
+            Starting (coefficients, intercept) for the GLM fit.
+        sqrt_penalty :
+            Square-root penalty for the initial regularization strength (with zeros
+            prepended for the intercept). Used for forming the GLM penalty term.
+
+        Returns
+        -------
+        :
+            The GLM-fitted (coefficients, intercept).
+        """
+        inv_link_func = self.observation_model.default_inverse_link_function
+
+        pen = jtu.tree_map(lambda x: x[:, 1:].T.dot(x[:, 1:]), sqrt_penalty)
+
+        def loss(p):
+            unpenalized_nll = self.observation_model._negative_log_likelihood(
+                y,
+                inv_link_func(X.dot(p[0]) + p[1]),
+                aggregate_sample_scores=jnp.sum,
+            )
+            return unpenalized_nll + 0.5 * p[0].dot(pen).dot(p[0])
+
+        if self.use_scipy:
+            init_solver = ScipyMinimize(method="l-bfgs-b", fun=loss, tol=1e-8)
+        else:
+            init_solver = LBFGS(loss, tol=1e-8)
+
+        (coef, intercept), _ = init_solver.run(init_params)
 
         return (coef, intercept)
 
@@ -493,7 +553,8 @@ class GAM:
         y :
             Response variable, shape ``(n_samples,)``.
         init_params :
-            Initial (coefficients, intercept). If None, initialized to zeros.
+            Initial (coefficients, intercept).
+            If None, initialized to zeros, then further tuned if ``use_glm_init`` is True.
         init_regularizer_strength :
             Initial log-space regularization strengths. If None, initialized to zeros
             (lambda=1 for every penalty component).
@@ -515,12 +576,17 @@ class GAM:
         ph = self._build_penalty_handler(penalty_tree)
         compute_sqrt, compute_log_det_and_grad = ph.build()
 
-        # TODO: Pull out the GLM initialization here?
-        if init_params is None:
-            init_params = self.initialize_params(X, y)
-
         if init_regularizer_strength is None:
             init_regularizer_strength = self._init_regularizer_strength(penalty_tree)
+
+        if init_params is None:
+            init_params = self.initialize_params(X, y)
+            if self.use_glm_init:
+                sqrt_penalty = compute_sqrt(init_regularizer_strength)
+                sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
+                init_params = self._initialize_params_via_glm(
+                    X, y, init_params, sqrt_penalty
+                )
 
         opt_coef, opt_pen, n_iter = pql_outer_iteration(
             init_regularizer_strength,  # initial log(λ) for each smooth
