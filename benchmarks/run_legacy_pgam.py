@@ -5,7 +5,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from benchmarks.common import BENCHMARK_DIR, LEGACY_DOCKER_IMAGE, default_cpu_env, read_json, write_json
+from benchmarks.common import (
+    BENCHMARK_DIR,
+    LEGACY_DOCKER_IMAGE,
+    default_cpu_env,
+    read_json,
+    write_json,
+)
 
 
 def build_docker_command(
@@ -59,7 +65,9 @@ def build_docker_command(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one legacy PGAM Docker benchmark case.")
+    parser = argparse.ArgumentParser(
+        description="Run one legacy PGAM Docker benchmark case."
+    )
     parser.add_argument("--case", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

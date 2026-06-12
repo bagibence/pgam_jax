@@ -48,7 +48,9 @@ def _block_until_ready(model: Any) -> None:
     jax.block_until_ready(model.intercept_)
 
 
-def _fit_once(x: np.ndarray, y: np.ndarray, metadata: dict[str, Any], args: argparse.Namespace) -> tuple[Any, float, float]:
+def _fit_once(
+    x: np.ndarray, y: np.ndarray, metadata: dict[str, Any], args: argparse.Namespace
+) -> tuple[Any, float, float]:
     from nemos.observation_models import PoissonObservations
 
     from pgam_jax import GAM
@@ -91,7 +93,9 @@ def main() -> None:
     jax.config.update("jax_enable_x64", True)
     device_platforms = sorted({device.platform for device in jax.devices()})
     if args.backend not in device_platforms:
-        raise RuntimeError(f"Requested {args.backend!r}, but JAX devices are {device_platforms!r}.")
+        raise RuntimeError(
+            f"Requested {args.backend!r}, but JAX devices are {device_platforms!r}."
+        )
 
     metadata = read_json(args.metadata)
     load_t0 = time.perf_counter()
@@ -106,7 +110,9 @@ def main() -> None:
     predict_s = time.perf_counter() - predict_t0
 
     args.prediction_output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(args.prediction_output, prediction=prediction, rate_true=rate_true)
+    np.savez_compressed(
+        args.prediction_output, prediction=prediction, rate_true=rate_true
+    )
 
     backend_name = "pgam_jax_scipy_cpu" if args.use_scipy else "pgam_jax_cpu"
     runtime_packages = ("pgam_jax", "jax", "jaxlib", "nemos", "numpy")
@@ -130,7 +136,8 @@ def main() -> None:
             "cold_n_iter": int(cold_model.n_iter_),
             "warm_n_iter": int(warm_model.n_iter_),
             "regularizer_strength": [
-                np.asarray(value, dtype=float).tolist() for value in warm_model.regularizer_strength_
+                np.asarray(value, dtype=float).tolist()
+                for value in warm_model.regularizer_strength_
             ],
             "intercept": np.asarray(warm_model.intercept_, dtype=float).tolist(),
         },
@@ -139,7 +146,9 @@ def main() -> None:
         },
         "metrics": prediction_summary(y, prediction),
         "prediction_path": str(args.prediction_output),
-        "runtime": runtime_metadata(Path(__file__).resolve().parents[1], runtime_packages),
+        "runtime": runtime_metadata(
+            Path(__file__).resolve().parents[1], runtime_packages
+        ),
         "jax_devices": [str(device) for device in jax.devices()],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

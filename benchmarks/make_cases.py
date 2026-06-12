@@ -5,7 +5,14 @@ from pathlib import Path
 
 import numpy as np
 
-from benchmarks.common import CASES_DIR, CaseSpec, artifact_dirs, case_metadata, ensure_artifact_dirs, write_json
+from benchmarks.common import (
+    CASES_DIR,
+    CaseSpec,
+    artifact_dirs,
+    case_metadata,
+    ensure_artifact_dirs,
+    write_json,
+)
 
 
 def _case_id(n_observations: int, n_smooths: int, n_basis: int, seed: int) -> str:
@@ -41,7 +48,9 @@ SUITES = {
 def generate_case(spec: CaseSpec) -> dict[str, np.ndarray]:
     """Generate deterministic nonlinear Poisson data for a benchmark case."""
     rng = np.random.default_rng(spec.seed)
-    x = rng.uniform(spec.lower_bound, spec.upper_bound, size=(spec.n_smooths, spec.n_observations))
+    x = rng.uniform(
+        spec.lower_bound, spec.upper_bound, size=(spec.n_smooths, spec.n_observations)
+    )
 
     eta = np.full(spec.n_observations, spec.true_intercept, dtype=float)
     for idx in range(spec.n_smooths):
@@ -63,7 +72,9 @@ def generate_case(spec: CaseSpec) -> dict[str, np.ndarray]:
     }
 
 
-def write_case(spec: CaseSpec, output_dir: Path = CASES_DIR, overwrite: bool = False) -> tuple[Path, Path]:
+def write_case(
+    spec: CaseSpec, output_dir: Path = CASES_DIR, overwrite: bool = False
+) -> tuple[Path, Path]:
     """Write one case's arrays and metadata."""
     output_dir.mkdir(parents=True, exist_ok=True)
     case_path = output_dir / f"{spec.case_id}.npz"
@@ -77,7 +88,9 @@ def write_case(spec: CaseSpec, output_dir: Path = CASES_DIR, overwrite: bool = F
     return case_path, metadata_path
 
 
-def write_suite(suite: str, output_dir: Path = CASES_DIR, overwrite: bool = False) -> list[tuple[Path, Path]]:
+def write_suite(
+    suite: str, output_dir: Path = CASES_DIR, overwrite: bool = False
+) -> list[tuple[Path, Path]]:
     """Write all cases for a named benchmark suite."""
     if suite not in SUITES:
         raise ValueError(f"Unknown suite {suite!r}. Expected one of {sorted(SUITES)}.")

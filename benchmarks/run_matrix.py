@@ -17,7 +17,12 @@ from benchmarks.common import (
 )
 from benchmarks.make_cases import SUITES, write_suite
 from benchmarks.run_legacy_pgam import build_docker_command
-from benchmarks.summarize import collect_results, summarize_results, write_csv, write_markdown
+from benchmarks.summarize import (
+    collect_results,
+    summarize_results,
+    write_csv,
+    write_markdown,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -102,7 +107,9 @@ def _stored_git_commit(output_path: Path) -> str | None:
     return runtime.get("git_commit")
 
 
-def _should_run_jax(output_path: Path, current_commit: str | None, overwrite: bool) -> bool:
+def _should_run_jax(
+    output_path: Path, current_commit: str | None, overwrite: bool
+) -> bool:
     """Decide whether a pgam_jax result needs (re-)running.
 
     Existing results are reused only when they were produced from the current
@@ -192,7 +199,9 @@ def main() -> None:
             if not args.skip_legacy:
                 _run_case_legacy(args, dirs, case_path, metadata_path, repetition)
             if not args.skip_jax:
-                _run_case_jax_variants(args, dirs, case_path, metadata_path, repetition, current_commit)
+                _run_case_jax_variants(
+                    args, dirs, case_path, metadata_path, repetition, current_commit
+                )
 
     rows = summarize_results(collect_results(dirs.results))
     write_csv(rows, dirs.summaries / f"{args.summary_name}.csv")

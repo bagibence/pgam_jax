@@ -59,14 +59,20 @@ def _prediction_rmse(left: Path | None, right: Path | None) -> float | None:
     return float(np.sqrt(np.mean((left_pred - right_pred) ** 2)))
 
 
-def collect_results(results_dir: Path = RESULTS_DIR) -> list[tuple[Path, dict[str, Any]]]:
+def collect_results(
+    results_dir: Path = RESULTS_DIR,
+) -> list[tuple[Path, dict[str, Any]]]:
     """Read all result JSON files in a directory."""
     return [(path, read_json(path)) for path in sorted(results_dir.glob("*.json"))]
 
 
-def summarize_results(results: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]]:
+def summarize_results(
+    results: list[tuple[Path, dict[str, Any]]],
+) -> list[dict[str, Any]]:
     """Aggregate result JSON payloads into one row per case."""
-    grouped: dict[str, dict[str, list[tuple[Path, dict[str, Any]]]]] = defaultdict(lambda: defaultdict(list))
+    grouped: dict[str, dict[str, list[tuple[Path, dict[str, Any]]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for path, result in results:
         grouped[result["case"]["case_id"]][result["backend"]].append((path, result))
 
@@ -77,21 +83,45 @@ def summarize_results(results: list[tuple[Path, dict[str, Any]]]) -> list[dict[s
         jax_scipy_runs = by_backend.get("pgam_jax_scipy_cpu", [])
         legacy_times = [_primary_fit_time(result) for _path, result in legacy_runs]
         jax_times = [_primary_fit_time(result) for _path, result in jax_runs]
-        jax_scipy_times = [_primary_fit_time(result) for _path, result in jax_scipy_runs]
-        legacy_model_total_times = [_primary_model_total_time(result) for _path, result in legacy_runs]
-        jax_model_total_times = [_primary_model_total_time(result) for _path, result in jax_runs]
-        jax_scipy_model_total_times = [_primary_model_total_time(result) for _path, result in jax_scipy_runs]
+        jax_scipy_times = [
+            _primary_fit_time(result) for _path, result in jax_scipy_runs
+        ]
+        legacy_model_total_times = [
+            _primary_model_total_time(result) for _path, result in legacy_runs
+        ]
+        jax_model_total_times = [
+            _primary_model_total_time(result) for _path, result in jax_runs
+        ]
+        jax_scipy_model_total_times = [
+            _primary_model_total_time(result) for _path, result in jax_scipy_runs
+        ]
         legacy_median = statistics.median(legacy_times) if legacy_times else None
         jax_median = statistics.median(jax_times) if jax_times else None
-        jax_scipy_median = statistics.median(jax_scipy_times) if jax_scipy_times else None
-        legacy_model_total_median = statistics.median(legacy_model_total_times) if legacy_model_total_times else None
-        jax_model_total_median = statistics.median(jax_model_total_times) if jax_model_total_times else None
-        jax_scipy_model_total_median = (
-            statistics.median(jax_scipy_model_total_times) if jax_scipy_model_total_times else None
+        jax_scipy_median = (
+            statistics.median(jax_scipy_times) if jax_scipy_times else None
         )
-        speedup = legacy_median / jax_median if legacy_median is not None and jax_median else None
+        legacy_model_total_median = (
+            statistics.median(legacy_model_total_times)
+            if legacy_model_total_times
+            else None
+        )
+        jax_model_total_median = (
+            statistics.median(jax_model_total_times) if jax_model_total_times else None
+        )
+        jax_scipy_model_total_median = (
+            statistics.median(jax_scipy_model_total_times)
+            if jax_scipy_model_total_times
+            else None
+        )
+        speedup = (
+            legacy_median / jax_median
+            if legacy_median is not None and jax_median
+            else None
+        )
         scipy_speedup = (
-            legacy_median / jax_scipy_median if legacy_median is not None and jax_scipy_median else None
+            legacy_median / jax_scipy_median
+            if legacy_median is not None and jax_scipy_median
+            else None
         )
         model_total_speedup = (
             legacy_model_total_median / jax_model_total_median
@@ -182,7 +212,10 @@ def write_markdown(rows: list[dict[str, Any]], output_path: Path) -> None:
         "jax_git_commit",
         "jax_scipy_git_commit",
     )
-    lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
     for row in rows:
         values = []
         for key in headers:
@@ -196,7 +229,9 @@ def write_markdown(rows: list[dict[str, Any]], output_path: Path) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarize pgam_jax benchmark results.")
+    parser = argparse.ArgumentParser(
+        description="Summarize pgam_jax benchmark results."
+    )
     parser.add_argument("--suite", choices=("smoke", "full"))
     parser.add_argument("--results-dir", type=Path)
     parser.add_argument("--output-csv", type=Path)
@@ -208,8 +243,12 @@ def main() -> None:
     args = _parse_args()
     dirs = artifact_dirs(args.suite) if args.suite else None
     results_dir = args.results_dir or (dirs.results if dirs else RESULTS_DIR)
-    output_csv = args.output_csv or ((dirs.summaries if dirs else SUMMARIES_DIR) / "summary.csv")
-    output_md = args.output_md or ((dirs.summaries if dirs else SUMMARIES_DIR) / "summary.md")
+    output_csv = args.output_csv or (
+        (dirs.summaries if dirs else SUMMARIES_DIR) / "summary.csv"
+    )
+    output_md = args.output_md or (
+        (dirs.summaries if dirs else SUMMARIES_DIR) / "summary.md"
+    )
     rows = summarize_results(collect_results(results_dir))
     write_csv(rows, output_csv)
     write_markdown(rows, output_md)

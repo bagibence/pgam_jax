@@ -8,11 +8,19 @@ from typing import Any
 import numpy as np
 import statsmodels.api as sm
 
-from benchmarks.common import load_case, prediction_summary, read_json, runtime_metadata, write_json
+from benchmarks.common import (
+    load_case,
+    prediction_summary,
+    read_json,
+    runtime_metadata,
+    write_json,
+)
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one legacy PGAM benchmark inside Docker.")
+    parser = argparse.ArgumentParser(
+        description="Run one legacy PGAM benchmark inside Docker."
+    )
     parser.add_argument("--case", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -27,7 +35,9 @@ def _build_smooth_handler(x: np.ndarray, metadata: dict[str, Any]):
     from PGAM.GAM_library import smooths_handler
 
     sm_handler = smooths_handler()
-    knots = np.linspace(metadata["lower_bound"], metadata["upper_bound"], metadata["n_knots"])
+    knots = np.linspace(
+        metadata["lower_bound"], metadata["upper_bound"], metadata["n_knots"]
+    )
     for idx in range(metadata["n_smooths"]):
         sm_handler.add_smooth(
             f"x{idx}",
@@ -90,7 +100,9 @@ def main() -> None:
     predict_s = time.perf_counter() - predict_t0
 
     args.prediction_output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(args.prediction_output, prediction=prediction, rate_true=rate_true)
+    np.savez_compressed(
+        args.prediction_output, prediction=prediction, rate_true=rate_true
+    )
 
     payload = {
         "backend": "legacy_pgam_docker_cpu",
@@ -109,7 +121,10 @@ def main() -> None:
         },
         "metrics": prediction_summary(y, prediction),
         "prediction_path": str(args.prediction_output),
-        "runtime": runtime_metadata(Path("/benchmarks").resolve().parent, ("PGAM", "numpy", "scipy", "statsmodels")),
+        "runtime": runtime_metadata(
+            Path("/benchmarks").resolve().parent,
+            ("PGAM", "numpy", "scipy", "statsmodels"),
+        ),
     }
     write_json(args.output, payload)
     print(args.output)

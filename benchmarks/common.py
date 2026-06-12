@@ -30,7 +30,12 @@ class ArtifactDirs:
 def artifact_dirs(name: str | None = None) -> ArtifactDirs:
     """Return artifact directories, optionally namespaced by suite/run name."""
     root = ARTIFACTS_DIR / name if name else ARTIFACTS_DIR
-    return ArtifactDirs(root=root, cases=root / "cases", results=root / "results", summaries=root / "summaries")
+    return ArtifactDirs(
+        root=root,
+        cases=root / "cases",
+        results=root / "results",
+        summaries=root / "summaries",
+    )
 
 
 DEFAULT_ARTIFACT_DIRS = artifact_dirs()
@@ -151,7 +156,9 @@ def runtime_metadata(repo_root: Path, packages: tuple[str, ...]) -> dict[str, An
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     """Write indented JSON with stable key ordering."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def read_json(path: Path) -> dict[str, Any]:

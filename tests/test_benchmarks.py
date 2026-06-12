@@ -69,7 +69,9 @@ def test_should_run_jax_reruns_results_from_other_commits(tmp_path):
 
     assert _should_run_jax(result_path, "commit_a", overwrite=False)
 
-    result_path.write_text(json.dumps({"runtime": {"git_commit": "commit_a"}}), encoding="utf-8")
+    result_path.write_text(
+        json.dumps({"runtime": {"git_commit": "commit_a"}}), encoding="utf-8"
+    )
     assert not _should_run_jax(result_path, "commit_a", overwrite=False)
     assert _should_run_jax(result_path, "commit_b", overwrite=False)
     assert _should_run_jax(result_path, "commit_a", overwrite=True)
