@@ -31,6 +31,11 @@ JAX_VARIANT_BACKENDS = {
     "scipy": "pgam_jax_scipy_cpu",
 }
 
+# Docker/CLI exit codes (daemon unreachable, image missing, command not
+# executable). These signal an environment problem affecting every case, not a
+# legacy-fit crash, so they abort the run instead of being recorded as failures.
+DOCKER_INFRA_EXIT_CODES = frozenset({125, 126, 127})
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the pgam_jax benchmark matrix.")
@@ -57,11 +62,73 @@ def _run(command: list[str], env: dict[str, str] | None = None) -> None:
     subprocess.run(command, check=True, env=env)
 
 
-def _run_legacy(command: list[str], output_path: Path) -> None:
+def _tail(text: str, max_chars: int) -> str:
+    """Return the trailing portion of ``text`` for compact error storage."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return "...\n" + text[-max_chars:]
+
+
+def _write_legacy_failure(
+    output_path: Path,
+    metadata: dict,
+    returncode: int,
+    error_tail: str,
+    docker_wall_s: float,
+) -> None:
+    """Record a crashed legacy fit as a result so the matrix can continue."""
+    write_json(
+        output_path,
+        {
+            "backend": "legacy_pgam_docker_cpu",
+            "status": "failed",
+            "case": metadata,
+            "timings_s": {"docker_wall": docker_wall_s},
+            "error": {"returncode": returncode, "stderr_tail": error_tail},
+            "runtime": {"git_commit": None, "git_dirty": None},
+        },
+    )
+
+
+def _run_legacy(command: list[str], output_path: Path, metadata: dict) -> None:
+    """Run one legacy case, recording fit crashes instead of aborting.
+
+    A non-zero worker exit (the legacy fit raising, e.g. an overflow in the GCV
+    objective) is captured as a ``status: "failed"`` result so the rest of the
+    matrix still runs. Docker/CLI failures (exit 125/126/127) signal an
+    environment problem affecting every case and re-raise.
+    """
+    print(" ".join(command), flush=True)
     t0 = time.perf_counter()
-    _run(command, env=default_cpu_env())
+    completed = subprocess.run(
+        command, env=default_cpu_env(), stderr=subprocess.PIPE, text=True
+    )
+    docker_wall_s = time.perf_counter() - t0
+    stderr = completed.stderr or ""
+
+    if completed.returncode != 0:
+        if completed.returncode in DOCKER_INFRA_EXIT_CODES:
+            print(stderr, flush=True)
+            raise subprocess.CalledProcessError(
+                completed.returncode, command, stderr=stderr
+            )
+        error_tail = _tail(stderr, max_chars=4000)
+        print(
+            f"{output_path.name}: legacy fit failed (exit {completed.returncode}); "
+            "recording failure and continuing.",
+            flush=True,
+        )
+        if error_tail:
+            print(error_tail, flush=True)
+        _write_legacy_failure(
+            output_path, metadata, completed.returncode, error_tail, docker_wall_s
+        )
+        return
+
     payload = read_json(output_path)
-    payload.setdefault("timings_s", {})["docker_wall"] = time.perf_counter() - t0
+    payload.setdefault("status", "ok")
+    payload.setdefault("timings_s", {})["docker_wall"] = docker_wall_s
     write_json(output_path, payload)
 
 
@@ -149,6 +216,7 @@ def _run_case_legacy(
                 max_iter=args.max_iter,
             ),
             output_path,
+            read_json(metadata_path),
         )
 
 

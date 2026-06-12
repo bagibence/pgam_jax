@@ -106,6 +106,7 @@ def main() -> None:
 
     payload = {
         "backend": "legacy_pgam_docker_cpu",
+        "status": "ok",
         "case": metadata,
         "timings_s": {
             "load": load_s,

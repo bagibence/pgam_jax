@@ -58,6 +58,21 @@ pinned. Pass `--overwrite-results` to force re-running everything. Running
 from a repository with uncommitted changes prints a warning because the
 commit stamp then cannot reproduce the benchmarked code.
 
+## Failure Handling
+
+Legacy PGAM can crash on large, flexible models (for example 10 smooths with
+24 basis functions): its GCV objective overflows and feeds a non-finite
+matrix to an SVD, which raises. Rather than aborting the whole matrix, the
+runner captures such a crash as a result with `status: "failed"` and the
+trailing stderr, then continues to the next case. Successful results carry
+`status: "ok"`. The summary tables add a `legacy_status` column, and failed
+runs are excluded from the timing medians and speedup ratios.
+
+A failed result still counts as an existing result, so it is not retried on a
+later run unless you pass `--overwrite-results`. Genuine environment problems
+(Docker daemon unreachable, image missing: exit codes 125/126/127) are not
+treated as fit failures and still abort the run.
+
 Outputs are written under suite-specific directories in `benchmarks/artifacts/`:
 
 - `smoke/cases/` and `full/cases/`: generated `.npz` arrays and JSON case metadata

@@ -40,6 +40,30 @@ def _short_commits(runs: list[tuple[Path, dict[str, Any]]]) -> str | None:
     return ",".join(sorted(commits))
 
 
+def _ok_runs(
+    runs: list[tuple[Path, dict[str, Any]]],
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Return runs that did not record a failure (a missing status counts as ok)."""
+    return [
+        (path, result)
+        for path, result in runs
+        if result.get("status", "ok") != "failed"
+    ]
+
+
+def _backend_status(runs: list[tuple[Path, dict[str, Any]]]) -> str | None:
+    """Summarize a backend's per-case statuses as ok/failed/partial, or None."""
+    if not runs:
+        return None
+    n_ok = len(_ok_runs(runs))
+    n_failed = len(runs) - n_ok
+    if n_failed == 0:
+        return "ok"
+    if n_ok == 0:
+        return "failed"
+    return f"partial:{n_ok}ok/{n_failed}failed"
+
+
 def _prediction_path(result: dict[str, Any], result_path: Path) -> Path | None:
     raw_path = result.get("prediction_path")
     if not raw_path:
@@ -79,15 +103,17 @@ def summarize_results(
     rows: list[dict[str, Any]] = []
     for case_id, by_backend in sorted(grouped.items()):
         legacy_runs = by_backend.get("legacy_pgam_docker_cpu", [])
+        legacy_ok = _ok_runs(legacy_runs)
+        legacy_status = _backend_status(legacy_runs)
         jax_runs = by_backend.get("pgam_jax_cpu", [])
         jax_scipy_runs = by_backend.get("pgam_jax_scipy_cpu", [])
-        legacy_times = [_primary_fit_time(result) for _path, result in legacy_runs]
+        legacy_times = [_primary_fit_time(result) for _path, result in legacy_ok]
         jax_times = [_primary_fit_time(result) for _path, result in jax_runs]
         jax_scipy_times = [
             _primary_fit_time(result) for _path, result in jax_scipy_runs
         ]
         legacy_model_total_times = [
-            _primary_model_total_time(result) for _path, result in legacy_runs
+            _primary_model_total_time(result) for _path, result in legacy_ok
         ]
         jax_model_total_times = [
             _primary_model_total_time(result) for _path, result in jax_runs
@@ -135,16 +161,16 @@ def summarize_results(
         )
 
         pred_rmse = None
-        if legacy_runs and jax_runs:
+        if legacy_ok and jax_runs:
             pred_rmse = _prediction_rmse(
-                _prediction_path(legacy_runs[0][1], legacy_runs[0][0]),
+                _prediction_path(legacy_ok[0][1], legacy_ok[0][0]),
                 _prediction_path(jax_runs[0][1], jax_runs[0][0]),
             )
 
         scipy_pred_rmse = None
-        if legacy_runs and jax_scipy_runs:
+        if legacy_ok and jax_scipy_runs:
             scipy_pred_rmse = _prediction_rmse(
-                _prediction_path(legacy_runs[0][1], legacy_runs[0][0]),
+                _prediction_path(legacy_ok[0][1], legacy_ok[0][0]),
                 _prediction_path(jax_scipy_runs[0][1], jax_scipy_runs[0][0]),
             )
 
@@ -156,6 +182,7 @@ def summarize_results(
                 "n_smooths": representative["case"]["n_smooths"],
                 "n_basis": representative["case"]["n_basis"],
                 "legacy_runs": len(legacy_runs),
+                "legacy_status": legacy_status,
                 "jax_runs": len(jax_runs),
                 "jax_scipy_runs": len(jax_scipy_runs),
                 "jax_git_commit": _short_commits(jax_runs),
@@ -197,6 +224,7 @@ def write_markdown(rows: list[dict[str, Any]], output_path: Path) -> None:
         "n_observations",
         "n_smooths",
         "n_basis",
+        "legacy_status",
         "legacy_fit_median_s",
         "jax_fit_warm_median_s",
         "jax_scipy_fit_warm_median_s",

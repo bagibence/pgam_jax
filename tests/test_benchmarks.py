@@ -82,6 +82,33 @@ def test_should_run_jax_reruns_results_from_other_commits(tmp_path):
     assert _should_run_jax(result_path, "commit_a", overwrite=False)
 
 
+def test_summarize_marks_failed_legacy_and_skips_its_timing(tmp_path):
+    case = {"case_id": "case", "n_observations": 20, "n_smooths": 2, "n_basis": 12}
+    failed_legacy = {
+        "backend": "legacy_pgam_docker_cpu",
+        "status": "failed",
+        "case": case,
+        "timings_s": {"docker_wall": 1.0},
+        "error": {"returncode": 1, "stderr_tail": "overflow"},
+    }
+    jax = {
+        "backend": "pgam_jax_cpu",
+        "case": case,
+        "timings_s": {"fit_warm": 0.5},
+    }
+    failed_path = tmp_path / f"{result_stem('case', 'legacy_pgam_docker_cpu', 0)}.json"
+    jax_path = tmp_path / f"{result_stem('case', 'pgam_jax_cpu', 0)}.json"
+    failed_path.write_text(json.dumps(failed_legacy), encoding="utf-8")
+    jax_path.write_text(json.dumps(jax), encoding="utf-8")
+
+    rows = summarize_results([(failed_path, failed_legacy), (jax_path, jax)])
+    row = rows[0]
+    assert row["legacy_status"] == "failed"
+    assert row["legacy_fit_median_s"] is None
+    assert row["speedup_legacy_over_jax"] is None
+    assert row["jax_fit_warm_median_s"] == 0.5
+
+
 def test_summarize_results_and_write_csv(tmp_path):
     case = {"case_id": "case", "n_observations": 20, "n_smooths": 2, "n_basis": 12}
     legacy = {
