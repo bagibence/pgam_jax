@@ -23,7 +23,7 @@ fit timing.
 
 ## Run
 
-Fast smoke run:
+Fast smoke run (legacy Docker plus both pgam_jax variants, jaxopt and scipy):
 
 ```bash
 uv run python -m benchmarks.run_matrix --suite smoke
@@ -35,17 +35,28 @@ Larger run:
 uv run python -m benchmarks.run_matrix --suite full --repetitions 5
 ```
 
+Restrict to a single pgam_jax variant:
+
+```bash
+uv run python -m benchmarks.run_matrix --suite smoke --jax-variants jaxopt
+uv run python -m benchmarks.run_matrix --suite smoke --jax-variants scipy
+```
+
 JAX-only local smoke run:
 
 ```bash
 uv run python -m benchmarks.run_matrix --suite smoke --skip-legacy
 ```
 
-JAX-only local smoke run using SciPy's L-BFGS-B path:
+## Result Reuse
 
-```bash
-uv run python -m benchmarks.run_matrix --suite smoke --skip-legacy --jax-use-scipy
-```
+Existing result files are reused instead of re-run. pgam_jax results record
+the repository commit in `runtime.git_commit`; when the current commit
+differs, the stored result is treated as stale and re-run automatically.
+Legacy results are always reused once present because the Docker image is
+pinned. Pass `--overwrite-results` to force re-running everything. Running
+from a repository with uncommitted changes prints a warning because the
+commit stamp then cannot reproduce the benchmarked code.
 
 Outputs are written under suite-specific directories in `benchmarks/artifacts/`:
 
@@ -66,6 +77,7 @@ speedup ratio because the first JAX fit may include compilation overhead.
 The `model_total_warm` timing includes nemos basis construction, `GAM`
 construction, and the warm `GAM.fit` call.
 
-When `--jax-use-scipy` is set, the JAX benchmark is written under the
-`pgam_jax_scipy_cpu` backend name and summary tables include separate
-`jax_scipy_*` columns.
+The scipy variant is written under the `pgam_jax_scipy_cpu` backend name and
+summary tables include separate `jax_scipy_*` columns. Summary tables also
+report the short git commit behind each pgam_jax backend's results so mixed
+code versions are visible at a glance.

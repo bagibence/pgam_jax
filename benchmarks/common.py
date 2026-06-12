@@ -116,11 +116,27 @@ def git_commit(repo_root: Path) -> str | None:
     return out.stdout.strip() or None
 
 
+def git_dirty(repo_root: Path) -> bool | None:
+    """Return whether ``repo_root`` has uncommitted tracked changes, or None if unknown."""
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return bool(out.stdout.strip())
+
+
 def runtime_metadata(repo_root: Path, packages: tuple[str, ...]) -> dict[str, Any]:
     """Build shared runtime metadata for benchmark result files."""
     return {
         "created_at": utc_now(),
         "git_commit": git_commit(repo_root),
+        "git_dirty": git_dirty(repo_root),
         "platform": {
             "system": platform.system(),
             "release": platform.release(),

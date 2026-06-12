@@ -28,6 +28,18 @@ def _primary_model_total_time(result: dict[str, Any]) -> float:
     return float(timings.get("model_total", timings.get("setup", 0.0) + timings["fit"]))
 
 
+def _short_commits(runs: list[tuple[Path, dict[str, Any]]]) -> str | None:
+    """Return the distinct short commits behind a backend's runs, or None."""
+    if not runs:
+        return None
+    commits = set()
+    for _path, result in runs:
+        runtime = result.get("runtime")
+        commit = runtime.get("git_commit") if isinstance(runtime, dict) else None
+        commits.add("unknown" if commit is None else str(commit)[:9])
+    return ",".join(sorted(commits))
+
+
 def _prediction_path(result: dict[str, Any], result_path: Path) -> Path | None:
     raw_path = result.get("prediction_path")
     if not raw_path:
@@ -116,6 +128,8 @@ def summarize_results(results: list[tuple[Path, dict[str, Any]]]) -> list[dict[s
                 "legacy_runs": len(legacy_runs),
                 "jax_runs": len(jax_runs),
                 "jax_scipy_runs": len(jax_scipy_runs),
+                "jax_git_commit": _short_commits(jax_runs),
+                "jax_scipy_git_commit": _short_commits(jax_scipy_runs),
                 "legacy_fit_median_s": legacy_median,
                 "jax_fit_warm_median_s": jax_median,
                 "jax_scipy_fit_warm_median_s": jax_scipy_median,
@@ -165,6 +179,8 @@ def write_markdown(rows: list[dict[str, Any]], output_path: Path) -> None:
         "model_total_speedup_legacy_over_jax_scipy",
         "prediction_rmse_first_rep",
         "prediction_rmse_scipy_first_rep",
+        "jax_git_commit",
+        "jax_scipy_git_commit",
     )
     lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
     for row in rows:

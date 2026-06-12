@@ -12,6 +12,7 @@ from benchmarks.common import (
 )
 from benchmarks.make_cases import generate_case, write_case
 from benchmarks.run_legacy_pgam import build_docker_command
+from benchmarks.run_matrix import _should_run_jax
 from benchmarks.summarize import summarize_results, write_csv
 
 
@@ -61,6 +62,22 @@ def test_prediction_summary_handles_constant_predictions():
     summary = prediction_summary(np.array([0, 1, 2]), np.ones(3))
     assert np.isnan(summary["corr_y_prediction"])
     assert summary["prediction_mean"] == 1.0
+
+
+def test_should_run_jax_reruns_results_from_other_commits(tmp_path):
+    result_path = tmp_path / "result.json"
+
+    assert _should_run_jax(result_path, "commit_a", overwrite=False)
+
+    result_path.write_text(json.dumps({"runtime": {"git_commit": "commit_a"}}), encoding="utf-8")
+    assert not _should_run_jax(result_path, "commit_a", overwrite=False)
+    assert _should_run_jax(result_path, "commit_b", overwrite=False)
+    assert _should_run_jax(result_path, "commit_a", overwrite=True)
+    # Unknown current commit cannot invalidate existing results.
+    assert not _should_run_jax(result_path, None, overwrite=False)
+
+    result_path.write_text(json.dumps({"backend": "pgam_jax_cpu"}), encoding="utf-8")
+    assert _should_run_jax(result_path, "commit_a", overwrite=False)
 
 
 def test_summarize_results_and_write_csv(tmp_path):
