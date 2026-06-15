@@ -5,7 +5,7 @@ jupyter:
       extension: .md
       format_name: markdown
       format_version: '1.3'
-      jupytext_version: 1.19.1
+      jupytext_version: 1.19.3
   kernelspec:
     display_name: Python 3 (ipykernel)
     language: python
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -42,8 +43,13 @@ RESULTS_DIR
 ```
 
 ```python
-JAX_TIMING_MODE = "warm"  # "warm" or "cold"
-JAX_BACKENDS = {"pgam_jax_cpu", "pgam_jax_scipy_cpu"}
+JAX_TIMING_MODE = "cold"  # "warm" or "cold"
+JAX_BACKENDS = {
+    "pgam_jax_cpu",
+    "pgam_jax_scipy_cpu",
+    "pgam_jax_noglm_cpu",
+    "pgam_jax_scipy_noglm_cpu",
+}
 
 if JAX_TIMING_MODE not in {"warm", "cold"}:
     raise ValueError("JAX_TIMING_MODE must be 'warm' or 'cold'.")
@@ -68,16 +74,57 @@ def backend_label(backend: str) -> str:
     labels = {
         "pgam_jax_cpu": "pgam_jax",
         "pgam_jax_scipy_cpu": "pgam_jax + SciPy",
+        "pgam_jax_noglm_cpu": "pgam_jax (no glm init)",
+        "pgam_jax_scipy_noglm_cpu": "pgam_jax + SciPy (no glm init)",
         "legacy_pgam_docker_cpu": "legacy PGAM",
     }
     return labels.get(backend, backend)
 
 
-def load_result_rows(results_dir: Path = RESULTS_DIR) -> pd.DataFrame:
+FAILURE_COLUMNS = [
+    "case_id",
+    "backend",
+    "backend_label",
+    "n_observations",
+    "n_smooths",
+    "n_basis",
+    "seed",
+    "repetition",
+    "returncode",
+    "stderr_tail",
+]
+
+
+def load_result_rows(results_dir: Path = RESULTS_DIR) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows = []
+    failures = []
     for path in sorted(results_dir.glob("*.json")):
         result = json.loads(path.read_text())
         match = RESULT_RE.match(path.stem)
+        status = result.get("status", "ok")
+        if status == "failed":
+            # A crashed fit (e.g. a legacy GCV overflow) is recorded with only a
+            # wall-clock timing and no fit/metrics, so there is nothing to plot.
+            # Keep it aside so it is reported instead of silently dropped.
+            case = result["case"]
+            error = result.get("error", {})
+            failures.append(
+                {
+                    "case_id": case["case_id"],
+                    "backend": result["backend"],
+                    "backend_label": backend_label(result["backend"]),
+                    "n_observations": case["n_observations"],
+                    "n_smooths": case["n_smooths"],
+                    "n_basis": case["n_basis"],
+                    "seed": case["seed"],
+                    "repetition": int(match["repetition"]) if match else None,
+                    "returncode": error.get("returncode"),
+                    "stderr_tail": error.get("stderr_tail"),
+                }
+            )
+            continue
+        if status != "ok":
+            raise ValueError(f"Unexpected status {status!r} in {path}.")
         case = result["case"]
         timings = result["timings_s"]
         metrics = result.get("metrics", {})
@@ -96,6 +143,7 @@ def load_result_rows(results_dir: Path = RESULTS_DIR) -> pd.DataFrame:
                 "model_total_time_s": primary_model_total_time_s(result),
                 "jax_timing_mode": JAX_TIMING_MODE if result["backend"] in JAX_BACKENDS else "legacy",
                 "use_scipy": result.get("options", {}).get("use_scipy", False),
+                "use_glm_init": result.get("options", {}).get("use_glm_init", True),
                 "load_time_s": timings.get("load"),
                 "setup_time_s": timings.get("setup", timings.get("setup_warm")),
                 "predict_time_s": timings.get("predict"),
@@ -109,20 +157,46 @@ def load_result_rows(results_dir: Path = RESULTS_DIR) -> pd.DataFrame:
             }
         )
 
+    failures_df = pd.DataFrame(failures, columns=FAILURE_COLUMNS)
+    if failures:
+        warnings.warn(
+            f"{len(failures)} benchmark run(s) failed and are excluded from the plots:\n"
+            + "\n".join(
+                f"  - {failure['case_id']} [{failure['backend_label']}] exit {failure['returncode']}"
+                for failure in failures
+            ),
+            stacklevel=2,
+        )
+
     if not rows:
         raise FileNotFoundError(
             f"No benchmark result JSONs found in {results_dir}. " "Set ARTIFACT_SUITE to 'smoke', 'full', or None."
         )
 
     df = pd.DataFrame(rows)
-    ordered_backends = ["legacy PGAM", "pgam_jax", "pgam_jax + SciPy"]
+    ordered_backends = [
+        "legacy PGAM",
+        "pgam_jax",
+        "pgam_jax + SciPy",
+        "pgam_jax (no glm init)",
+        "pgam_jax + SciPy (no glm init)",
+    ]
     df["backend_label"] = pd.Categorical(df["backend_label"], categories=ordered_backends, ordered=True)
     for column in ["n_observations", "n_smooths", "n_basis", "seed", "repetition"]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
-    return df.sort_values(["n_observations", "n_basis", "n_smooths", "seed", "backend_label", "repetition"])
+    df = df.sort_values(["n_observations", "n_basis", "n_smooths", "seed", "backend_label", "repetition"])
+    return df, failures_df
 
 
-results = load_result_rows()
+results, failures = load_result_rows()
+```
+
+Runs that crashed during the matrix are recorded with `status: "failed"` and no
+fit/metrics, so they cannot be plotted. They are listed here (and warned about
+at load time) so excluded cases stay visible.
+
+```python
+failures
 ```
 
 ```python
@@ -315,7 +389,12 @@ for metric in [
     "prediction_std",
 ]:
     legacy_col = f"{metric}__legacy PGAM"
-    for backend in ["pgam_jax", "pgam_jax + SciPy"]:
+    for backend in [
+        "pgam_jax",
+        "pgam_jax + SciPy",
+        "pgam_jax (no glm init)",
+        "pgam_jax + SciPy (no glm init)",
+    ]:
         backend_col = f"{metric}__{backend}"
         if legacy_col in score_wide and backend_col in score_wide:
             score_wide[f"{metric}__delta_{backend}"] = score_wide[backend_col] - score_wide[legacy_col]
@@ -332,7 +411,12 @@ delta_labels = {
 
 delta_rows = []
 for metric, label in delta_labels.items():
-    for backend in ["pgam_jax", "pgam_jax + SciPy"]:
+    for backend in [
+        "pgam_jax",
+        "pgam_jax + SciPy",
+        "pgam_jax (no glm init)",
+        "pgam_jax + SciPy (no glm init)",
+    ]:
         column = f"{metric}__delta_{backend}"
         if column not in score_wide:
             continue

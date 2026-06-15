@@ -6,6 +6,7 @@ from benchmarks.common import (
     ARTIFACTS_DIR,
     CaseSpec,
     artifact_dirs,
+    jax_backend_name,
     prediction_summary,
     read_json,
     result_stem,
@@ -107,6 +108,79 @@ def test_summarize_marks_failed_legacy_and_skips_its_timing(tmp_path):
     assert row["legacy_fit_median_s"] is None
     assert row["speedup_legacy_over_jax"] is None
     assert row["jax_fit_warm_median_s"] == 0.5
+
+
+def test_summarize_marks_failed_jax_and_skips_its_timing(tmp_path):
+    case = {"case_id": "case", "n_observations": 20, "n_smooths": 2, "n_basis": 12}
+    legacy = {
+        "backend": "legacy_pgam_docker_cpu",
+        "status": "ok",
+        "case": case,
+        "timings_s": {"fit": 2.0},
+    }
+    failed_jax = {
+        "backend": "pgam_jax_cpu",
+        "status": "failed",
+        "case": case,
+        "timings_s": {"wall": 1.0},
+        "error": {"returncode": 1, "stderr_tail": "nan"},
+    }
+    legacy_path = tmp_path / f"{result_stem('case', 'legacy_pgam_docker_cpu', 0)}.json"
+    failed_path = tmp_path / f"{result_stem('case', 'pgam_jax_cpu', 0)}.json"
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+    failed_path.write_text(json.dumps(failed_jax), encoding="utf-8")
+
+    rows = summarize_results([(legacy_path, legacy), (failed_path, failed_jax)])
+    row = rows[0]
+    assert row["jax_status"] == "failed"
+    assert row["jax_fit_warm_median_s"] is None
+    assert row["speedup_legacy_over_jax"] is None
+    assert row["legacy_fit_median_s"] == 2.0
+
+
+def test_jax_backend_name_maps_scipy_and_glm_init():
+    assert jax_backend_name(use_scipy=False, use_glm_init=True) == "pgam_jax_cpu"
+    assert jax_backend_name(use_scipy=True, use_glm_init=True) == "pgam_jax_scipy_cpu"
+    assert jax_backend_name(use_scipy=False, use_glm_init=False) == "pgam_jax_noglm_cpu"
+    assert (
+        jax_backend_name(use_scipy=True, use_glm_init=False)
+        == "pgam_jax_scipy_noglm_cpu"
+    )
+
+
+def test_summarize_includes_noglm_backends(tmp_path):
+    case = {"case_id": "case", "n_observations": 20, "n_smooths": 2, "n_basis": 12}
+    legacy = {
+        "backend": "legacy_pgam_docker_cpu",
+        "case": case,
+        "timings_s": {"fit": 2.0},
+    }
+    jax_noglm = {
+        "backend": "pgam_jax_noglm_cpu",
+        "case": case,
+        "timings_s": {"fit_warm": 0.5},
+    }
+    jax_scipy_noglm = {
+        "backend": "pgam_jax_scipy_noglm_cpu",
+        "case": case,
+        "timings_s": {"fit_warm": 1.0},
+    }
+    runs = []
+    for backend, result in (
+        ("legacy_pgam_docker_cpu", legacy),
+        ("pgam_jax_noglm_cpu", jax_noglm),
+        ("pgam_jax_scipy_noglm_cpu", jax_scipy_noglm),
+    ):
+        path = tmp_path / f"{result_stem('case', backend, 0)}.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        runs.append((path, result))
+
+    row = summarize_results(runs)[0]
+    assert row["jax_noglm_status"] == "ok"
+    assert row["jax_noglm_fit_warm_median_s"] == 0.5
+    assert row["speedup_legacy_over_jax_noglm"] == 4.0
+    assert row["jax_scipy_noglm_fit_warm_median_s"] == 1.0
+    assert row["speedup_legacy_over_jax_scipy_noglm"] == 2.0
 
 
 def test_summarize_results_and_write_csv(tmp_path):

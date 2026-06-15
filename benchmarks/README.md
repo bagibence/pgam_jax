@@ -42,6 +42,16 @@ uv run python -m benchmarks.run_matrix --suite smoke --jax-variants jaxopt
 uv run python -m benchmarks.run_matrix --suite smoke --jax-variants scipy
 ```
 
+Benchmark the same solvers with the GLM warm-start disabled
+(`GAM(use_glm_init=False)`) via the `_noglm` variants. These write to distinct
+backend names, so they sit alongside the default `use_glm_init=True` results in
+the same `results/` directory rather than overwriting them:
+
+```bash
+uv run python -m benchmarks.run_matrix --suite full \
+    --jax-variants jaxopt_noglm scipy_noglm --skip-legacy
+```
+
 JAX-only local smoke run:
 
 ```bash
@@ -60,18 +70,26 @@ commit stamp then cannot reproduce the benchmarked code.
 
 ## Failure Handling
 
-Legacy PGAM can crash on large, flexible models (for example 10 smooths with
-24 basis functions): its GCV objective overflows and feeds a non-finite
-matrix to an SVD, which raises. Rather than aborting the whole matrix, the
-runner captures such a crash as a result with `status: "failed"` and the
-trailing stderr, then continues to the next case. Successful results carry
-`status: "ok"`. The summary tables add a `legacy_status` column, and failed
-runs are excluded from the timing medians and speedup ratios.
+A crashing fit in either backend is captured as a result with
+`status: "failed"` and the trailing stderr, rather than aborting the whole
+matrix. Legacy PGAM, for instance, can crash on large, flexible models (10
+smooths with 24 basis functions): its GCV objective overflows and feeds a
+non-finite matrix to an SVD, which raises. Successful results carry
+`status: "ok"`. The summary tables add `legacy_status`, `jax_status`, and
+`jax_scipy_status` columns, and failed runs are excluded from the timing
+medians and speedup ratios.
 
 A failed result still counts as an existing result, so it is not retried on a
-later run unless you pass `--overwrite-results`. Genuine environment problems
-(Docker daemon unreachable, image missing: exit codes 125/126/127) are not
-treated as fit failures and still abort the run.
+later run unless you pass `--overwrite-results`. The difference between the
+backends is when a failure is considered stale: a failed pgam_jax result is
+stamped with the current commit and re-runs once the commit changes (same rule
+as successful pgam_jax results), while a failed legacy result is reused
+unconditionally because the Docker image is pinned.
+
+For the legacy backend only, genuine environment problems (Docker daemon
+unreachable, image missing: exit codes 125/126/127) are not treated as fit
+failures and still abort the run. pgam_jax has no such Docker layer, so any
+non-zero worker exit is recorded as a failure.
 
 Outputs are written under suite-specific directories in `benchmarks/artifacts/`:
 
@@ -93,6 +111,8 @@ The `model_total_warm` timing includes nemos basis construction, `GAM`
 construction, and the warm `GAM.fit` call.
 
 The scipy variant is written under the `pgam_jax_scipy_cpu` backend name and
-summary tables include separate `jax_scipy_*` columns. Summary tables also
-report the short git commit behind each pgam_jax backend's results so mixed
-code versions are visible at a glance.
+summary tables include separate `jax_scipy_*` columns. The GLM-init-disabled
+variants are written under `pgam_jax_noglm_cpu` and `pgam_jax_scipy_noglm_cpu`,
+with matching `jax_noglm_*` and `jax_scipy_noglm_*` summary columns. Summary
+tables also report the short git commit behind each pgam_jax backend's results
+so mixed code versions are visible at a glance.

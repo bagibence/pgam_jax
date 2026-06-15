@@ -208,3 +208,23 @@ def prediction_summary(y: np.ndarray, rate: np.ndarray) -> dict[str, float]:
 def result_stem(case_id: str, backend: str, repetition: int) -> str:
     """Return the stable stem for one benchmark result."""
     return f"{case_id}__{backend}__rep{repetition:02d}"
+
+
+def jax_backend_name(use_scipy: bool, use_glm_init: bool) -> str:
+    """
+    Return the backend name for a pgam_jax solver/init combination.
+
+    Shared by the worker and the matrix so the success-record name and the
+    failure-record name cannot drift.
+    """
+    if use_scipy and use_glm_init:
+        return "pgam_jax_scipy_cpu"
+    if use_scipy and not use_glm_init:
+        return "pgam_jax_scipy_noglm_cpu"
+    if not use_scipy and use_glm_init:
+        return "pgam_jax_cpu"
+    if not use_scipy and not use_glm_init:
+        return "pgam_jax_noglm_cpu"
+    raise ValueError(
+        f"Unhandled backend combination use_scipy={use_scipy!r}, use_glm_init={use_glm_init!r}."
+    )

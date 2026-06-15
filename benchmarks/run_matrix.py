@@ -11,6 +11,7 @@ from benchmarks.common import (
     default_cpu_env,
     git_commit,
     git_dirty,
+    jax_backend_name,
     read_json,
     result_stem,
     write_json,
@@ -26,10 +27,16 @@ from benchmarks.summarize import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-JAX_VARIANT_BACKENDS = {
-    "jaxopt": "pgam_jax_cpu",
-    "scipy": "pgam_jax_scipy_cpu",
+# Each pgam_jax variant maps to its (use_scipy, use_glm_init) options; the
+# backend name is derived from that combination via jax_backend_name. The
+# "_noglm" variants benchmark the same solvers with the GLM warm-start disabled.
+JAX_VARIANT_OPTIONS = {
+    "jaxopt": (False, True),
+    "scipy": (True, True),
+    "jaxopt_noglm": (False, False),
+    "scipy_noglm": (True, False),
 }
+DEFAULT_JAX_VARIANTS = ["jaxopt", "scipy"]
 
 # Docker/CLI exit codes (daemon unreachable, image missing, command not
 # executable). These signal an environment problem affecting every case, not a
@@ -46,20 +53,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jax-variants",
         nargs="+",
-        choices=sorted(JAX_VARIANT_BACKENDS),
-        default=sorted(JAX_VARIANT_BACKENDS),
-        help="pgam_jax solver variants to benchmark (default: all).",
+        choices=sorted(JAX_VARIANT_OPTIONS),
+        default=DEFAULT_JAX_VARIANTS,
+        help="pgam_jax solver variants to benchmark (default: jaxopt and scipy "
+        "with the GLM warm-start enabled; the '_noglm' variants disable it).",
     )
     parser.add_argument("--overwrite-cases", action="store_true")
     parser.add_argument("--overwrite-results", action="store_true")
     parser.add_argument("--max-iter", type=int, default=100)
     parser.add_argument("--summary-name", default="summary")
     return parser.parse_args()
-
-
-def _run(command: list[str], env: dict[str, str] | None = None) -> None:
-    print(" ".join(command), flush=True)
-    subprocess.run(command, check=True, env=env)
 
 
 def _tail(text: str, max_chars: int) -> str:
@@ -70,23 +73,33 @@ def _tail(text: str, max_chars: int) -> str:
     return "...\n" + text[-max_chars:]
 
 
-def _write_legacy_failure(
+def _write_failure_result(
     output_path: Path,
+    *,
+    backend: str,
     metadata: dict,
     returncode: int,
     error_tail: str,
-    docker_wall_s: float,
+    wall_s: float,
+    wall_key: str,
+    git_commit: str | None,
 ) -> None:
-    """Record a crashed legacy fit as a result so the matrix can continue."""
+    """Record a crashed fit as a result so the matrix can continue.
+
+    The recorded ``git_commit`` matters for pgam_jax: a failure stamped with the
+    current commit is reused (not retried) until the commit changes or
+    ``--overwrite-results`` is passed. Legacy passes ``None`` because its image
+    is pinned and failures are reused unconditionally.
+    """
     write_json(
         output_path,
         {
-            "backend": "legacy_pgam_docker_cpu",
+            "backend": backend,
             "status": "failed",
             "case": metadata,
-            "timings_s": {"docker_wall": docker_wall_s},
+            "timings_s": {wall_key: wall_s},
             "error": {"returncode": returncode, "stderr_tail": error_tail},
-            "runtime": {"git_commit": None, "git_dirty": None},
+            "runtime": {"git_commit": git_commit, "git_dirty": None},
         },
     )
 
@@ -121,8 +134,15 @@ def _run_legacy(command: list[str], output_path: Path, metadata: dict) -> None:
         )
         if error_tail:
             print(error_tail, flush=True)
-        _write_legacy_failure(
-            output_path, metadata, completed.returncode, error_tail, docker_wall_s
+        _write_failure_result(
+            output_path,
+            backend="legacy_pgam_docker_cpu",
+            metadata=metadata,
+            returncode=completed.returncode,
+            error_tail=error_tail,
+            wall_s=docker_wall_s,
+            wall_key="docker_wall",
+            git_commit=None,
         )
         return
 
@@ -139,7 +159,17 @@ def _run_jax(
     prediction_output_path: Path,
     max_iter: int,
     use_scipy: bool,
+    use_glm_init: bool,
+    backend: str,
+    current_commit: str | None,
 ) -> None:
+    """Run one pgam_jax case, recording fit crashes instead of aborting.
+
+    A non-zero worker exit (the fit raising, e.g. a non-finite loss) is captured
+    as a ``status: "failed"`` result stamped with the current commit, so the
+    rest of the matrix still runs and the failure is retried only when the
+    commit changes or ``--overwrite-results`` is passed.
+    """
     command = [
         sys.executable,
         "-m",
@@ -159,7 +189,35 @@ def _run_jax(
     ]
     if use_scipy:
         command.append("--use-scipy")
-    _run(command, env=default_cpu_env())
+    if not use_glm_init:
+        command.append("--no-glm-init")
+
+    print(" ".join(command), flush=True)
+    t0 = time.perf_counter()
+    completed = subprocess.run(
+        command, env=default_cpu_env(), stderr=subprocess.PIPE, text=True
+    )
+    wall_s = time.perf_counter() - t0
+
+    if completed.returncode != 0:
+        error_tail = _tail(completed.stderr or "", max_chars=4000)
+        print(
+            f"{output_path.name}: pgam_jax fit failed (exit {completed.returncode}); "
+            "recording failure and continuing.",
+            flush=True,
+        )
+        if error_tail:
+            print(error_tail, flush=True)
+        _write_failure_result(
+            output_path,
+            backend=backend,
+            metadata=read_json(metadata_path),
+            returncode=completed.returncode,
+            error_tail=error_tail,
+            wall_s=wall_s,
+            wall_key="wall",
+            git_commit=current_commit,
+        )
 
 
 def _stored_git_commit(output_path: Path) -> str | None:
@@ -229,13 +287,12 @@ def _run_case_jax_variants(
     current_commit: str | None,
 ) -> None:
     for variant in args.jax_variants:
-        if variant == "jaxopt":
-            use_scipy = False
-        elif variant == "scipy":
-            use_scipy = True
-        else:
+        options = JAX_VARIANT_OPTIONS.get(variant)
+        if options is None:
             raise ValueError(f"Unknown jax variant {variant!r}.")
-        stem = result_stem(case_path.stem, JAX_VARIANT_BACKENDS[variant], repetition)
+        use_scipy, use_glm_init = options
+        backend = jax_backend_name(use_scipy, use_glm_init)
+        stem = result_stem(case_path.stem, backend, repetition)
         output_path = dirs.results / f"{stem}.json"
         prediction_path = dirs.results / f"{stem}.npz"
         if _should_run_jax(output_path, current_commit, args.overwrite_results):
@@ -246,6 +303,9 @@ def _run_case_jax_variants(
                 prediction_path,
                 args.max_iter,
                 use_scipy,
+                use_glm_init,
+                backend,
+                current_commit,
             )
 
 

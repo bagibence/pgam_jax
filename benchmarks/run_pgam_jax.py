@@ -12,6 +12,7 @@ import numpy as np
 
 from benchmarks.common import (
     default_cpu_env,
+    jax_backend_name,
     load_case,
     prediction_summary,
     read_json,
@@ -31,6 +32,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tol-update", type=float, default=1e-6)
     parser.add_argument("--tol-optim", type=float, default=1e-10)
     parser.add_argument("--use-scipy", action="store_true")
+    parser.add_argument("--no-glm-init", action="store_true")
     return parser.parse_args()
 
 
@@ -68,6 +70,7 @@ def _fit_once(
         tol_update=args.tol_update,
         tol_optim=args.tol_optim,
         use_scipy=args.use_scipy,
+        use_glm_init=not args.no_glm_init,
     )
     setup_s = time.perf_counter() - setup_t0
     t0 = time.perf_counter()
@@ -114,13 +117,15 @@ def main() -> None:
         args.prediction_output, prediction=prediction, rate_true=rate_true
     )
 
-    backend_name = "pgam_jax_scipy_cpu" if args.use_scipy else "pgam_jax_cpu"
+    use_glm_init = not args.no_glm_init
+    backend_name = jax_backend_name(args.use_scipy, use_glm_init)
     runtime_packages = ("pgam_jax", "jax", "jaxlib", "nemos", "numpy")
     if args.use_scipy:
         runtime_packages += ("scipy",)
 
     result = {
         "backend": backend_name,
+        "status": "ok",
         "case": metadata,
         "timings_s": {
             "load": load_s,
@@ -143,6 +148,7 @@ def main() -> None:
         },
         "options": {
             "use_scipy": args.use_scipy,
+            "use_glm_init": use_glm_init,
         },
         "metrics": prediction_summary(y, prediction),
         "prediction_path": str(args.prediction_output),
