@@ -9,9 +9,9 @@ from pathlib import Path
 from benchmarks.common import (
     artifact_dirs,
     default_cpu_env,
-    git_commit,
-    git_dirty,
     jax_backend_name,
+    pgam_jax_dirty,
+    pgam_jax_tree,
     read_json,
     result_stem,
     write_json,
@@ -82,14 +82,14 @@ def _write_failure_result(
     error_tail: str,
     wall_s: float,
     wall_key: str,
-    git_commit: str | None,
+    pgam_jax_tree: str | None,
 ) -> None:
     """Record a crashed fit as a result so the matrix can continue.
 
-    The recorded ``git_commit`` matters for pgam_jax: a failure stamped with the
-    current commit is reused (not retried) until the commit changes or
-    ``--overwrite-results`` is passed. Legacy passes ``None`` because its image
-    is pinned and failures are reused unconditionally.
+    The recorded ``pgam_jax_tree`` matters for pgam_jax: a failure stamped with
+    the current library tree is reused (not retried) until the ``src/pgam_jax``
+    source changes or ``--overwrite-results`` is passed. Legacy passes ``None``
+    because its image is pinned and failures are reused unconditionally.
     """
     write_json(
         output_path,
@@ -99,7 +99,7 @@ def _write_failure_result(
             "case": metadata,
             "timings_s": {wall_key: wall_s},
             "error": {"returncode": returncode, "stderr_tail": error_tail},
-            "runtime": {"git_commit": git_commit, "git_dirty": None},
+            "runtime": {"pgam_jax_tree": pgam_jax_tree, "git_dirty": None},
         },
     )
 
@@ -142,7 +142,7 @@ def _run_legacy(command: list[str], output_path: Path, metadata: dict) -> None:
             error_tail=error_tail,
             wall_s=docker_wall_s,
             wall_key="docker_wall",
-            git_commit=None,
+            pgam_jax_tree=None,
         )
         return
 
@@ -161,14 +161,14 @@ def _run_jax(
     use_scipy: bool,
     use_glm_init: bool,
     backend: str,
-    current_commit: str | None,
+    current_tree: str | None,
 ) -> None:
     """Run one pgam_jax case, recording fit crashes instead of aborting.
 
     A non-zero worker exit (the fit raising, e.g. a non-finite loss) is captured
-    as a ``status: "failed"`` result stamped with the current commit, so the
-    rest of the matrix still runs and the failure is retried only when the
-    commit changes or ``--overwrite-results`` is passed.
+    as a ``status: "failed"`` result stamped with the current library tree, so
+    the rest of the matrix still runs and the failure is retried only when the
+    ``src/pgam_jax`` source changes or ``--overwrite-results`` is passed.
     """
     command = [
         sys.executable,
@@ -216,12 +216,12 @@ def _run_jax(
             error_tail=error_tail,
             wall_s=wall_s,
             wall_key="wall",
-            git_commit=current_commit,
+            pgam_jax_tree=current_tree,
         )
 
 
-def _stored_git_commit(output_path: Path) -> str | None:
-    """Return the commit recorded in an existing result file, or None."""
+def _stored_pgam_jax_tree(output_path: Path) -> str | None:
+    """Return the pgam_jax library tree recorded in an existing result file, or None."""
     try:
         payload = read_json(output_path)
     except (OSError, ValueError):
@@ -229,26 +229,28 @@ def _stored_git_commit(output_path: Path) -> str | None:
     runtime = payload.get("runtime")
     if not isinstance(runtime, dict):
         return None
-    return runtime.get("git_commit")
+    return runtime.get("pgam_jax_tree")
 
 
 def _should_run_jax(
-    output_path: Path, current_commit: str | None, overwrite: bool
+    output_path: Path, current_tree: str | None, overwrite: bool
 ) -> bool:
     """Decide whether a pgam_jax result needs (re-)running.
 
     Existing results are reused only when they were produced from the current
-    repository commit; results from another commit are stale and re-run.
+    ``src/pgam_jax`` library source (identified by its git tree hash); results
+    from another library tree are stale and re-run. Benchmark-harness-only
+    changes leave the tree unchanged, so they no longer trigger re-runs.
     """
     if overwrite or not output_path.exists():
         return True
-    if current_commit is None:
+    if current_tree is None:
         return False
-    stored_commit = _stored_git_commit(output_path)
-    if stored_commit == current_commit:
+    stored_tree = _stored_pgam_jax_tree(output_path)
+    if stored_tree == current_tree:
         return False
     print(
-        f"{output_path.name}: existing result is from commit {stored_commit}; re-running at {current_commit}.",
+        f"{output_path.name}: existing result is from pgam_jax tree {stored_tree}; re-running at {current_tree}.",
         flush=True,
     )
     return True
@@ -284,7 +286,7 @@ def _run_case_jax_variants(
     case_path: Path,
     metadata_path: Path,
     repetition: int,
-    current_commit: str | None,
+    current_tree: str | None,
 ) -> None:
     for variant in args.jax_variants:
         options = JAX_VARIANT_OPTIONS.get(variant)
@@ -295,7 +297,7 @@ def _run_case_jax_variants(
         stem = result_stem(case_path.stem, backend, repetition)
         output_path = dirs.results / f"{stem}.json"
         prediction_path = dirs.results / f"{stem}.npz"
-        if _should_run_jax(output_path, current_commit, args.overwrite_results):
+        if _should_run_jax(output_path, current_tree, args.overwrite_results):
             _run_jax(
                 case_path,
                 metadata_path,
@@ -305,7 +307,7 @@ def _run_case_jax_variants(
                 use_scipy,
                 use_glm_init,
                 backend,
-                current_commit,
+                current_tree,
             )
 
 
@@ -314,11 +316,12 @@ def main() -> None:
     dirs = artifact_dirs(args.suite)
     cases = write_suite(args.suite, dirs.cases, overwrite=args.overwrite_cases)
 
-    current_commit = git_commit(REPO_ROOT)
-    if git_dirty(REPO_ROOT):
+    current_tree = pgam_jax_tree(REPO_ROOT)
+    if pgam_jax_dirty(REPO_ROOT):
         print(
-            f"WARNING: uncommitted changes in {REPO_ROOT}; results will be stamped "
-            f"with commit {current_commit} but may not be reproducible from it.",
+            f"WARNING: uncommitted changes under src/pgam_jax in {REPO_ROOT}; results "
+            f"will be stamped with library tree {current_tree} but may not be "
+            "reproducible from it.",
             flush=True,
         )
 
@@ -328,7 +331,7 @@ def main() -> None:
                 _run_case_legacy(args, dirs, case_path, metadata_path, repetition)
             if not args.skip_jax:
                 _run_case_jax_variants(
-                    args, dirs, case_path, metadata_path, repetition, current_commit
+                    args, dirs, case_path, metadata_path, repetition, current_tree
                 )
 
     rows = summarize_results(collect_results(dirs.results))

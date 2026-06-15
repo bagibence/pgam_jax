@@ -136,12 +136,61 @@ def git_dirty(repo_root: Path) -> bool | None:
     return bool(out.stdout.strip())
 
 
+PGAM_JAX_SOURCE = "src/pgam_jax"
+
+
+def pgam_jax_tree(repo_root: Path, ref: str = "HEAD") -> str | None:
+    """
+    Return the git tree hash of the pgam_jax library source at ``ref``.
+
+    This is the staleness key for cached pgam_jax results: the tree hash changes
+    only when files under ``src/pgam_jax`` change, so benchmark-harness-only
+    commits no longer invalidate results. Passing a specific commit ``ref``
+    yields the library tree that produced a result recorded at that commit,
+    which is how older results are re-stamped.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", f"{ref}:{PGAM_JAX_SOURCE}"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def pgam_jax_dirty(repo_root: Path) -> bool | None:
+    """Return whether the pgam_jax library source has uncommitted changes, or None if unknown."""
+    try:
+        out = subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                "--",
+                PGAM_JAX_SOURCE,
+            ],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return bool(out.stdout.strip())
+
+
 def runtime_metadata(repo_root: Path, packages: tuple[str, ...]) -> dict[str, Any]:
     """Build shared runtime metadata for benchmark result files."""
     return {
         "created_at": utc_now(),
         "git_commit": git_commit(repo_root),
         "git_dirty": git_dirty(repo_root),
+        "pgam_jax_tree": pgam_jax_tree(repo_root),
         "platform": {
             "system": platform.system(),
             "release": platform.release(),

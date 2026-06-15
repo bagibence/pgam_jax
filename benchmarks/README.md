@@ -60,13 +60,25 @@ uv run python -m benchmarks.run_matrix --suite smoke --skip-legacy
 
 ## Result Reuse
 
-Existing result files are reused instead of re-run. pgam_jax results record
-the repository commit in `runtime.git_commit`; when the current commit
-differs, the stored result is treated as stale and re-run automatically.
-Legacy results are always reused once present because the Docker image is
-pinned. Pass `--overwrite-results` to force re-running everything. Running
-from a repository with uncommitted changes prints a warning because the
-commit stamp then cannot reproduce the benchmarked code.
+Existing result files are reused instead of re-run. pgam_jax results record the
+git tree hash of the `src/pgam_jax` library source in `runtime.pgam_jax_tree`;
+when the current library tree differs, the stored result is treated as stale and
+re-run automatically. Keying on the library tree (rather than the whole-repo
+commit) means benchmark-harness-only changes no longer invalidate results, so
+the `pgam_jax` and `pgam_jax_noglm` result sets stay comparable across harness
+commits as long as the library itself is unchanged. Legacy results are always
+reused once present because the Docker image is pinned. Pass
+`--overwrite-results` to force re-running everything. Running from a repository
+with uncommitted changes under `src/pgam_jax` prints a warning because the tree
+stamp then cannot reproduce the benchmarked code.
+
+Results produced before this scheme recorded only `runtime.git_commit`. Backfill
+the library tree onto them (derived from each result's recorded commit, no
+re-run) with:
+
+```bash
+uv run python -m benchmarks.restamp_results --suite full
+```
 
 ## Failure Handling
 
@@ -82,9 +94,9 @@ medians and speedup ratios.
 A failed result still counts as an existing result, so it is not retried on a
 later run unless you pass `--overwrite-results`. The difference between the
 backends is when a failure is considered stale: a failed pgam_jax result is
-stamped with the current commit and re-runs once the commit changes (same rule
-as successful pgam_jax results), while a failed legacy result is reused
-unconditionally because the Docker image is pinned.
+stamped with the current library tree and re-runs once the `src/pgam_jax` source
+changes (same rule as successful pgam_jax results), while a failed legacy result
+is reused unconditionally because the Docker image is pinned.
 
 For the legacy backend only, genuine environment problems (Docker daemon
 unreachable, image missing: exit codes 125/126/127) are not treated as fit

@@ -1,17 +1,21 @@
 import json
 
 import numpy as np
+import pytest
 
 from benchmarks.common import (
     ARTIFACTS_DIR,
     CaseSpec,
     artifact_dirs,
+    git_commit,
     jax_backend_name,
+    pgam_jax_tree,
     prediction_summary,
     read_json,
     result_stem,
 )
 from benchmarks.make_cases import generate_case, write_case
+from benchmarks.restamp_results import REPO_ROOT, restamp_result
 from benchmarks.run_legacy_pgam import build_docker_command
 from benchmarks.run_matrix import _should_run_jax
 from benchmarks.summarize import summarize_results, write_csv
@@ -65,22 +69,49 @@ def test_prediction_summary_handles_constant_predictions():
     assert summary["prediction_mean"] == 1.0
 
 
-def test_should_run_jax_reruns_results_from_other_commits(tmp_path):
+def test_should_run_jax_reruns_results_from_other_pgam_jax_trees(tmp_path):
     result_path = tmp_path / "result.json"
 
-    assert _should_run_jax(result_path, "commit_a", overwrite=False)
+    assert _should_run_jax(result_path, "tree_a", overwrite=False)
 
     result_path.write_text(
-        json.dumps({"runtime": {"git_commit": "commit_a"}}), encoding="utf-8"
+        json.dumps({"runtime": {"pgam_jax_tree": "tree_a"}}), encoding="utf-8"
     )
-    assert not _should_run_jax(result_path, "commit_a", overwrite=False)
-    assert _should_run_jax(result_path, "commit_b", overwrite=False)
-    assert _should_run_jax(result_path, "commit_a", overwrite=True)
-    # Unknown current commit cannot invalidate existing results.
+    assert not _should_run_jax(result_path, "tree_a", overwrite=False)
+    assert _should_run_jax(result_path, "tree_b", overwrite=False)
+    assert _should_run_jax(result_path, "tree_a", overwrite=True)
+    # Unknown current library tree cannot invalidate existing results.
     assert not _should_run_jax(result_path, None, overwrite=False)
 
     result_path.write_text(json.dumps({"backend": "pgam_jax_cpu"}), encoding="utf-8")
-    assert _should_run_jax(result_path, "commit_a", overwrite=False)
+    assert _should_run_jax(result_path, "tree_a", overwrite=False)
+
+
+def test_restamp_result_backfills_tree_from_commit(tmp_path):
+    head = git_commit(REPO_ROOT)
+    expected = pgam_jax_tree(REPO_ROOT, ref="HEAD")
+    if head is None or expected is None:
+        pytest.skip("git metadata unavailable")
+
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps({"backend": "pgam_jax_cpu", "runtime": {"git_commit": head}}),
+        encoding="utf-8",
+    )
+    assert restamp_result(path) == expected
+    assert read_json(path)["runtime"]["pgam_jax_tree"] == expected
+    # Idempotent: an already stamped result is skipped.
+    assert restamp_result(path) is None
+
+    # Non-pgam_jax backends are left untouched.
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(
+        json.dumps(
+            {"backend": "legacy_pgam_docker_cpu", "runtime": {"git_commit": head}}
+        ),
+        encoding="utf-8",
+    )
+    assert restamp_result(legacy) is None
 
 
 def test_summarize_marks_failed_legacy_and_skips_its_timing(tmp_path):
