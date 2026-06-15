@@ -311,6 +311,90 @@ stripplot_grid(model_total_times, f"Model total time by benchmark case; JAX={JAX
 plt.show()
 ```
 
+## Relative Speedup vs Legacy
+
+For each case the median timing is summarised per backend, and the speedup is
+computed as `legacy_time / jax_time`. A value of 2 means the JAX implementation
+finished in half the legacy time; values below 1 mean it was slower. The dashed
+line marks parity with legacy PGAM.
+
+```python
+def speedup_long(df: pd.DataFrame, time_column: str) -> pd.DataFrame:
+    summary = (
+        df.groupby(
+            ["case_id", "n_observations", "n_smooths", "n_basis", "backend_label"],
+            observed=True,
+        )[time_column]
+        .median()
+        .reset_index()
+    )
+    wide = summary.pivot(
+        index=["case_id", "n_observations", "n_smooths", "n_basis"],
+        columns="backend_label",
+        values=time_column,
+    )
+    legacy = wide["legacy PGAM"]
+    rows = []
+    for backend in [
+        "pgam_jax",
+        "pgam_jax + SciPy",
+        "pgam_jax (no glm init)",
+        "pgam_jax + SciPy (no glm init)",
+    ]:
+        if backend not in wide:
+            continue
+        speedup = legacy / wide[backend]
+        for (case_id, n_observations, n_smooths, n_basis), value in speedup.dropna().items():
+            rows.append(
+                {
+                    "case_id": case_id,
+                    "n_observations": n_observations,
+                    "n_smooths": n_smooths,
+                    "n_basis": n_basis,
+                    "backend_label": backend,
+                    "speedup": value,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+fit_speedups = speedup_long(results, "fit_time_s")
+model_total_speedups = speedup_long(results, "model_total_time_s")
+```
+
+```python
+def speedup_stripplot_grid(data: pd.DataFrame, title: str) -> sns.FacetGrid:
+    grid = sns.catplot(
+        data=data,
+        kind="strip",
+        row="n_observations",
+        col="n_smooths",
+        x="n_basis",
+        y="speedup",
+        hue="backend_label",
+        dodge=True,
+        jitter=0.18,
+        alpha=0.85,
+        height=3.2,
+        aspect=1.25,
+        sharey=True,
+        margin_titles=True,
+    )
+    grid.refline(y=1.0, color="0.35", linestyle="--", linewidth=1)
+    grid.set_axis_labels("basis functions", "speedup (legacy / jax)")
+    grid.set_titles(row_template="n = {row_name}", col_template="smooths = {col_name}")
+    grid.figure.subplots_adjust(top=0.92)
+    grid.figure.suptitle(title)
+    return grid
+
+
+speedup_stripplot_grid(fit_speedups, f"Fit-time speedup vs legacy PGAM; JAX={JAX_TIMING_MODE}")
+plt.show()
+
+speedup_stripplot_grid(model_total_speedups, f"Model-total-time speedup vs legacy PGAM; JAX={JAX_TIMING_MODE}")
+plt.show()
+```
+
 ## Score Comparison
 
 These panels compare the fitted solutions using metrics stored in each result
