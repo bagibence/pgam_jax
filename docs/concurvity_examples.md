@@ -279,6 +279,43 @@ direction at all?" check, but it can't distinguish which way the
 information flows. That's why `observed` and `estimate` are necessary
 complements.
 
+## Diagnosing before you fit
+
+Two of the three indices — `worst` and `estimate` — depend only on the
+design matrix, not on the fitted coefficients. They can therefore be
+read off *before* any fitting happens, just from the basis and the
+covariates. This is useful when fitting is expensive (large Poisson
+GAMs over long time series, hierarchical models with many smooths) and
+you want to rule out a design that is fundamentally non-identifiable
+before paying the optimization cost.
+
+`GAM.concurvity` accepts being called on an unfitted model and returns
+only the two coefficient-free measures in that case. The values it
+reports for `worst` and `estimate` are numerically identical to what
+you'd get after `fit` on the same inputs — they're a property of the
+basis evaluated at those inputs, not of the optimizer.
+
+```python
+# Pre-fit diagnostic on the scenario 2 (concurve) covariates.
+basis = (nmo.basis.BSplineEval(15, bounds=(float(t.min()), float(t.max())), label="s(t)")
+         + nmo.basis.BSplineEval(15, bounds=(float(x.min()), float(x.max())), label="s(x)"))
+gam_unfit = GAM(basis, use_scipy=True, maxiter=20)
+gam_unfit.concurvity((t, x), as_dataframe=True)
+```
+
+The `worst` column already shows the ~0.5 we saw post-fit in scenario
+2: the identifiability problem is visible without ever solving for
+`β̂`. If you see this kind of value at the pre-fit stage, no amount of
+clever optimization will give you stable coefficients — the right
+response is to revise the model (drop a term, combine covariates, or
+use a tensor-product interaction) before fitting.
+
+Caveat: calling `concurvity` on an unfitted model has a small side
+effect — it sets up the basis on the inputs you pass in (so it can be
+evaluated at all). A subsequent `fit(xi_train, …)` re-runs `setup_basis`
+with the training inputs and overwrites this state, so the diagnostic
+won't influence the fit.
+
 ## Reading the numbers
 
 A practical reading guide (consistent with `?mgcv::concurvity` and Wood
