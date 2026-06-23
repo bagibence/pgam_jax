@@ -37,7 +37,7 @@ dependencies = [
 
 
 [tool.uv.sources]
-PGAM = { path = "../PGAM", editable = true }
+PGAM = { git = "https://github.com/BalzaniEdoardo/PGAM.git" }
 
 # Configure package discovery for setuptools
 [tool.setuptools.packages.find]
