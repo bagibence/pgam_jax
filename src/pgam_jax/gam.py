@@ -144,9 +144,9 @@ class GAM:
         Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
         but the option is added for matching the original implementation if required.
     method :
-        Smoothing-parameter selection criterion.  ``"gcv"`` (default) uses
-        Generalized Cross-Validation; ``"reml"`` uses Restricted Maximum
-        Likelihood on the linearized working model.
+        Smoothing-parameter selection criterion.
+        ``"reml"`` (default) uses Restricted Maximum Likelihood on the linearized working model.
+        ``"gcv"`` uses Generalized Cross-Validation.
     use_glm_init :
         If no ``init_params`` are provided, ``fit`` initializes the parameters to
         zeros. When this is True, it then fits a regularized GLM (starting from
@@ -187,7 +187,7 @@ class GAM:
         use_scipy: bool = False,
         convergence_criterion: str = "gcv",
         drop_conv_basis_col: bool = False,
-        method: Literal["gcv", "reml"] = "gcv",
+        method: Literal["gcv", "reml"] = "reml",
         use_glm_init: bool = True,
     ) -> None:
         # TODO: Make basis immutable
