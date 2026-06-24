@@ -47,7 +47,12 @@ jobs:
           cache-suffix: "v2"
 
       - name: Run tests
-        run: uv run --locked --extra dev pytest -n auto
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            uv run --locked --extra dev pytest -n 0
+          else
+            uv run --locked --extra dev pytest -n auto
+          fi
 
 
   tox_check:
