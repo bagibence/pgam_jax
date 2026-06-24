@@ -47,12 +47,12 @@ jobs:
           cache-suffix: "v2"
 
       - name: Run tests on Windows
-          if: runner.os == 'Windows'
-          run: uv run --locked --extra dev pytest
+        if: runner.os == 'Windows'
+        run: uv run --locked --extra dev pytest
 
       - name: Run tests on non-Windows
-          if: runner.os != 'Windows'
-          run: uv run --locked --extra dev pytest -n auto
+        if: runner.os != 'Windows'
+        run: uv run --locked --extra dev pytest -n auto
 
 
   tox_check:
