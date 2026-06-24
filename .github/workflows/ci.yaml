@@ -46,13 +46,13 @@ jobs:
           enable-cache: true
           cache-suffix: "v2"
 
-      - name: Run tests
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            uv run --locked --extra dev pytest -n 0
-          else
-            uv run --locked --extra dev pytest -n auto
-          fi
+      - name: Run tests on Windows
+          if: runner.os == 'Windows'
+          run: uv run --locked --extra dev pytest
+
+      - name: Run tests on non-Windows
+          if: runner.os != 'Windows'
+          run: uv run --locked --extra dev pytest -n auto
 
 
   tox_check:
