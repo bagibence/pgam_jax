@@ -197,7 +197,7 @@ def laplace_reml_outer_iteration(
     impl = nemos.solvers.get_solver(outer_solver_name).implementation
     solver = impl(neg_reml, UnRegularized(), None, has_aux=False, **kwargs)
     rhos_opt, outer_state, _ = solver.run(init_rhos_tree)
-    n_iter = int(solver.get_optim_info(outer_state).num_steps)
+    n_iter = int(outer_state.stats.num_steps)
 
     beta_opt = fit_beta(
         X, y, obs_model, inverse_link_fn, S_all, rhos_opt, phi,
