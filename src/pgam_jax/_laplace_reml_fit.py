@@ -78,7 +78,7 @@ def fit_beta(
 ):
     """MAP estimate of beta: minimise the penalised negative log-likelihood.
 
-        loss(beta) = -log L(beta) + (0.5/phi) beta^T S_lam beta
+        loss(beta) = -log L(beta) + 0.5 beta^T S_lam beta
 
     Parameters
     ----------
@@ -91,7 +91,8 @@ def fit_beta(
         Pytree or (M,) array of log-smoothing parameters; raveled internally to
         align with the leading axis of ``S_all``.
     phi :
-        Positive scalar dispersion.
+        Positive scalar dispersion. Accepted for a uniform call signature but not used here.
+        Would scale both the NLL and the penalty, but the MAP's location doesn't depend on it.
     beta0 : (p,) or None
         Warm-start; zeros if None.
     solve : callable or None
@@ -108,10 +109,11 @@ def fit_beta(
 
     def penalized_nll(beta, *args):
         eta = X @ beta
+        # passing scale=phi and scaling the penalty term would give the same
         nll = -obs_model.log_likelihood(
             y, inverse_link_fn(eta), aggregate_sample_scores=jnp.sum
         )
-        return nll + 0.5 * jnp.dot(beta, S_lam @ beta) / phi
+        return nll + 0.5 * jnp.dot(beta, S_lam @ beta)
 
     if beta0 is None:
         beta0 = jnp.zeros(X.shape[1])

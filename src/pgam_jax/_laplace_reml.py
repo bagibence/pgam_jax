@@ -26,12 +26,25 @@ def laplace_reml(
 ):
     """Laplace-approximated REML at the MAP estimate.
 
-    Wood (2017) eq. 6.18:
+    Wood (2017) eq. 6.21 (Laplace approximate marginal likelihood):
 
         ℓ(ρ) = l(β̂) - (1/2φ) β̂^T S_λ β̂
-               + (1/2φ) log|S_λ|_+
+               + (1/2) log|S_λ/φ|_+
                - (1/2) log|H + S_λ/φ|
                + (M_0/2) log(2π)
+
+    with H = X^T W X / φ and M_0 = dim null(S_λ).
+
+    The code does not form these log|·/φ| determinants directly.  The prior
+    normaliser is evaluated as
+
+        (1/2) log|S_λ/φ|_+ = (1/2) log|S_λ|_+ - (1/2)(p - M_0) log φ,
+
+    where ``PenaltyHandler`` supplies the φ-free (1/2) log|S_λ|_+ and the
+    -(1/2)(p - M_0) log φ piece is added explicitly (p - M_0 = rank S_λ).  The φ
+    inside log|H + S_λ/φ| is factored out the same way inside
+    ``vbeta_and_logdet`` (its "- r log φ").  Everything reduces to the φ = 1
+    expression when φ = 1.
 
     Stability note: the sqrt and log-det of S_λ both go through
     ``PenaltyHandler.build()`` callables, which use the Wood (2011) stable
@@ -72,10 +85,10 @@ def laplace_reml(
 
     # log-likelihood
     mu = inverse_link_fn(eta)
-    ll = obs_model.log_likelihood(y, mu, aggregate_sample_scores=jnp.sum)
+    ll = obs_model.log_likelihood(y, mu, scale=phi, aggregate_sample_scores=jnp.sum)
 
     # penalty: -0.5/phi * beta^T S_lam beta
-    pen = -0.5 * jnp.einsum("i,kij,k,j->", beta_hat, S_all, lams, beta_hat) / phi
+    pen = -0.5 / phi * jnp.einsum("i,kij,k,j->", beta_hat, S_all, lams, beta_hat)
 
     # log|H + S_lam/phi| via SVD of [R; sqrt_penalty], where sqrt_penalty comes
     # from PenaltyHandler (Wood 2011 stable construction) with a zero column
@@ -90,9 +103,14 @@ def laplace_reml(
     log_dets, log_det_grads = compute_log_det_and_grad(rhos_tree)
     log_det_Slam = jtu.tree_reduce(lambda a, b: a + b, log_dets)
 
+    # (1/2) log|S_λ/φ|_+ = (1/2) log|S_λ|_+ - (1/2)(p - M_null) log φ,
+    # where p - M_null = rank S_λ.  The second piece is ρ-constant (no gradient term).
+    M_penalized = beta_hat.shape[0] - M_null
     value = (
-        ll + pen
-        + 0.5 * log_det_Slam / phi
+        ll
+        + pen
+        + 0.5 * log_det_Slam
+        - 0.5 * M_penalized * jnp.log(phi)
         - 0.5 * log_det_HpS
         + 0.5 * M_null * jnp.log(2 * jnp.pi)
     )
@@ -102,21 +120,23 @@ def laplace_reml(
 
     # ── Gradient ─────────────────────────────────────────────────────────────
     # add1 = -(0.5/phi) * lam_r * beta^T S_r beta
-    add1 = -0.5 * jnp.einsum(
-        "i,rij,j->r", beta_hat, S_all * lams[:, None, None], beta_hat
-    ) / phi
+    add1 = (
+        -0.5
+        / phi
+        * jnp.einsum("i,rij,j->r", beta_hat, S_all * lams[:, None, None], beta_hat)
+    )
 
-    # add2 = +(0.5/phi) * d log|S_lam|+/d rho
+    # add2 = +0.5 * d log|S_lam|+/d rho  (the -(M_p/2) log φ piece is ρ-constant)
     grad_log_det, _ = ravel_pytree(log_det_grads)
-    add2 = 0.5 * grad_log_det / phi
+    add2 = 0.5 * grad_log_det
 
     # add3 = -0.5 * tr(V_beta * (dH/drho_r + lam_r * S_r / phi))
-    J = dbeta_hat(beta_hat, V_beta, S_all, rho, phi)              # (M, p)
-    h = small_h(eta, y, obs_model, inverse_link_fn)               # (n,)
-    diag_XVX = jnp.sum(X * (V_beta @ X.T).T, axis=1)              # (n,)
-    q = X.T @ (h * diag_XVX)                                      # (p,)
-    tr_dH = J @ q / phi                                           # (M,)
-    tr_VS = jnp.einsum("ij,kij->k", V_beta, S_all) / phi          # (M,) — S symmetric
+    J = dbeta_hat(beta_hat, V_beta, S_all, rho, phi)  # (M, p)
+    h = small_h(eta, y, obs_model, inverse_link_fn)  # (n,)
+    diag_XVX = jnp.sum(X * (V_beta @ X.T).T, axis=1)  # (n,)
+    q = X.T @ (h * diag_XVX)  # (p,)
+    tr_dH = J @ q / phi  # (M,)
+    tr_VS = jnp.einsum("ij,kij->k", V_beta, S_all) / phi  # (M,) — S symmetric
     add3 = -0.5 * (tr_dH + lams * tr_VS)
 
     return value, add1 + add2 + add3

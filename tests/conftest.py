@@ -185,3 +185,21 @@ def gamma_gam_problem():
         obs_model=nmo_obs.GammaObservations(),
         y_draw=lambda rng, mu: rng.gamma(2.0, mu / 2.0),
     )
+
+
+@pytest.fixture(scope="module")
+def gamma_gam_problem_phi2():
+    """
+    Same geometry as ``gamma_gam_problem`` but with dispersion ``phi=2``.
+
+    Exercises the phi != 1 path of the Laplace-REML formulas.
+    The phi=1 fixtures cannot catch a dispersion-scaling error because every
+    1/phi factor collapses to 1 there.
+    """
+    return _build_gam_problem(
+        rng_seed=7,
+        obs_model=nmo_obs.GammaObservations(),
+        y_draw=lambda rng, mu: rng.gamma(2.0, mu / 2.0),
+        phi=2.0,
+    )
+

@@ -95,6 +95,17 @@ class TestLaplaceRemlGrad:
     def test_fd_gamma(self, gamma_gam_problem):
         self._fd_check(gamma_gam_problem)
 
+    def test_fd_gamma_phi2(self, gamma_gam_problem_phi2):
+        """
+        phi != 1: the full Laplace-REML gradient must still match FD.
+
+        The phi=1 cases pass even with the dispersion-scaling bug because every
+        1/phi factor is 1.  This re-runs the same envelope-theorem FD check at
+        phi=2, where a mis-scaled penalty / V_beta / log-det term makes the
+        analytical gradient diverge from the re-optimised FD gradient.
+        """
+        self._fd_check(gamma_gam_problem_phi2)
+
 
 class TestLaplaceRemlComputeFactory:
     """The custom_vjp objective: jax.value_and_grad must equal the analytical pair.
