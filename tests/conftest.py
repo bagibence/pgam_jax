@@ -69,16 +69,21 @@ def gam_design_and_penalty(K_per_smooth, x_covs):
     assert all(len(x) == len(x_covs[0]) for x in x_covs)
     N = len(x_covs[0])
 
-    bases = [nmo.basis.BSplineEval(n_basis_funcs=K_per_smooth + 1, order=4,
-                                   bounds=(float(x.min()), float(x.max())))
-             for x in x_covs]
+    bases = [
+        nmo.basis.BSplineEval(
+            n_basis_funcs=K_per_smooth + 1,
+            order=4,
+            bounds=(float(x.min()), float(x.max())),
+        )
+        for x in x_covs
+    ]
     basis = bases[0]
     for b in bases[1:]:
-        basis = basis + b   # AdditiveBasis
+        basis = basis + b  # AdditiveBasis
 
-    X_smooth = np.asarray(compute_features_identifiable(
-        basis, *x_covs, drop_conv_basis_col=False
-    ))
+    X_smooth = np.asarray(
+        compute_features_identifiable(basis, *x_covs, drop_conv_basis_col=False)
+    )
     assert X_smooth.shape == (N, M * K_per_smooth), X_smooth.shape
 
     # Sum-to-zero (mean-center) each smooth's columns so they are orthogonal to
@@ -142,7 +147,9 @@ def _build_gam_problem(rng_seed, obs_model, y_draw, phi=1.0):
     rng = np.random.default_rng(rng_seed)
     x1 = rng.uniform(0, 10, _N)
     x2 = rng.uniform(0, 10, _N)
-    X, S_all, compute_sqrt, compute_log_det_and_grad = gam_design_and_penalty(_K, [x1, x2])
+    X, S_all, compute_sqrt, compute_log_det_and_grad = gam_design_and_penalty(
+        _K, [x1, x2]
+    )
 
     P = X.shape[1]
     M = S_all.shape[0]
@@ -151,7 +158,7 @@ def _build_gam_problem(rng_seed, obs_model, y_draw, phi=1.0):
     y = jnp.asarray(y_draw(rng, np.array(exp(X @ beta_true))))
 
     rho_flat = jnp.array([0.5, 0.5])
-    rhos_tree = [rho_flat[k:k + 1] for k in range(M)]    # one (1,) array per smooth
+    rhos_tree = [rho_flat[k : k + 1] for k in range(M)]  # one (1,) array per smooth
     beta_hat = fit_beta(X, y, obs_model, exp, S_all, rho_flat, phi)
     V_beta, V_beta_inv, log_det_HpS = make_vbeta(
         beta_hat, X, y, obs_model, exp, compute_sqrt, rhos_tree, phi
@@ -160,12 +167,21 @@ def _build_gam_problem(rng_seed, obs_model, y_draw, phi=1.0):
     # Analytical for this fixture; avoids relying on numerical matrix_rank.
     M_null = 1 + 2 * M
     return dict(
-        X=X, y=y, obs=obs_model, inv_link=exp,
-        S_all=S_all, rho=rho_flat, rhos_tree=rhos_tree, phi=phi,
+        X=X,
+        y=y,
+        obs=obs_model,
+        inv_link=exp,
+        S_all=S_all,
+        rho=rho_flat,
+        rhos_tree=rhos_tree,
+        phi=phi,
         compute_sqrt=compute_sqrt,
         compute_log_det_and_grad=compute_log_det_and_grad,
-        beta_hat=beta_hat, V_beta=V_beta, V_beta_inv=V_beta_inv,
-        log_det_HpS=log_det_HpS, M_null=M_null,
+        beta_hat=beta_hat,
+        V_beta=V_beta,
+        V_beta_inv=V_beta_inv,
+        log_det_HpS=log_det_HpS,
+        M_null=M_null,
     )
 
 
@@ -202,4 +218,3 @@ def gamma_gam_problem_phi2():
         y_draw=lambda rng, mu: rng.gamma(2.0, mu / 2.0),
         phi=2.0,
     )
-

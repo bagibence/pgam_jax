@@ -6,8 +6,6 @@ Statsmodels terminology:
 3. variance: the variance function of the observation model
 """
 
-from functools import wraps
-
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -15,9 +13,9 @@ from jaxopt import LBFGS, LBFGSB, ScipyBoundedMinimize, ScipyMinimize
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
 
-FLOAT_EPS = jnp.finfo(float).eps
-
 from ._utils import elementwise_derivative as _elementwise_derivative
+
+FLOAT_EPS = jnp.finfo(float).eps
 
 
 def tree_concat(tree1, tree2, axis):

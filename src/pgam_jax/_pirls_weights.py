@@ -29,10 +29,10 @@ import jax.numpy as jnp
 
 from ._utils import elementwise_derivative
 
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _log_lik_vec(
     eta_vec: jnp.ndarray,
@@ -47,13 +47,17 @@ def _log_lik_vec(
 
 def _make_w_fn(y_vec, obs_model, inverse_link_fn):
     """Return w(η) = -d²logf/dη² as a callable, for internal differentiation."""
-    nll = lambda eta: -_log_lik_vec(eta, y_vec, obs_model, inverse_link_fn)
+
+    def nll(eta):
+        return -_log_lik_vec(eta, y_vec, obs_model, inverse_link_fn)
+
     return elementwise_derivative(elementwise_derivative(nll))
 
 
 # ---------------------------------------------------------------------------
 # Public API — higher-order weight derivatives consumed by Components D, F, G
 # ---------------------------------------------------------------------------
+
 
 def dw_dmu(
     eta_vec: jnp.ndarray,
@@ -63,7 +67,7 @@ def dw_dmu(
 ) -> jnp.ndarray:
     """dw/dμ evaluated at μ = g⁻¹(η), shape (n,)."""
     w_fn = _make_w_fn(y_vec, obs_model, inverse_link_fn)
-    dw_deta  = elementwise_derivative(w_fn)(eta_vec)
+    dw_deta = elementwise_derivative(w_fn)(eta_vec)
     dmu_deta = elementwise_derivative(inverse_link_fn)(eta_vec)
     return dw_deta / dmu_deta
 
@@ -75,13 +79,15 @@ def d2w_dmu2(
     inverse_link_fn: Callable,
 ) -> jnp.ndarray:
     """d²w/dμ² evaluated at μ = g⁻¹(η), shape (n,)."""
-    w_fn  = _make_w_fn(y_vec, obs_model, inverse_link_fn)
+    w_fn = _make_w_fn(y_vec, obs_model, inverse_link_fn)
     dw_fn = elementwise_derivative(w_fn)
-    dw_deta    = dw_fn(eta_vec)
-    d2w_deta2  = elementwise_derivative(dw_fn)(eta_vec)
-    dmu_deta   = elementwise_derivative(inverse_link_fn)(eta_vec)
-    d2mu_deta2 = elementwise_derivative(elementwise_derivative(inverse_link_fn))(eta_vec)
-    return (d2w_deta2 * dmu_deta - dw_deta * d2mu_deta2) / dmu_deta ** 3
+    dw_deta = dw_fn(eta_vec)
+    d2w_deta2 = elementwise_derivative(dw_fn)(eta_vec)
+    dmu_deta = elementwise_derivative(inverse_link_fn)(eta_vec)
+    d2mu_deta2 = elementwise_derivative(elementwise_derivative(inverse_link_fn))(
+        eta_vec
+    )
+    return (d2w_deta2 * dmu_deta - dw_deta * d2mu_deta2) / dmu_deta**3
 
 
 def small_h(
@@ -102,8 +108,8 @@ def deriv_small_h(
     inverse_link_fn: Callable,
 ) -> jnp.ndarray:
     """dh/dμ = d²w/dη² / (dμ/dη), shape (n,)."""
-    w_fn  = _make_w_fn(y_vec, obs_model, inverse_link_fn)
+    w_fn = _make_w_fn(y_vec, obs_model, inverse_link_fn)
     dw_fn = elementwise_derivative(w_fn)
     d2w_deta2 = elementwise_derivative(dw_fn)(eta_vec)
-    dmu_deta  = elementwise_derivative(inverse_link_fn)(eta_vec)
+    dmu_deta = elementwise_derivative(inverse_link_fn)(eta_vec)
     return d2w_deta2 / dmu_deta

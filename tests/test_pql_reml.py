@@ -14,10 +14,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from nemos.inverse_link_function_utils import identity as _identity
 
 from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pql_reml import reml_compute_factory
-from nemos.inverse_link_function_utils import identity as _identity
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -31,13 +31,17 @@ def _build_ph_and_factory(penalty_tree):
     compute_sqrt, compute_log_det_and_grad = ph.build()
 
     id_fns = tuple(_identity for _ in range(n_smooths))
-    return reml_compute_factory(
-        compute_sqrt=compute_sqrt,
-        compute_log_det_and_grad=compute_log_det_and_grad,
-        positive_mon_func=jnp.exp,
-        apply_identifiability_columns=id_fns,
-        apply_identifiability=id_fns,
-    ), compute_sqrt, compute_log_det_and_grad
+    return (
+        reml_compute_factory(
+            compute_sqrt=compute_sqrt,
+            compute_log_det_and_grad=compute_log_det_and_grad,
+            positive_mon_func=jnp.exp,
+            apply_identifiability_columns=id_fns,
+            apply_identifiability=id_fns,
+        ),
+        compute_sqrt,
+        compute_log_det_and_grad,
+    )
 
 
 def _load_and_run(filename):

@@ -3,12 +3,12 @@
 float64 is enabled globally in conftest.py.
 """
 
-import numpy as np
-import pytest
 import jax.numpy as jnp
 import nemos.observation_models as nmo_obs
-from nemos.inverse_link_function_utils import exp
+import numpy as np
+import pytest
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
+from nemos.inverse_link_function_utils import exp
 
 from pgam_jax._laplace_reml_vbeta import vbeta_and_logdet
 from pgam_jax.iterative_optim import model_constructors_for_weights_and_pseudo_data
@@ -16,8 +16,8 @@ from pgam_jax.iterative_optim import model_constructors_for_weights_and_pseudo_d
 N, P = 30, 5
 
 _OBS = nmo_obs.PoissonObservations()
-_VARIANCE_FUNC = lambda mu: mu          # Poisson: V(μ) = μ
-_LINK_FUNC = INVERSE_FUNCS[exp]         # forward link: log
+_VARIANCE_FUNC = lambda mu: mu  # Poisson: V(μ) = μ
+_LINK_FUNC = INVERSE_FUNCS[exp]  # forward link: log
 
 
 def _make_R(beta_hat, X, y, fisher_scoring=False):

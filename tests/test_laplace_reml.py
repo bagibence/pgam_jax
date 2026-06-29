@@ -25,10 +25,15 @@ _OBS_MODELS = {
 def _laplace_reml_kwargs(prob):
     """Common kwargs threading the PenaltyHandler callables and rho tree."""
     return dict(
-        beta_hat=prob["beta_hat"], X=prob["X"], y=prob["y"],
-        obs_model=prob["obs"], inverse_link_fn=prob["inv_link"],
-        S_all=prob["S_all"], rhos_tree=prob["rhos_tree"],
-        phi=prob["phi"], M_null=prob["M_null"],
+        beta_hat=prob["beta_hat"],
+        X=prob["X"],
+        y=prob["y"],
+        obs_model=prob["obs"],
+        inverse_link_fn=prob["inv_link"],
+        S_all=prob["S_all"],
+        rhos_tree=prob["rhos_tree"],
+        phi=prob["phi"],
+        M_null=prob["M_null"],
         compute_sqrt=prob["compute_sqrt"],
         compute_log_det_and_grad=prob["compute_log_det_and_grad"],
     )
@@ -52,8 +57,9 @@ class TestLaplaceRemlValue:
     def test_value_matches_value_and_grad_poisson(self, poisson_gam_problem):
         """laplace_reml(return_grad=False) == laplace_reml(return_grad=True)[0]."""
         val_only = _reml_value_only(poisson_gam_problem)
-        val, _ = laplace_reml(**_laplace_reml_kwargs(poisson_gam_problem),
-                              return_grad=True)
+        val, _ = laplace_reml(
+            **_laplace_reml_kwargs(poisson_gam_problem), return_grad=True
+        )
         np.testing.assert_allclose(float(val), val_only, rtol=1e-12)
 
 
@@ -69,7 +75,10 @@ class TestLaplaceRemlGrad:
         rho = np.asarray(prob["rho"])
         X, y, obs, inv_link = prob["X"], prob["y"], prob["obs"], prob["inv_link"]
         S_all, beta_hat, phi, M_null = (
-            prob["S_all"], prob["beta_hat"], prob["phi"], prob["M_null"],
+            prob["S_all"],
+            prob["beta_hat"],
+            prob["phi"],
+            prob["M_null"],
         )
         compute_sqrt = prob["compute_sqrt"]
         compute_ld = prob["compute_log_det_and_grad"]
@@ -78,12 +87,24 @@ class TestLaplaceRemlGrad:
 
         def reml_at_rho(r):
             r_j = jnp.asarray(r)
-            rhos_tree = [r_j[k:k + 1] for k in range(r_j.size)]
+            rhos_tree = [r_j[k : k + 1] for k in range(r_j.size)]
             b = fit_beta(X, y, obs, inv_link, S_all, r_j, phi, np.asarray(beta_hat))
-            return float(laplace_reml(
-                b, X, y, obs, inv_link, S_all, rhos_tree, phi, M_null,
-                compute_sqrt, compute_ld, return_grad=False,
-            ))
+            return float(
+                laplace_reml(
+                    b,
+                    X,
+                    y,
+                    obs,
+                    inv_link,
+                    S_all,
+                    rhos_tree,
+                    phi,
+                    M_null,
+                    compute_sqrt,
+                    compute_ld,
+                    return_grad=False,
+                )
+            )
 
         grad_fd = central_diff(reml_at_rho, rho, rel_step=1e-4)
 
@@ -116,8 +137,12 @@ class TestLaplaceRemlComputeFactory:
 
     def _check(self, prob):
         objective = laplace_reml_compute_factory(
-            prob["obs"], prob["inv_link"], prob["phi"], prob["M_null"],
-            prob["compute_sqrt"], prob["compute_log_det_and_grad"],
+            prob["obs"],
+            prob["inv_link"],
+            prob["phi"],
+            prob["M_null"],
+            prob["compute_sqrt"],
+            prob["compute_log_det_and_grad"],
             prob["rhos_tree"],
         )
         value_ad, grad_ad = jax.value_and_grad(objective)(
@@ -143,8 +168,10 @@ class TestLaplaceRemlComputeFactory:
 def _load_pgam_fixture(name):
     path = DATA_DIR / f"laplace_reml_{name}.json"
     if not path.exists():
-        pytest.skip(f"Fixture {path.name} not generated; run "
-                    "_script/generate_laplace_reml_fixtures.py")
+        pytest.skip(
+            f"Fixture {path.name} not generated; run "
+            "_script/generate_laplace_reml_fixtures.py"
+        )
     return json.loads(path.read_text())
 
 
@@ -163,7 +190,7 @@ class TestLaplaceRemlRegression:
 
         X = jnp.asarray(data["X"])
         y = jnp.asarray(data["y"])
-        S_all_np = np.asarray(data["S_all"])           # (M, P, P)
+        S_all_np = np.asarray(data["S_all"])  # (M, P, P)
         S_all = jnp.asarray(S_all_np)
         rho = jnp.asarray(data["rho"])
         beta_hat = jnp.asarray(data["beta_hat"])
@@ -181,16 +208,27 @@ class TestLaplaceRemlRegression:
             small = S[np.ix_(keep, keep)]
             ph.add(jnp.asarray(small), penalize_null_space=False)
         compute_sqrt, compute_ld = ph.build()
-        rhos_tree = [rho[k:k + 1] for k in range(rho.size)]
+        rhos_tree = [rho[k : k + 1] for k in range(rho.size)]
 
         value, grad = laplace_reml(
-            beta_hat, X, y, obs, exp, S_all, rhos_tree, phi, M_null,
-            compute_sqrt, compute_ld, return_grad=True,
+            beta_hat,
+            X,
+            y,
+            obs,
+            exp,
+            S_all,
+            rhos_tree,
+            phi,
+            M_null,
+            compute_sqrt,
+            compute_ld,
+            return_grad=True,
         )
 
         # Value bit-tight; gradient looser because PGAM computes IRLS weights
         # via closed-form and JAX via autodiff over nemos' log_likelihood —
         # same quantity, different FP operation order → ~1e-9 accumulated noise.
         np.testing.assert_allclose(float(value), data["reml_value"], rtol=1e-10)
-        np.testing.assert_allclose(np.asarray(grad), data["reml_grad"],
-                                   rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(
+            np.asarray(grad), data["reml_grad"], rtol=1e-7, atol=1e-9
+        )

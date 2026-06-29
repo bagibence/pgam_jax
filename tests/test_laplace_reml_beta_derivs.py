@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 from conftest import central_diff, fit_beta
 
-from pgam_jax._laplace_reml_beta_derivs import dH_drho, dbeta_hat
+from pgam_jax._laplace_reml_beta_derivs import dbeta_hat, dH_drho
 from pgam_jax._pirls_weights import _make_w_fn
 
 
@@ -104,4 +104,3 @@ class TestDHdrho:
     def test_fd_gamma_phi2(self, gamma_gam_problem_phi2):
         """phi != 1: dH/drho (which carries a 1/phi factor) must match FD."""
         self._fd_check(gamma_gam_problem_phi2)
-

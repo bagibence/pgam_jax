@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
+from nemos.inverse_link_function_utils import identity as _id_no_drop
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
@@ -17,7 +18,6 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
-
 from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
 from ._penalty_handler import PenaltyHandler, _drop_last_col
 from ._pql_gcv import gcv_compute_factory
@@ -28,7 +28,6 @@ from .iterative_optim import (
     pql_outer_iteration,
 )
 from .penalty_utils import compute_energy_penalty_tensor, compute_penalty_blocks
-from nemos.inverse_link_function_utils import identity as _id_no_drop
 
 
 # TODO: Should any other observation model be supported?
@@ -285,7 +284,11 @@ class GAM:
         """Construct a PenaltyHandler from the penalty tensor list."""
         ph = PenaltyHandler(non_linearity=self._positive_mon_func_for_lambda)
         id_fns = [
-            _drop_last_col if _should_drop_basis_col(b, self.drop_conv_basis_col) else _id_no_drop
+            (
+                _drop_last_col
+                if _should_drop_basis_col(b, self.drop_conv_basis_col)
+                else _id_no_drop
+            )
             for b in self.basis
         ]
         for S_tensor, id_fn in zip(penalty_tree, id_fns):
@@ -519,7 +522,7 @@ class GAM:
 
         # EDF: edf1 = 2·tr(F) − tr(F²) where F = (X'WX + S_λ)⁻¹ X'WX
         # Expressed via U1: tr(F) = ‖U1‖²_F,  tr(F²) = ‖U1'U1‖²_F  (Wood 2017 eq. 6.13)
-        edf = jnp.sum(U1 ** 2)
+        edf = jnp.sum(U1**2)
         edf1 = 2.0 * edf - jnp.sum((U1.T @ U1) ** 2)
 
         # dispersion: Poisson → 1.0; Gaussian/Gamma → Pearson χ²/dof
@@ -611,8 +614,13 @@ class GAM:
 
         if self.method == "laplace_reml":
             opt_coef, opt_pen, n_iter = self._fit_laplace_reml(
-                X, y, penalty_tree, compute_sqrt, compute_log_det_and_grad,
-                init_params, init_regularizer_strength,
+                X,
+                y,
+                penalty_tree,
+                compute_sqrt,
+                compute_log_det_and_grad,
+                init_params,
+                init_regularizer_strength,
             )
         else:
             opt_coef, opt_pen, n_iter = pql_outer_iteration(

@@ -4,9 +4,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.scipy.linalg import block_diag
-
 from conftest import central_diff, diff2_penalty
+from jax.scipy.linalg import block_diag
 
 from pgam_jax._penalty_handler import PenaltyHandler, SqrtMethod, _drop_last_col
 from pgam_jax.penalty_utils import (
@@ -22,6 +21,7 @@ ATOL = 1e-12
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="module")
 def S1():
@@ -58,6 +58,7 @@ def S_kron_null(S_kron):
 # ---------------------------------------------------------------------------
 # SINGLE
 # ---------------------------------------------------------------------------
+
 
 class TestSINGLE:
     def test_method_selected(self, S1):
@@ -103,6 +104,7 @@ class TestSINGLE:
 # SINGLE_WITH_NULL
 # ---------------------------------------------------------------------------
 
+
 class TestSINGLE_WITH_NULL:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
@@ -129,6 +131,7 @@ class TestSINGLE_WITH_NULL:
 # KRONECKER
 # ---------------------------------------------------------------------------
 
+
 class TestKRONECKER:
     def test_method_selected(self, S1):
         ph = PenaltyHandler()
@@ -154,7 +157,9 @@ class TestKRONECKER:
     def test_identifiability_shape(self, S1):
         q = S1.shape[0]
         ph = PenaltyHandler()
-        ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=_drop_last_col)
+        ph.add_kron(
+            [S1, S1], penalize_null_space=False, identifiability_fn=_drop_last_col
+        )
         B = ph.compute_sqrt([jnp.array([0.0, 0.0])])
         q_kron = q * q
         assert B.shape == (q_kron, q_kron - 1)
@@ -163,6 +168,7 @@ class TestKRONECKER:
 # ---------------------------------------------------------------------------
 # KRONECKER_WITH_NULL
 # ---------------------------------------------------------------------------
+
 
 class TestKRONECKER_WITH_NULL:
     def test_method_selected(self, S1):
@@ -188,6 +194,7 @@ class TestKRONECKER_WITH_NULL:
 # ---------------------------------------------------------------------------
 # GENERAL (k > 1 via add(), null space dropped by precompute projection)
 # ---------------------------------------------------------------------------
+
 
 class TestGENERAL:
     def test_method_selected(self, S_kron):
@@ -231,6 +238,7 @@ class TestGENERAL:
 # ---------------------------------------------------------------------------
 # Block-diagonal assembly (multiple penalties)
 # ---------------------------------------------------------------------------
+
 
 class TestBlockDiagonal:
     def test_shape_single_plus_kronecker(self, S1, S_kron):
@@ -277,13 +285,18 @@ class TestBlockDiagonal:
         q = S1.shape[0]
         B0 = B[:q, :q]
         B1 = B[q:, q:]
-        np.testing.assert_allclose(np.array(B0.T @ B0), np.array(jnp.exp(rho0) * S1), atol=ATOL)
-        np.testing.assert_allclose(np.array(B1.T @ B1), np.array(jnp.exp(rho1) * S1), atol=ATOL)
+        np.testing.assert_allclose(
+            np.array(B0.T @ B0), np.array(jnp.exp(rho0) * S1), atol=ATOL
+        )
+        np.testing.assert_allclose(
+            np.array(B1.T @ B1), np.array(jnp.exp(rho1) * S1), atol=ATOL
+        )
 
 
 # ---------------------------------------------------------------------------
 # JIT compatibility
 # ---------------------------------------------------------------------------
+
 
 class TestJIT:
     """compute_sqrt must be JIT-compilable; eager and JIT results must agree."""
@@ -300,11 +313,11 @@ class TestJIT:
     def test_singleton_groups_all_methods(self, S1, S_kron):
         """One penalty per method — every group is a singleton (linear path)."""
         ph = PenaltyHandler()
-        ph.add(S1, penalize_null_space=False)            # SINGLE
-        ph.add(S1, penalize_null_space=True)             # SINGLE_WITH_NULL
-        ph.add_kron([S1, S1], penalize_null_space=False) # KRONECKER
+        ph.add(S1, penalize_null_space=False)  # SINGLE
+        ph.add(S1, penalize_null_space=True)  # SINGLE_WITH_NULL
+        ph.add_kron([S1, S1], penalize_null_space=False)  # KRONECKER
         ph.add_kron([S1, S1], penalize_null_space=True)  # KRONECKER_WITH_NULL
-        ph.add(S_kron)                                   # GENERAL
+        ph.add(S_kron)  # GENERAL
         rhos = [
             jnp.array([0.5]),
             jnp.array([0.5, -0.5]),
@@ -318,21 +331,26 @@ class TestJIT:
         """Two penalties per method — every group has two members (vmap path)."""
         ph = PenaltyHandler()
         ph.add(S1, penalize_null_space=False)
-        ph.add(S1, penalize_null_space=False)            # SINGLE × 2
+        ph.add(S1, penalize_null_space=False)  # SINGLE × 2
         ph.add(S1, penalize_null_space=True)
-        ph.add(S1, penalize_null_space=True)             # SINGLE_WITH_NULL × 2
+        ph.add(S1, penalize_null_space=True)  # SINGLE_WITH_NULL × 2
         ph.add_kron([S1, S1], penalize_null_space=False)
-        ph.add_kron([S1, S1], penalize_null_space=False) # KRONECKER × 2
+        ph.add_kron([S1, S1], penalize_null_space=False)  # KRONECKER × 2
         ph.add_kron([S1, S1], penalize_null_space=True)
         ph.add_kron([S1, S1], penalize_null_space=True)  # KRONECKER_WITH_NULL × 2
         ph.add(S_kron)
-        ph.add(S_kron)                                   # GENERAL × 2
+        ph.add(S_kron)  # GENERAL × 2
         rhos = [
-            jnp.array([0.5]),  jnp.array([-0.5]),
-            jnp.array([0.5, -0.5]),  jnp.array([-0.5, 0.5]),
-            jnp.array([0.5, -0.5]),  jnp.array([-0.5, 0.5]),
-            jnp.array([0.5, -0.5, 0.0]),  jnp.array([-0.5, 0.5, 0.0]),
-            jnp.array([0.5, -0.5]),  jnp.array([-0.5, 0.5]),
+            jnp.array([0.5]),
+            jnp.array([-0.5]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([-0.5, 0.5]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([-0.5, 0.5]),
+            jnp.array([0.5, -0.5, 0.0]),
+            jnp.array([-0.5, 0.5, 0.0]),
+            jnp.array([0.5, -0.5]),
+            jnp.array([-0.5, 0.5]),
         ]
         self._check(ph, rhos)
 
@@ -340,6 +358,7 @@ class TestJIT:
 # ---------------------------------------------------------------------------
 # compute_log_det_and_grad
 # ---------------------------------------------------------------------------
+
 
 def _ref_log_det(S_lam):
     """Numpy reference: log|S_lam|_+ via eigenvalues."""
@@ -381,8 +400,9 @@ class TestLogDetAndGrad:
         ph = PenaltyHandler()
         ph.add(S1, penalize_null_space=True)
         ld, _ = self._ph_ld_grad(ph, [rho_arr])
-        S_lam = (float(jnp.exp(rho_arr[0])) * np.array(S1)
-                 + float(jnp.exp(rho_arr[1])) * np.array(S1_null))
+        S_lam = float(jnp.exp(rho_arr[0])) * np.array(S1) + float(
+            jnp.exp(rho_arr[1])
+        ) * np.array(S1_null)
         np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=ATOL)
 
     @pytest.mark.parametrize("rho_pen,rho_null", [(-1.0, 0.0), (0.5, -0.5)])
@@ -418,14 +438,19 @@ class TestLogDetAndGrad:
     # ---- KRONECKER_WITH_NULL -----------------------------------------------
 
     @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
-    def test_kronecker_with_null_value(self, S1, S_kron, S_kron_null, rho0, rho1, rho_null):
+    def test_kronecker_with_null_value(
+        self, S1, S_kron, S_kron_null, rho0, rho1, rho_null
+    ):
         rho_arr = jnp.array([rho0, rho1, rho_null])
         ph = PenaltyHandler()
         ph.add_kron([S1, S1], penalize_null_space=True)
         ld, _ = self._ph_ld_grad(ph, [rho_arr])
         lams = np.exp([rho0, rho1])
-        S_lam = (lams[0] * np.array(S_kron[0]) + lams[1] * np.array(S_kron[1])
-                 + np.exp(rho_null) * np.array(S_kron_null))
+        S_lam = (
+            lams[0] * np.array(S_kron[0])
+            + lams[1] * np.array(S_kron[1])
+            + np.exp(rho_null) * np.array(S_kron_null)
+        )
         np.testing.assert_allclose(ld, _ref_log_det(S_lam), atol=1e-8)
 
     @pytest.mark.parametrize("rho0,rho1,rho_null", [(-1.0, 0.5, 0.0), (0.0, 0.0, -1.0)])
@@ -515,6 +540,7 @@ class TestLogDetAndGrad:
 # build() — pre-built closures
 # ---------------------------------------------------------------------------
 
+
 class TestBuild:
     """build() returns callables equivalent to compute_sqrt / compute_log_det_and_grad."""
 
@@ -595,8 +621,12 @@ class TestBuild:
         ph1 = PenaltyHandler()
         ph1.add(S1, penalize_null_space=False)
         np.testing.assert_allclose(
-            np.array(B0.T @ B0), np.array(ph0.compute_sqrt([rho_a]).T @ ph0.compute_sqrt([rho_a])), atol=ATOL
+            np.array(B0.T @ B0),
+            np.array(ph0.compute_sqrt([rho_a]).T @ ph0.compute_sqrt([rho_a])),
+            atol=ATOL,
         )
         np.testing.assert_allclose(
-            np.array(B1.T @ B1), np.array(ph1.compute_sqrt([rho_b]).T @ ph1.compute_sqrt([rho_b])), atol=ATOL
+            np.array(B1.T @ B1),
+            np.array(ph1.compute_sqrt([rho_b]).T @ ph1.compute_sqrt([rho_b])),
+            atol=ATOL,
         )

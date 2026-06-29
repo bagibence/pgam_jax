@@ -57,16 +57,18 @@ def vbeta_and_logdet(
     del U
 
     low_vals = s < FLOAT_EPS * s.max()
-    s   = jnp.where(low_vals, 0.0, s)
+    s = jnp.where(low_vals, 0.0, s)
     V_T = _vmap_where(low_vals, 0, V_T.T).T
 
     s_safe = jnp.where(low_vals, 1.0, s)
-    s_inv  = jnp.where(low_vals, 0.0, 1.0 / s_safe)
+    s_inv = jnp.where(low_vals, 0.0, 1.0 / s_safe)
 
-    V_beta     = phi * (V_T.T * s_inv**2) @ V_T
+    V_beta = phi * (V_T.T * s_inv**2) @ V_T
     V_beta_inv = (V_T.T * s**2) @ V_T / phi
 
-    r           = jnp.sum(jnp.where(low_vals, 0.0, 1.0))
-    log_det_HpS = 2.0 * jnp.sum(jnp.where(low_vals, 0.0, jnp.log(s_safe))) - r * jnp.log(phi)
+    r = jnp.sum(jnp.where(low_vals, 0.0, 1.0))
+    log_det_HpS = 2.0 * jnp.sum(
+        jnp.where(low_vals, 0.0, jnp.log(s_safe))
+    ) - r * jnp.log(phi)
 
     return V_beta, V_beta_inv, log_det_HpS

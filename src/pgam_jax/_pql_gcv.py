@@ -15,9 +15,7 @@ FLOAT_EPS = jnp.finfo(jnp.float32).eps
 _vmap_where = jax.vmap(jnp.where, (None, None, 0), out_axes=0)
 
 
-@partial(
-    jax.jit, static_argnames=("compute_sqrt", "gamma")
-)
+@partial(jax.jit, static_argnames=("compute_sqrt", "gamma"))
 def _compute_gcv_and_states(
     regularization_strength: Any,
     penalty_tree: Any,
@@ -122,7 +120,11 @@ def _gcv_grad_compute_from_states(
 
 
 def gcv_compute_factory(
-    compute_sqrt, positive_mon_func, apply_identifiability_columns, apply_identifiability, gamma
+    compute_sqrt,
+    positive_mon_func,
+    apply_identifiability_columns,
+    apply_identifiability,
+    gamma,
 ):
     @jax.custom_vjp
     def _gcv_compute(

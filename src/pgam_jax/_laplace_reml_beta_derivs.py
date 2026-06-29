@@ -39,9 +39,9 @@ def dbeta_hat(
     J : shape (M, p)
         J[k] = d beta_hat / d rho_k.
     """
-    lams = jnp.exp(rho)                                                        # (M,)
+    lams = jnp.exp(rho)  # (M,)
     P1 = jnp.einsum("kij,j->ki", S_all * lams[:, None, None], beta_hat) / phi  # (M, p)
-    return jnp.einsum("ij,kj->ki", -V_beta, P1)                                # (M, p)
+    return jnp.einsum("ij,kj->ki", -V_beta, P1)  # (M, p)
 
 
 def dH_drho(
@@ -71,8 +71,8 @@ def dH_drho(
     fused-broadcast-matmul; ``_script/bench_dH_drho.py`` shows einsum at ~30%
     faster than the explicit fused version on CPU at production sizes.
     """
-    eta = X @ beta_hat                                                # (n,)
-    h = small_h(eta, y, obs_model, inverse_link_fn)                   # (n,)
-    XJ = X @ J.T                                                      # (n, M)
-    weights = h[:, None] * XJ                                         # (n, M)
-    return jnp.einsum("oi,oj,ok->kij", X, X, weights) / phi           # (M, p, p)
+    eta = X @ beta_hat  # (n,)
+    h = small_h(eta, y, obs_model, inverse_link_fn)  # (n,)
+    XJ = X @ J.T  # (n, M)
+    weights = h[:, None] * XJ  # (n, M)
+    return jnp.einsum("oi,oj,ok->kij", X, X, weights) / phi  # (M, p, p)

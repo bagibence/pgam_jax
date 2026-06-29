@@ -189,21 +189,44 @@ def laplace_reml_compute_factory(
     @jax.custom_vjp
     def _objective(rhos_tree, beta_hat, X, y, S_all):
         return laplace_reml(
-            beta_hat, X, y, obs_model, inverse_link_fn, S_all, rhos_tree,
-            phi, M_null, compute_sqrt, compute_log_det_and_grad, return_grad=False,
+            beta_hat,
+            X,
+            y,
+            obs_model,
+            inverse_link_fn,
+            S_all,
+            rhos_tree,
+            phi,
+            M_null,
+            compute_sqrt,
+            compute_log_det_and_grad,
+            return_grad=False,
         )
 
     def _fwd(rhos_tree, beta_hat, X, y, S_all):
         value, grad_flat = laplace_reml(
-            beta_hat, X, y, obs_model, inverse_link_fn, S_all, rhos_tree,
-            phi, M_null, compute_sqrt, compute_log_det_and_grad, return_grad=True,
+            beta_hat,
+            X,
+            y,
+            obs_model,
+            inverse_link_fn,
+            S_all,
+            rhos_tree,
+            phi,
+            M_null,
+            compute_sqrt,
+            compute_log_det_and_grad,
+            return_grad=True,
         )
         return value, unravel(grad_flat)
 
     def _bwd(grad_tree, value_bar):
         return (
             jtu.tree_map(lambda g: value_bar * g, grad_tree),
-            None, None, None, None,  # beta_hat, X, y, S_all are not differentiated
+            None,
+            None,
+            None,
+            None,  # beta_hat, X, y, S_all are not differentiated
         )
 
     _objective.defvjp(_fwd, _bwd)
