@@ -15,9 +15,8 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from nemos.inverse_link_function_utils import identity  # noqa: E402
 
-from pgam_jax._penalty_handler import PenaltyHandler, _drop_last_col  # noqa: E402
+from pgam_jax._penalty_handler import PenaltyHandler, DROP_LAST_COL, IDENTITY
 
 
 def _diff2_penalty(n):
@@ -37,21 +36,21 @@ def make_handler():
     """
     ph = PenaltyHandler()
     for q, id_fn in [
-        (8, identity),
-        (10, _drop_last_col),
-        (12, identity),
-        (15, _drop_last_col),
+        (8, IDENTITY),
+        (10, DROP_LAST_COL),
+        (12, IDENTITY),
+        (15, DROP_LAST_COL),
     ]:
         ph.add(_diff2_penalty(q), penalize_null_space=False, identifiability_fn=id_fn)
     ph.add_kron(
         [_diff2_penalty(8), _diff2_penalty(10)],
         penalize_null_space=False,
-        identifiability_fn=identity,
+        identifiability_fn=IDENTITY,
     )
     ph.add_kron(
         [_diff2_penalty(8), _diff2_penalty(10)],
         penalize_null_space=True,
-        identifiability_fn=identity,
+        identifiability_fn=IDENTITY,
     )
     S_kron_general = jnp.stack(
         [
@@ -59,7 +58,7 @@ def make_handler():
             jnp.kron(jnp.eye(6), _diff2_penalty(6)),
         ]
     )
-    ph.add(S_kron_general, penalize_null_space=True, identifiability_fn=identity)
+    ph.add(S_kron_general, penalize_null_space=True, identifiability_fn=IDENTITY)
     return ph
 
 

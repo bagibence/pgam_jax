@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Callable, Literal
 
+import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxopt import LBFGS, ScipyMinimize
@@ -18,6 +19,7 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
+from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
@@ -32,6 +34,7 @@ from .penalty_utils import (
     IDENTITY,
     compute_energy_penalty_factors,
     compute_energy_penalty_tensor,
+    compute_penalty_blocks,
     prepend_zeros_for_intercept,
 )
 
@@ -144,9 +147,23 @@ class GAM:
         Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
         but the option is added for matching the original implementation if required.
     method :
-        Smoothing-parameter selection criterion.
-        ``"reml"`` (default) uses Restricted Maximum Likelihood on the linearized working model.
-        ``"gcv"`` uses Generalized Cross-Validation.
+        Smoothing-parameter selection algorithm. Default ``"pql_reml"``.
+
+        - ``"pql_gcv"``: Generalized Cross-Validation on the PQL-linearized
+          working model.
+        - ``"pql_reml"``: Restricted Maximum Likelihood on the PQL-linearized
+          working model.
+        - ``"laplace_reml"``: Laplace-approximated REML on the true GLM
+          likelihood at the MAP. Currently Poisson-only (φ fixed at 1).
+
+        The ``pql_*`` methods share the IRLS outer loop (``pql_outer_iteration``);
+        ``laplace_reml`` instead optimizes ρ directly over the Laplace REML
+        objective, re-fitting β̂ to the MAP at each ρ evaluation.
+    method_kwargs :
+        Optional per-method tuning dict. For ``"laplace_reml"`` the recognized
+        keys are ``inner_solver`` / ``inner_solver_kwargs`` (MAP β̂ solve) and
+        ``outer_solver`` / ``outer_solver_kwargs`` (ρ optimization), each a
+        ``nemos.solvers`` registry name and its constructor kwargs.
     use_glm_init :
         If no ``init_params`` are provided, ``fit`` initializes the parameters to
         zeros. When this is True, it then fits a regularized GLM (starting from
@@ -187,7 +204,8 @@ class GAM:
         use_scipy: bool = False,
         convergence_criterion: str = "gcv",
         drop_conv_basis_col: bool = False,
-        method: Literal["gcv", "reml"] = "reml",
+        method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_reml",
+        method_kwargs: dict | None = None,
         use_glm_init: bool = True,
     ) -> None:
         # TODO: Make basis immutable
@@ -196,13 +214,29 @@ class GAM:
                 f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
                 f"got {convergence_criterion!r}."
             )
-        if method not in ["gcv", "reml"]:
-            raise ValueError('method must be one of ["gcv", "reml"]')
+        valid_methods = ["pql_gcv", "pql_reml", "laplace_reml"]
+        if method not in valid_methods:
+            raise ValueError(f"method must be one of {valid_methods}")
 
         _validate_eval_bases_have_bounds(basis)
         self.basis = basis
         self.method = method
+        self.method_kwargs = method_kwargs or {}
         self.observation_model = observation_model
+
+        # Laplace-REML currently supports only Poisson: phi is fixed at 1 there.
+        # The empirical phi-scaling test (_script/check_phi_scaling.py) shows
+        # rho-hat does NOT factor from phi for the Laplace objective, so non-
+        # Poisson families need a joint rho/phi outer iteration not yet built.
+        if method == "laplace_reml" and not isinstance(
+            observation_model, PoissonObservations
+        ):
+            raise NotImplementedError(
+                'method="laplace_reml" currently supports only '
+                "PoissonObservations (phi fixed at 1). Gaussian/Gamma require a "
+                "joint rho/phi outer iteration, which is not yet implemented."
+            )
+
         self.variance_function = _make_variance_function(self.observation_model)
         self.maxiter = maxiter
         self.tol_update = tol_update
@@ -339,15 +373,15 @@ class GAM:
         return ph
 
     def _make_inner_func(self, penalty_tree, compute_sqrt, compute_log_det_and_grad):
-        """Build the smoothing-parameter objective for the current ``method``."""
-        if self.method == "gcv":
+        """Build the PQL inner-loop smoothing-parameter objective for ``method``."""
+        if self.method == "pql_gcv":
             return gcv_compute_factory(
                 compute_sqrt,
                 self._apply_identifiability_column,
                 self._apply_identifiability_square,
                 1.5,
             )
-        if self.method == "reml":
+        if self.method == "pql_reml":
             return reml_compute_factory(
                 compute_sqrt,
                 compute_log_det_and_grad,
@@ -355,7 +389,75 @@ class GAM:
                 self._apply_identifiability_square,
             )
 
-        raise ValueError('method must be one of ["gcv", "reml"]')
+        raise ValueError(
+            f"_make_inner_func handles only the PQL methods; got method={self.method!r}"
+        )
+
+    def _fit_laplace_reml(
+        self,
+        X,
+        y,
+        penalty_tree,
+        compute_sqrt,
+        compute_log_det_and_grad,
+        init_params,
+        init_regularizer_strength,
+    ):
+        """Direct Laplace-REML fit: optimise rho via the Laplace-approximated REML.
+
+        Mirrors the output contract of ``pql_outer_iteration`` — returns
+        ``((coef, intercept), regularizer_strength, n_iter)`` — so ``fit`` can
+        treat both paths uniformly.
+
+        Unlike the PQL path (which alternates IRLS coefficient updates with a
+        linearised smoothing-parameter step), here the outer optimiser drives
+        rho directly over the Laplace-approximated REML, re-fitting beta_hat to
+        the MAP at each rho evaluation.
+        """
+        n_obs = X.shape[0]
+        # laplace_reml works on the full design [intercept | smooths] and the
+        # full coefficient vector; the PQL path keeps the intercept separate.
+        X_full = jnp.column_stack((jnp.ones(n_obs), X))
+
+        # S_all: (M, P, P) penalty stack in the full coef space, intercept
+        # row/col zero — same construction _pql_reml uses for its gradient.
+        penalty_blocks = compute_penalty_blocks(
+            penalty_tree,
+            apply_identifiability=self._apply_identifiability_square,
+            shift_by=1,
+        )
+        S_all = jnp.concatenate(jax.tree_util.tree_leaves(penalty_blocks), axis=0)
+
+        coef0, intercept0 = init_params
+        init_beta = jnp.concatenate([jnp.atleast_1d(intercept0), coef0])
+
+        # M_null: _get_penalty_tree penalises every smooth's null space
+        # (penalize_null_space=True), so the only unpenalised direction is the
+        # intercept — M_null is 1, analytically, with no rank estimation.
+        M_null = 1
+
+        # phi = 1: Laplace-REML is Poisson-only here (enforced at construction).
+        inner_solve = make_inner_solver(
+            self.method_kwargs.get("inner_solver", "LBFGS"),
+            self.method_kwargs.get("inner_solver_kwargs"),
+        )
+        rhos_opt, beta_opt, n_iter = laplace_reml_outer_iteration(
+            init_regularizer_strength,
+            init_beta,
+            X_full,
+            y,
+            self.observation_model,
+            self.observation_model.default_inverse_link_function,
+            S_all,
+            1.0,  # phi
+            M_null,
+            compute_sqrt,
+            compute_log_det_and_grad,
+            inner_solve=inner_solve,
+            outer_solver_name=self.method_kwargs.get("outer_solver", "LBFGS"),
+            outer_solver_kwargs=self.method_kwargs.get("outer_solver_kwargs"),
+        )
+        return (beta_opt[1:], beta_opt[:1]), rhos_opt, n_iter
 
     def _get_penalty_tree(self) -> list[jnp.ndarray]:
         """
@@ -588,23 +690,36 @@ class GAM:
                     X, y, init_params, sqrt_penalty
                 )
 
-        opt_coef, opt_pen, n_iter = pql_outer_iteration(
-            init_regularizer_strength,  # initial log(λ) for each smooth
-            init_params,  # initial (coefficients, intercept)
-            X,
-            y,
-            penalty_tree,
-            self.observation_model,
-            self.variance_function,
-            self._make_inner_func(penalty_tree, compute_sqrt, compute_log_det_and_grad),
-            compute_sqrt,
-            fisher_scoring=False,  # use observed information, not expected
-            max_iter=self.maxiter,
-            tol_update=self.tol_update,  # convergence tolerance for coefficient updates
-            tol_optim=self.tol_optim,  # tolerance for inner GCV optimization
-            use_scipy=self.use_scipy,
-            convergence_criterion=self.convergence_criterion,
-        )
+        if self.method == "laplace_reml":
+            opt_coef, opt_pen, n_iter = self._fit_laplace_reml(
+                X,
+                y,
+                penalty_tree,
+                compute_sqrt,
+                compute_log_det_and_grad,
+                init_params,
+                init_regularizer_strength,
+            )
+        else:
+            opt_coef, opt_pen, n_iter = pql_outer_iteration(
+                init_regularizer_strength,  # initial log(λ) for each smooth
+                init_params,  # initial (coefficients, intercept)
+                X,
+                y,
+                penalty_tree,
+                self.observation_model,
+                self.variance_function,
+                self._make_inner_func(
+                    penalty_tree, compute_sqrt, compute_log_det_and_grad
+                ),
+                compute_sqrt,
+                fisher_scoring=False,  # use observed information, not expected
+                max_iter=self.maxiter,
+                tol_update=self.tol_update,  # convergence tol for coefficient updates
+                tol_optim=self.tol_optim,  # tolerance for inner GCV optimization
+                use_scipy=self.use_scipy,
+                convergence_criterion=self.convergence_criterion,
+            )
 
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen

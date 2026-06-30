@@ -188,7 +188,7 @@ def _routed_reml_setup(make_basis, seed=0, n_obs=300):
     production SINGLE_WITH_NULL and KRONECKER_WITH_NULL routes.
     """
     rng = np.random.default_rng(seed)
-    gam = GAM(make_basis(), method="reml")
+    gam = GAM(make_basis(), method="pql_reml")
     penalty_tree = gam._get_penalty_tree()
     ph = gam._build_penalty_handler(penalty_tree)
     compute_sqrt, compute_log_det_and_grad = ph.build()

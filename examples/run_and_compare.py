@@ -40,10 +40,16 @@ from nemos.observation_models import PoissonObservations
 # Original PGAM implementation (for comparison)
 from PGAM.GAM_library import *
 
-# New JAX-based PGAM implementation
-import pgam_jax.penalty_utils as pen_utils
+from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pql_gcv import gcv_compute_factory
 from pgam_jax.iterative_optim import pql_outer_iteration
+
+# New JAX-based PGAM implementation
+from pgam_jax.penalty_utils import (
+    DROP_LAST_COL,
+    DROP_LAST_ROW_COL,
+    compute_energy_penalty_tensor,
+)
 
 # =============================================================================
 # Configuration
@@ -74,9 +80,7 @@ add = bas + bas
 #
 # penalize_null_space=True adds a penalty on the null space of the main penalty,
 # which for second derivatives means penalizing linear functions (a + bx).
-penalty_tree = pen_utils.compute_energy_penalty_tensor(
-    add, 10**4, penalize_null_space=True
-)
+penalty_tree = compute_energy_penalty_tensor(add, 10**4, penalize_null_space=True)
 
 # =============================================================================
 # Step 2: Generate synthetic data
@@ -162,22 +166,19 @@ inv_link_func = jax.numpy.exp
 # This is used in IRLS weight computation
 variance_func = lambda x: x
 
-# Function to compute the square root of the penalty matrix.
-# The sqrt is used because we augment the system as [X; sqrt(penalty)] for WLS.
+# Build a PenaltyHandler from the penalty tensor list and snapshot it into
+# pure callables. ``compute_sqrt(rhos)`` returns the block-diagonal sqrt of the
+# total penalty (used to augment the WLS system as [X; sqrt(penalty)]); the
+# log-det callable is unused by GCV but is required by REML-style scorers.
 #
-# Key parameters:
-# - apply_identifiability: drops the last column to handle the identifiability
-#   constraint (see docs/pgam_overview.md for why this is needed)
-#
-# NOTE FOR NEMOS INTEGRATION: The identifiability constraint is specific to
-# additive models with intercepts. It should NOT be added to the nemos basis
-# classes directly, as it would clutter the API for non-GAM use cases.
-# Instead, handle it at the PGAM/penalty level.
-compute_sqrt_penalty = lambda *args: pen_utils.tree_compute_sqrt_penalty(
-    *args,
-    shift_by=0,
-    apply_identifiability=pen_utils.DROP_LAST_COL,
-)
+# - identifiability_fn=DROP_LAST_COL: drops the last column of each smooth's
+#   sqrt factor, matching the column drop applied to the design matrix.
+# - penalize_null_space=False here because ``compute_energy_penalty_tensor``
+#   above already stacked the null-space penalty into each (k, q, q) tensor.
+ph = PenaltyHandler()
+for S_tensor in penalty_tree:
+    ph.add(S_tensor, penalize_null_space=False, identifiability_fn=DROP_LAST_COL)
+compute_sqrt, compute_log_det_and_grad = ph.build()
 
 # Factory function that creates the GCV (Generalized Cross-Validation) scorer.
 # GCV is used to select optimal smoothing parameters without explicit cross-validation.
@@ -188,11 +189,15 @@ compute_sqrt_penalty = lambda *args: pen_utils.tree_compute_sqrt_penalty(
 # designed to compute correct gradients through the SVD-based GCV computation.
 #
 # Arguments:
-# 1. apply_identifiability for sqrt penalty (drop last column)
-# 2. apply_identifiability for full penalty (drop last row AND column)
-# 3. gamma=1.5: GCV correction factor (>1 gives more smoothing, reduces overfitting)
+# 1. compute_sqrt: handler-built sqrt-penalty function (rhos -> sqrt matrix)
+# 2. apply_identifiability for sqrt penalty (drop last column)
+# 3. apply_identifiability for full penalty (drop last row AND column)
+# 4. gamma=1.5: GCV correction factor (>1 gives more smoothing, reduces overfitting)
 inner_func = gcv_compute_factory(
-    pen_utils.DROP_LAST_COL, pen_utils.DROP_LAST_ROW_COL, 1.5
+    compute_sqrt,
+    DROP_LAST_COL,
+    DROP_LAST_ROW_COL,
+    1.5,
 )
 
 # =============================================================================
@@ -243,7 +248,7 @@ res = pgam.optim_gam(
 # - PoissonObservations(): observation model (provides inverse link)
 # - variance_func: Var(Y|μ) = μ for Poisson
 # - inner_func: GCV scorer for λ optimization
-# - compute_sqrt_penalty: function to build augmented penalty matrix
+# - compute_sqrt: handler-built function (rhos -> block-diagonal sqrt penalty)
 
 opt_coef, opt_pen, niter = pql_outer_iteration(
     [jax.numpy.log(jax.numpy.array([1.0, 2.0]))] * 2,  # initial log(λ) for each smooth
@@ -254,7 +259,7 @@ opt_coef, opt_pen, niter = pql_outer_iteration(
     PoissonObservations(),
     variance_func,
     inner_func,
-    compute_sqrt_penalty,
+    compute_sqrt,
     fisher_scoring=False,  # use observed information, not expected
     max_iter=100,
     tol_update=10**-6,  # convergence tolerance for coefficient updates

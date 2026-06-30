@@ -192,7 +192,7 @@ from pgam_jax._pql_gcv import gcv_compute_factory
 
 # Create a GCV scoring function with custom VJP for efficient gradients
 gcv_scorer = gcv_compute_factory(
-    positive_mon_func=jnp.exp,  # λ = exp(θ) ensures positivity
+    compute_sqrt=...,  # callable from PenaltyHandler.build()
     apply_identifiability_columns=...,  # for sqrt penalty
     apply_identifiability=...,  # for full penalty
     gamma=1.5  # GCV correction factor

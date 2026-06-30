@@ -115,7 +115,10 @@ def _gcv_grad_compute_from_states(
 
 
 def gcv_compute_factory(
-    compute_sqrt, apply_identifiability_columns, apply_identifiability, gamma
+    compute_sqrt,
+    apply_identifiability_columns,
+    apply_identifiability,
+    gamma,
 ):
     @jax.custom_vjp
     def _gcv_compute(

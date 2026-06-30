@@ -44,7 +44,7 @@ def _gcv_setup(make_basis, seed=0, n_obs=300):
     QR inputs sized to the penalty's column count.
     """
     rng = np.random.default_rng(seed)
-    gam = GAM(make_basis(), method="gcv")
+    gam = GAM(make_basis(), method="pql_gcv")
     penalty_tree = gam._get_penalty_tree()
     ph = gam._build_penalty_handler(penalty_tree)
     compute_sqrt, _ = ph.build()
