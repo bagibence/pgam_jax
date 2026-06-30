@@ -4,9 +4,10 @@ from typing import Callable, Literal
 
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
+from jaxopt import LBFGS, ScipyMinimize
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
-from nemos.inverse_link_function_utils import identity as _id_no_drop
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
@@ -19,7 +20,7 @@ from ._identifiable_features import (
     compute_features_identifiable,
 )
 from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
-from ._penalty_handler import PenaltyHandler, _drop_last_col
+from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
 from .iterative_optim import (
@@ -27,7 +28,15 @@ from .iterative_optim import (
     model_constructors_for_weights_and_pseudo_data,
     pql_outer_iteration,
 )
-from .penalty_utils import compute_energy_penalty_tensor, compute_penalty_blocks
+from .penalty_utils import (
+    DROP_LAST_COL,
+    DROP_LAST_ROW_COL,
+    IDENTITY,
+    compute_energy_penalty_factors,
+    compute_energy_penalty_tensor,
+    compute_penalty_blocks,
+    prepend_zeros_for_intercept,
+)
 
 
 # TODO: Should any other observation model be supported?
@@ -94,10 +103,10 @@ def _make_identifiability_dropper(
     ``square=True`` returns a function that drops both the last row and column for use on penalty matrices.
     """
     if not _should_drop_basis_col(basis_component, drop_conv_basis_col):
-        return lambda x: x
+        return IDENTITY
     if square:
-        return lambda x: x[..., :-1, :-1]
-    return lambda x: x[..., :-1]
+        return DROP_LAST_ROW_COL
+    return DROP_LAST_COL
 
 
 class GAM:
@@ -138,7 +147,7 @@ class GAM:
         Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
         but the option is added for matching the original implementation if required.
     method :
-        Smoothing-parameter selection algorithm. Default ``"pql_gcv"``.
+        Smoothing-parameter selection algorithm. Default ``"pql_reml"``.
 
         - ``"pql_gcv"``: Generalized Cross-Validation on the PQL-linearized
           working model.
@@ -155,6 +164,10 @@ class GAM:
         keys are ``inner_solver`` / ``inner_solver_kwargs`` (MAP β̂ solve) and
         ``outer_solver`` / ``outer_solver_kwargs`` (ρ optimization), each a
         ``nemos.solvers`` registry name and its constructor kwargs.
+    use_glm_init :
+        If no ``init_params`` are provided, ``fit`` initializes the parameters to
+        zeros. When this is True, it then fits a regularized GLM (starting from
+        those zeros) to warm-start the coefficients before the PQL iterations.
 
     Attributes
     ----------
@@ -191,8 +204,9 @@ class GAM:
         use_scipy: bool = False,
         convergence_criterion: str = "gcv",
         drop_conv_basis_col: bool = False,
-        method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_gcv",
+        method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_reml",
         method_kwargs: dict | None = None,
+        use_glm_init: bool = True,
     ) -> None:
         # TODO: Make basis immutable
         if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
@@ -231,8 +245,8 @@ class GAM:
         self.convergence_criterion = convergence_criterion
         self.drop_conv_basis_col = drop_conv_basis_col
         self.n_simpson_sample = int(1e4)
+        self.use_glm_init = use_glm_init
 
-        self._positive_mon_func_for_lambda = jnp.exp
         # Identifiability is applied per basis component to match how the design matrix is built:
         # BSplineConv leaves follow ``drop_conv_basis_col``; other leaves drop the last column.
         self._apply_identifiability_column = tuple(
@@ -280,20 +294,82 @@ class GAM:
 
         return (coef, intercept)
 
+    def _initialize_params_via_glm(
+        self,
+        X: jnp.ndarray,
+        y: jnp.ndarray,
+        init_params: tuple[jnp.ndarray, jnp.ndarray],
+        sqrt_penalty: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """
+        Warm-start the parameters by fitting a regularized GLM.
+
+        Runs L-BFGS on the penalized negative log-likelihood at fixed smoothing
+        parameters, starting from ``init_params``, to give the PQL iterations a
+        better-than-zero coefficient start.
+
+        Parameters
+        ----------
+        X :
+            Design matrix, shape ``(n_samples, n_features)``.
+        y :
+            Response variable, shape ``(n_samples,)`` or ``(n_samples, n_outputs)``.
+        init_params :
+            Starting (coefficients, intercept) for the GLM fit.
+        sqrt_penalty :
+            Square-root penalty for the initial regularization strength (with zeros
+            prepended for the intercept). Used for forming the GLM penalty term.
+
+        Returns
+        -------
+        :
+            The GLM-fitted (coefficients, intercept).
+        """
+        inv_link_func = self.observation_model.default_inverse_link_function
+
+        pen = jtu.tree_map(lambda x: x[:, 1:].T.dot(x[:, 1:]), sqrt_penalty)
+
+        def loss(p):
+            unpenalized_nll = self.observation_model._negative_log_likelihood(
+                y,
+                inv_link_func(X.dot(p[0]) + p[1]),
+                aggregate_sample_scores=jnp.sum,
+            )
+            return unpenalized_nll + 0.5 * p[0].dot(pen).dot(p[0])
+
+        if self.use_scipy:
+            init_solver = ScipyMinimize(method="l-bfgs-b", fun=loss, tol=1e-8)
+        else:
+            init_solver = LBFGS(loss, tol=1e-8)
+
+        (coef, intercept), _ = init_solver.run(init_params)
+
+        return (coef, intercept)
+
     def _build_penalty_handler(self, penalty_tree: list) -> PenaltyHandler:
         """Construct a PenaltyHandler from the penalty tensor list."""
-        ph = PenaltyHandler(non_linearity=self._positive_mon_func_for_lambda)
-        id_fns = [
-            (
-                _drop_last_col
-                if _should_drop_basis_col(b, self.drop_conv_basis_col)
-                else _id_no_drop
+        ph = PenaltyHandler()
+        for S_tensor, basis_comp in zip(penalty_tree, self.basis):
+            id_fn = (
+                DROP_LAST_COL
+                if _should_drop_basis_col(basis_comp, self.drop_conv_basis_col)
+                else IDENTITY
             )
-            for b in self.basis
-        ]
-        for S_tensor, id_fn in zip(penalty_tree, id_fns):
-            # null-space penalty already incorporated into S_tensor by compute_energy_penalty_tensor
-            ph.add(S_tensor, penalize_null_space=False, identifiability_fn=id_fn)
+            if isinstance(basis_comp, MultiplicativeBasis):
+                factors = compute_energy_penalty_factors(
+                    basis_comp, self.n_simpson_sample
+                )
+                ph.add_kron(
+                    factors,
+                    penalize_null_space=True,
+                    identifiability_fn=id_fn,
+                )
+            else:
+                ph.add(
+                    S_tensor[0],
+                    penalize_null_space=True,
+                    identifiability_fn=id_fn,
+                )
         return ph
 
     def _make_inner_func(self, penalty_tree, compute_sqrt, compute_log_det_and_grad):
@@ -301,7 +377,6 @@ class GAM:
         if self.method == "pql_gcv":
             return gcv_compute_factory(
                 compute_sqrt,
-                self._positive_mon_func_for_lambda,
                 self._apply_identifiability_column,
                 self._apply_identifiability_square,
                 1.5,
@@ -310,7 +385,6 @@ class GAM:
             return reml_compute_factory(
                 compute_sqrt,
                 compute_log_det_and_grad,
-                self._positive_mon_func_for_lambda,
                 self._apply_identifiability_column,
                 self._apply_identifiability_square,
             )
@@ -508,9 +582,7 @@ class GAM:
         R = jnp.linalg.qr(Xw, mode="r")
 
         sqrt_penalty = compute_sqrt(regularizer_strength)
-        sqrt_penalty = jnp.column_stack(
-            (jnp.zeros(sqrt_penalty.shape[0]), sqrt_penalty)
-        )
+        sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
         # SVD of A = [R; B],  A^T A = X^T W X + S_lambda
         # U1 = U[:k] (first k=R.shape[0] rows) encodes the hat matrix via A = Q_xw U1 U1' Q_xw'
@@ -583,7 +655,8 @@ class GAM:
         y :
             Response variable, shape ``(n_samples,)``.
         init_params :
-            Initial (coefficients, intercept). If None, initialized to zeros.
+            Initial (coefficients, intercept).
+            If None, initialized to zeros, then further tuned if ``use_glm_init`` is True.
         init_regularizer_strength :
             Initial log-space regularization strengths. If None, initialized to zeros
             (lambda=1 for every penalty component).
@@ -605,12 +678,17 @@ class GAM:
         ph = self._build_penalty_handler(penalty_tree)
         compute_sqrt, compute_log_det_and_grad = ph.build()
 
-        # TODO: Pull out the GLM initialization here?
-        if init_params is None:
-            init_params = self.initialize_params(X, y)
-
         if init_regularizer_strength is None:
             init_regularizer_strength = self._init_regularizer_strength(penalty_tree)
+
+        if init_params is None:
+            init_params = self.initialize_params(X, y)
+            if self.use_glm_init:
+                sqrt_penalty = compute_sqrt(init_regularizer_strength)
+                sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
+                init_params = self._initialize_params_via_glm(
+                    X, y, init_params, sqrt_penalty
+                )
 
         if self.method == "laplace_reml":
             opt_coef, opt_pen, n_iter = self._fit_laplace_reml(

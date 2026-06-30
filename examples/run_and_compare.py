@@ -40,11 +40,16 @@ from nemos.observation_models import PoissonObservations
 # Original PGAM implementation (for comparison)
 from PGAM.GAM_library import *
 
-# New JAX-based PGAM implementation
-import pgam_jax.penalty_utils as pen_utils
-from pgam_jax._penalty_handler import PenaltyHandler, _drop_last_col
+from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pql_gcv import gcv_compute_factory
 from pgam_jax.iterative_optim import pql_outer_iteration
+
+# New JAX-based PGAM implementation
+from pgam_jax.penalty_utils import (
+    DROP_LAST_COL,
+    DROP_LAST_ROW_COL,
+    compute_energy_penalty_tensor,
+)
 
 # =============================================================================
 # Configuration
@@ -75,9 +80,7 @@ add = bas + bas
 #
 # penalize_null_space=True adds a penalty on the null space of the main penalty,
 # which for second derivatives means penalizing linear functions (a + bx).
-penalty_tree = pen_utils.compute_energy_penalty_tensor(
-    add, 10**4, penalize_null_space=True
-)
+penalty_tree = compute_energy_penalty_tensor(add, 10**4, penalize_null_space=True)
 
 # =============================================================================
 # Step 2: Generate synthetic data
@@ -168,15 +171,13 @@ variance_func = lambda x: x
 # total penalty (used to augment the WLS system as [X; sqrt(penalty)]); the
 # log-det callable is unused by GCV but is required by REML-style scorers.
 #
-# - non_linearity=exp: regularization strengths are parameterized as exp(ρ) to
-#   ensure positivity during optimization.
-# - identifiability_fn=_drop_last_col: drops the last column of each smooth's
+# - identifiability_fn=DROP_LAST_COL: drops the last column of each smooth's
 #   sqrt factor, matching the column drop applied to the design matrix.
 # - penalize_null_space=False here because ``compute_energy_penalty_tensor``
 #   above already stacked the null-space penalty into each (k, q, q) tensor.
-ph = PenaltyHandler(non_linearity=jax.numpy.exp)
+ph = PenaltyHandler()
 for S_tensor in penalty_tree:
-    ph.add(S_tensor, penalize_null_space=False, identifiability_fn=_drop_last_col)
+    ph.add(S_tensor, penalize_null_space=False, identifiability_fn=DROP_LAST_COL)
 compute_sqrt, compute_log_det_and_grad = ph.build()
 
 # Factory function that creates the GCV (Generalized Cross-Validation) scorer.
@@ -189,15 +190,13 @@ compute_sqrt, compute_log_det_and_grad = ph.build()
 #
 # Arguments:
 # 1. compute_sqrt: handler-built sqrt-penalty function (rhos -> sqrt matrix)
-# 2. positive_mon_func: exp() to ensure λ > 0
-# 3. apply_identifiability for sqrt penalty (drop last column)
-# 4. apply_identifiability for full penalty (drop last row AND column)
-# 5. gamma=1.5: GCV correction factor (>1 gives more smoothing, reduces overfitting)
+# 2. apply_identifiability for sqrt penalty (drop last column)
+# 3. apply_identifiability for full penalty (drop last row AND column)
+# 4. gamma=1.5: GCV correction factor (>1 gives more smoothing, reduces overfitting)
 inner_func = gcv_compute_factory(
     compute_sqrt,
-    jax.numpy.exp,
-    lambda x: x[..., :-1],
-    lambda x: x[..., :-1, :-1],
+    DROP_LAST_COL,
+    DROP_LAST_ROW_COL,
     1.5,
 )
 

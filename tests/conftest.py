@@ -14,6 +14,7 @@ from pgam_jax._laplace_reml_fit import fit_beta  # noqa: F401 — re-exported fo
 from pgam_jax._laplace_reml_vbeta import vbeta_and_logdet
 from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pirls_weights import _make_w_fn
+from pgam_jax.penalty_utils import IDENTITY
 
 jax.config.update("jax_enable_x64", True)
 
@@ -99,9 +100,10 @@ def gam_design_and_penalty(K_per_smooth, x_covs):
     X = jnp.asarray(np.hstack([np.ones((N, 1)), X_smooth]))
 
     S_block_small = diff2_penalty(K_per_smooth)
-    ph = PenaltyHandler(non_linearity=jnp.exp)
+    ph = PenaltyHandler()
     for _ in range(M):
-        ph.add(S_block_small, penalize_null_space=False)
+        # TODO: Add an identifiability_fn here
+        ph.add(S_block_small, penalize_null_space=False, identifiability_fn=IDENTITY)
     compute_sqrt, compute_log_det_and_grad = ph.build()
 
     S_all = np.zeros((M, P, P))

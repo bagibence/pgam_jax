@@ -9,11 +9,12 @@ Statsmodels terminology:
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
-from jaxopt import LBFGS, LBFGSB, ScipyBoundedMinimize, ScipyMinimize
+from jaxopt import LBFGSB, ScipyBoundedMinimize
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
 
 from ._utils import elementwise_derivative as _elementwise_derivative
+from .penalty_utils import prepend_zeros_for_intercept
 
 FLOAT_EPS = jnp.finfo(float).eps
 
@@ -198,9 +199,8 @@ def pql_outer_iteration(
     fisher_scoring
     max_iter
     use_scipy:
-        If True, use scipy's L-BFGS-B for both the inner GCV minimization
-        and the initial GLM fit instead of jaxopt's. Often faster on CPU.
-        Defaults to False.
+        If True, use scipy's L-BFGS-B for the inner GCV minimization instead
+        of jaxopt's. Often faster on CPU. Defaults to False.
     convergence_criterion:
         Outer-loop convergence monitor. ``"coef"`` checks only coefficient
         movement, ``"coef_and_reg"`` checks both coefficient and log-regularizer
@@ -216,6 +216,8 @@ def pql_outer_iteration(
             f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
             f"got {convergence_criterion!r}."
         )
+    if max_iter < 1:
+        raise ValueError(f"max_iter must be at least 1, got {max_iter}.")
     # TODO: variance_func can be determined based on the observation model?
     inv_link_func = obs_model.default_inverse_link_function
     if use_scipy:
@@ -262,35 +264,11 @@ def pql_outer_iteration(
     n_obs = jtu.tree_leaves(X)[0].shape[0]
     leaf_shapes = [leaf.shape[1] for leaf in jtu.tree_leaves(X)]  # dims of each leaf
 
-    def loss_unp(p):
-        return obs_model._negative_log_likelihood(
-            y,
-            inv_link_func(X.dot(p[0]) + p[1]),
-            aggregate_sample_scores=jnp.sum,
-        )
-
     # TODO: Does this loop need to be converted to a jax loop? Was it even worth it?
-    i = 0
     old_inner_score = None
     for i in range(max_iter):
         sqrt_penalty = compute_sqrt(reg_strength)
-
-        # add a zero corresponding to not-penalizing the intercept
-        sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
-
-        # TODO: Lift this out into an initialization step?
-        # initialize coefficients by fitting a GLM
-        if i == 0:
-            pen = jtu.tree_map(lambda x: x[:, 1:].T.dot(x[:, 1:]), sqrt_penalty)
-
-            def loss(p):
-                return loss_unp(p) + 0.5 * p[0].dot(pen).dot(p[0])
-
-            if use_scipy:
-                init_solver = ScipyMinimize(method="l-bfgs-b", fun=loss, tol=1e-8)
-            else:
-                init_solver = LBFGS(loss, tol=1e-8)
-            (coef, intercept), state = init_solver.run(init_pars)
+        sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
         # compute weights
         rate = pytree_map_and_reduce(

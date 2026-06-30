@@ -13,6 +13,7 @@ from nemos.inverse_link_function_utils import exp
 
 from pgam_jax._laplace_reml import laplace_reml, laplace_reml_compute_factory
 from pgam_jax._penalty_handler import PenaltyHandler
+from pgam_jax.penalty_utils import IDENTITY
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -201,12 +202,16 @@ class TestLaplaceRemlRegression:
         # Each S_all[k] is sparse in its smooth's coef block; extract the small
         # block (drop the zero intercept row/col + zero rows/cols of other smooths)
         # and feed to PenaltyHandler so it picks the stable per-block sqrt path.
-        ph = PenaltyHandler(non_linearity=jnp.exp)
+        ph = PenaltyHandler()
         for k in range(S_all_np.shape[0]):
             S = S_all_np[k]
             keep = np.any(S != 0, axis=0) | np.any(S != 0, axis=1)
             small = S[np.ix_(keep, keep)]
-            ph.add(jnp.asarray(small), penalize_null_space=False)
+            ph.add(
+                jnp.asarray(small),
+                penalize_null_space=False,
+                identifiability_fn=IDENTITY,
+            )
         compute_sqrt, compute_ld = ph.build()
         rhos_tree = [rho[k : k + 1] for k in range(rho.size)]
 

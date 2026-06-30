@@ -10,7 +10,44 @@ from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.tree_utils import pytree_map_and_reduce
 from scipy import sparse
 
+from ._nemos_compat import get_n_inputs
 from .config import config
+
+
+def DROP_LAST_COL(x):
+    """Drop the last column of the matrix/tensor."""
+    return x[..., :-1]
+
+
+def DROP_LAST_ROW_COL(x):
+    """Drop the last row and column of the matrix/tensor."""
+    return x[..., :-1, :-1]
+
+
+def IDENTITY(x):
+    """Return the input unchanged."""
+    return x
+
+
+def prepend_zeros_for_intercept(sqrt_penalty: jnp.ndarray) -> jnp.ndarray:
+    """
+    Prepend a zero column to a square-root penalty matrix.
+
+    Aligns the penalty with a design matrix whose first column is an
+    unpenalized intercept.
+
+    Parameters
+    ----------
+    sqrt_penalty :
+        Block-diagonal square-root penalty matrix of shape (rows, n_smooth_cols).
+
+    Returns
+    -------
+    :
+        Shape (rows, n_smooth_cols + 1) with a leading zero column.
+    """
+    zeros = jnp.zeros(sqrt_penalty.shape[0], dtype=sqrt_penalty.dtype)
+    return jnp.column_stack((zeros, sqrt_penalty))
 
 
 def symmetric_sqrt(symmetric_matrix):
@@ -101,8 +138,7 @@ def tree_compute_sqrt_penalty(
     tree_penalty: Any,
     reg_strength: Any,
     shift_by: int | None = 0,
-    positive_mon_func: Callable = jnp.exp,
-    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = DROP_LAST_COL,
     prepend_zeros_for_intercept: bool = False,
 ):
     """
@@ -117,8 +153,6 @@ def tree_compute_sqrt_penalty(
         corresponding leaf of tree_penalty is of shape (m, Ki, Ki).
     shift_by :
         Initial index to shift by, default is 0.
-    positive_mon_func :
-        Monotonic function to ensure positive weights, default is `jnp.exp`.
     apply_identifiability:
         Either a single function or a tuple of such functions with one entry per leaf of ``tree_penalty``
         (used when different leaves need different identifiability constraints, e.g. a mix of convolutional and
@@ -135,9 +169,7 @@ def tree_compute_sqrt_penalty(
         Weighted penalty matrix.
     """
     scaled_pen = jax.tree_util.tree_map(
-        lambda pen, reg: compute_weighted_penalty(
-            pen, reg, positive_mon_func=positive_mon_func
-        ),
+        lambda pen, reg: compute_weighted_penalty(pen, reg),
         tree_penalty,
         reg_strength,
     )
@@ -176,9 +208,7 @@ def tree_compute_sqrt_penalty(
 def compute_penalty_blocks(
     tree_penalty: Any,
     shift_by: int | None = 0,
-    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[
-        ..., :-1, :-1
-    ],
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = DROP_LAST_ROW_COL,
 ):
     """
     Compute the penalty blocks for a pytree and apply weighting.
@@ -304,7 +334,8 @@ def compute_penalty_null_space_numpy(penalty):
     # original algorith summed (null-space should be the same)
     penalty = penalty.sum(axis=0)
     eig, U = np.linalg.eigh(penalty)
-    zero_idx = np.abs(eig) < np.finfo(float).eps * np.max(eig)
+    thresh = np.finfo(float).eps ** 0.7 * max(np.abs(eig).max(), 1e-300)
+    zero_idx = eig <= thresh
     U = U[:, zero_idx]
     return np.dot(U, U.T)
 
@@ -325,14 +356,13 @@ def compute_penalty_null_space_jax(penalty):
     """
     penalty = (penalty / jnp.sum(penalty**2, axis=(1, 2), keepdims=True)).mean(axis=0)
     eig, U = jnp.linalg.eigh(penalty)
-    zero_idx = jnp.abs(eig) < jnp.finfo(float).eps * jnp.max(eig)
+    thresh = jnp.finfo(float).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
+    zero_idx = eig <= thresh
     U = U[:, zero_idx]
     return jnp.dot(U, U.T)
 
 
-def compute_weighted_penalty(
-    penalty_tensor: jnp.ndarray, reg_strength: jnp.ndarray, positive_mon_func=jnp.exp
-):
+def compute_weighted_penalty(penalty_tensor: jnp.ndarray, reg_strength: jnp.ndarray):
     """
     Compute a weighted sum of the penalties.
 
@@ -342,15 +372,13 @@ def compute_weighted_penalty(
         Tensor of shape (N, K, K), where K is the number of coefficients and N is the number of penalty matrices.
     reg_strength :
         Regularization strengths of shape (N,).
-    positive_mon_func :
-        Function that ensures positive weights, default is `jnp.exp`.
 
     Returns
     -------
     :
         Weighted penalty matrix of shape (K, K).
     """
-    pos_reg = positive_mon_func(reg_strength)
+    pos_reg = jnp.exp(reg_strength)
     return jnp.sum(penalty_tensor * pos_reg[:, None, None], axis=0)
 
 
@@ -469,6 +497,45 @@ def ndim_tensor_product_basis_penalty(*penalty: jnp.ndarray) -> jnp.ndarray:
     return ndim_penalty_tensor
 
 
+def compute_energy_penalty_factors(
+    basis_component: BSplineEval | MultiplicativeBasis,
+    n_simpson_samples: int = 10**4,
+) -> list[jnp.ndarray]:
+    """
+    Compute the one-dimensional energy-penalty factors for an additive component.
+
+    Parameters
+    ----------
+    basis_component:
+        Additive component of a basis.
+    n_simpson_samples:
+        Number of samples for the numerical approximation of the integral.
+
+    Returns
+    -------
+    :
+        One penalty matrix per factor in ``basis_component``.
+    """
+    components = list(basis_component._iterate_over_components())
+    if isinstance(basis_component, MultiplicativeBasis):
+        bad = [c for c in components if get_n_inputs(c) != 1]
+        if bad:
+            raise ValueError(
+                f"MultiplicativeBasis contains {len(bad)} factor(s) with _n_inputs != 1 "
+                f"({[type(c).__name__ for c in bad]}). "
+                "The Kronecker stable sqrt requires every factor to be a 1-D basis."
+            )
+
+    return [
+        compute_energy_penalty(
+            n_simpson_samples,
+            b.derivative,
+            getattr(b, "bounds", None) or (0.0, 1.0),
+        )
+        for b in components
+    ]
+
+
 def compute_energy_penalty_tensor_additive_component(
     basis_component: BSplineEval | MultiplicativeBasis,
     n_samples: int = 10**4,
@@ -499,24 +566,7 @@ def compute_energy_penalty_tensor_additive_component(
     - For 2-dimensional predictors, it adds a penalty to ..math:`a + b \cdot x + c \cdot y + d \cdot xy`.
 
     """
-    if isinstance(basis_component, MultiplicativeBasis):
-        components = list(basis_component._iterate_over_components())
-        bad = [c for c in components if c._n_inputs != 1]
-        if bad:
-            raise ValueError(
-                f"MultiplicativeBasis contains {len(bad)} factor(s) with _n_inputs != 1 "
-                f"({[type(c).__name__ for c in bad]}). "
-                "The Kronecker stable sqrt requires every factor to be a 1-D basis."
-            )
-
-    one_dim_pen = (
-        compute_energy_penalty(
-            n_samples,
-            b.derivative,
-            getattr(b, "bounds", None) or (0.0, 1.0),
-        )
-        for b in basis_component._iterate_over_components()
-    )
+    one_dim_pen = compute_energy_penalty_factors(basis_component, n_samples)
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)
     if penalize_null_space:
         # In GAMs one penalizes the null space of a linear combinations of positive-semidefinite
@@ -573,8 +623,7 @@ def compute_penalty_agumented_from_basis(
     n_samples: int = 10**4,
     penalize_null_space: bool = True,
     shift_by: int | None = 0,
-    positive_mon_func=jnp.exp,
-    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x[..., :-1],
+    apply_identifiability: Callable[[jnp.ndarray], jnp.ndarray] = DROP_LAST_COL,
 ):
     """
     Compute the block-diagonal penalization matrix.
@@ -591,8 +640,6 @@ def compute_penalty_agumented_from_basis(
         Boolean, if true penalize the null space of every energy penalty component.
     shift_by:
         Shift columns by this integer.
-    positive_mon_func:
-        Non-linearity applied to the regularization strengths enforce positivity.
     apply_identifiability:
         A function that matches the identifiability constrain at the level of the penalty matrix.
         If for example, we dropped a b-spline element, i.e. dropped a column of the design matrix,
@@ -612,7 +659,6 @@ def compute_penalty_agumented_from_basis(
         penalty_tree,
         reg_strength,
         shift_by=shift_by,
-        positive_mon_func=positive_mon_func,
         apply_identifiability=apply_identifiability,
     )
 

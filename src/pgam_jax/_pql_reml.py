@@ -7,8 +7,8 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from numpy.typing import NDArray
 
-from . import penalty_utils
 from ._pql_gcv import FLOAT_EPS, _vmap_symm_mult, _vmap_trace, _vmap_where
+from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
 
 
 @partial(
@@ -40,9 +40,6 @@ def _compute_reml_and_states(
     ----------
     regularization_strength :
         Pytree of log-smoothing parameters (one leaf per penalty block).
-    penalty_tree :
-        Pytree of (M_i, q_i, q_i) penalty tensors, same structure as
-        regularization_strength.
     X, Q, R :
         Whitened design matrix and its QR factors (sqrt(W) X, Q, R).
     y :
@@ -76,7 +73,7 @@ def _compute_reml_and_states(
         Number of observations (scalar int).
     """
     sqrt_penalty = compute_sqrt(regularization_strength)
-    sqrt_penalty = jnp.hstack((jnp.zeros((sqrt_penalty.shape[0], 1)), sqrt_penalty))
+    sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
     n_obs = X.shape[0]
     U, s, V_T = jnp.linalg.svd(jnp.vstack((R, sqrt_penalty)), full_matrices=False)
@@ -110,7 +107,7 @@ def _compute_reml_and_states(
 
 @partial(
     jax.jit,
-    static_argnames=("positive_mon_func", "apply_identifiability"),
+    static_argnames=("apply_identifiability",),
 )
 def _reml_grad_compute_from_states(
     regularization_strength: Any,
@@ -119,7 +116,6 @@ def _reml_grad_compute_from_states(
     s_inv: jnp.ndarray,
     V_T: jnp.ndarray,
     log_det_sl_grads: Any,
-    positive_mon_func: Callable,
     apply_identifiability: Callable | None,
 ):
     """
@@ -137,13 +133,13 @@ def _reml_grad_compute_from_states(
     comp = V_T.T * s_inv  # (n_features, k)
     comp_y1 = comp @ y1.ravel()  # (n_features,)
 
-    blocks = penalty_utils.compute_penalty_blocks(
+    blocks = compute_penalty_blocks(
         penalty_tree,
         apply_identifiability=apply_identifiability,
         shift_by=1,
     )
 
-    lams = jtu.tree_map(positive_mon_func, regularization_strength)
+    lams = jtu.tree_map(jnp.exp, regularization_strength)
 
     # lam_j * (comp @ y1)^T Sj (comp @ y1)
     rss_grad = jtu.tree_map(
@@ -170,7 +166,6 @@ def _reml_grad_compute_from_states(
 def reml_compute_factory(
     compute_sqrt: Callable,
     compute_log_det_and_grad: Callable,
-    positive_mon_func: Callable,
     apply_identifiability_columns: Callable | None,
     apply_identifiability: Callable | None,
 ):
@@ -185,7 +180,6 @@ def reml_compute_factory(
     compute_log_det_and_grad :
         Static callable from ``PenaltyHandler.build()`` computing log|S_lam|_+ and
         its gradient w.r.t. rho from regularization_strength.
-    positive_mon_func, apply_identifiability_columns, apply_identifiability :
         Same semantics as in gcv_compute_factory.
 
     Returns
@@ -245,7 +239,6 @@ def reml_compute_factory(
             s_inv,
             V_T,
             log_det_sl_grads,
-            positive_mon_func=positive_mon_func,
             apply_identifiability=apply_identifiability,
         )
         return (jtu.tree_map(lambda g: reml_bar * g, reml_grad),) + (None,) * 5
