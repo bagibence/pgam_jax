@@ -12,8 +12,7 @@ module exposes the low-level building blocks it delegates to:
 - :func:`term_blocks_for_gam` : adapter that translates a fitted
   :class:`pgam_jax.GAM` into the term-block inputs of :func:`concurvity`.
 
-The formulas mirror mgcv's ``concurvity`` (``R/mgcv.r``) and are documented
-in ``docs/concurvity_mgcv.md``.
+The formulas mirror mgcv's ``concurvity`` (``R/mgcv.r``).
 Worked examples live in ``docs/concurvity_examples.md``.
 
 Numerical note: float64 is required to reproduce mgcv's LAPACK output;

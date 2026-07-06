@@ -38,13 +38,13 @@ For each scenario we state the data-generating equations, fit the model, read
 the three concurvity indices off `GAM.concurvity`, and explain why the numbers
 land where they do.
 
-The mathematical derivation of `worst` / `observed` / `estimate` and the QR
-machinery underneath is in `docs/concurvity_mgcv.md`. Numerical agreement with
+The `worst` / `observed` / `estimate` indices and the QR machinery underneath
+mirror mgcv's `concurvity` (`R/mgcv.r`). Numerical agreement with
 mgcv has been validated at the design-matrix-and-β level: an independent R
 script saves the design matrix, fitted coefficients, and three concurvity
-matrices from a battery of `mgcv::gam` fits, and the harness at
-`_scripts/validate_concurvity.py` confirms `pgam_jax.GAM.concurvity` reproduces
-them to ~1e-14. The values you see below are what mgcv would print on the
+matrices from `mgcv::gam` fits, and the harness in `scripts` and corresponding
+test confirm `pgam_jax.GAM.concurvity` reproduces them to ~1e-14.
+The values you see below are what mgcv would print on the
 *same fitted model*; they are not directly the values mgcv would print if you
 ran `mgcv::gam` itself on the same data, because the two packages differ in
 basis construction and smoothing-parameter optimization. For numerically closer

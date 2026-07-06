@@ -870,8 +870,7 @@ class GAM:
         - Wood, S. N. (2017). *Generalized Additive Models: An Introduction
           with R*, 2nd ed., §5.6.3. CRC Press.
         - `mgcv` source: ``R/mgcv.r``, function ``concurvity``. The exact
-          formulas implemented here are derived from that source and
-          documented in ``docs/concurvity_mgcv.md``.
+          formulas implemented here are derived from that source.
         """
         if hasattr(self, "coef_"):
             # Post-fit: reuse the cached centering and the fitted β.
