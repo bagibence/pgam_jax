@@ -246,7 +246,10 @@ def test_two_dim_bspline_der_2_symmetric_sqrt(two_dim_bspline_penalty):
     log_lam = np.log(two_dim_bspline_penalty["reg_strength"][0])
     sqrt_orig = two_dim_bspline_penalty["sqrt_energy_penalty"]
     scaled_sqrt_pen = penalty_utils.tree_compute_sqrt_penalty(
-        out, np.array([log_lam, log_lam, log_lam]), 0, apply_identifiability=lambda x: x
+        out,
+        np.array([log_lam, log_lam, log_lam]),
+        0,
+        apply_identifiability=penalty_utils.IDENTITY,
     )
     squared_pen = scaled_sqrt_pen.T.dot(scaled_sqrt_pen)
     squared_pen_orig = sqrt_orig.T.dot(sqrt_orig)

@@ -6,9 +6,15 @@ PGAM represents neural responses with B-splines regularized by smoothing penalti
 
 ## Installation
 
-### Fresh install
+### Supported platforms
 
 This project currently targets Python 3.12, 3.13, and 3.14.
+
+Tested on Linux and macOS. Native Windows isn't supported due to JAX's experimental Windows builds
+and our experience with crashes in the CI.
+Use [WSL](https://learn.microsoft.com/windows/wsl/) instead.
+
+### Fresh install
 
 ```bash
 uv sync

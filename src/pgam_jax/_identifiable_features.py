@@ -66,6 +66,19 @@ def compute_features_identifiable(
     *inputs,
     drop_conv_basis_col: bool,
 ):
+    """Build the identifiability-constrained design matrix, **uncentered**.
+
+    The returned matrix has one column dropped per eval-basis component to
+    remove collinearity with the intercept, but is NOT mean-centered.  Callers
+    that want a usable design must subtract the per-column means of the
+    training matrix.  ``GAM._fit_design_matrix`` does this and stores the
+    means as ``feature_mean_`` for reuse at prediction time
+    (``GAM._transform_design_matrix``).
+
+    Without that centering, smooth columns remain correlated with the
+    intercept, which both leaves the model only weakly identifiable in
+    finite samples and inflates the conditioning of ``H + S_λ/φ``.
+    """
     basis.setup_basis(*inputs)
     return _compute_features_identifiable(
         basis,

@@ -26,6 +26,7 @@ classifiers = [
 
 # Define dependencies for the project
 dependencies = [
+    "equinox>=0.13.1",
     "jax",
     "jaxopt",
     "nemos",
@@ -36,7 +37,7 @@ dependencies = [
 
 
 [tool.uv.sources]
-PGAM = { path = "../PGAM", editable = true }
+PGAM = { git = "https://github.com/BalzaniEdoardo/PGAM.git" }
 
 # Configure package discovery for setuptools
 [tool.setuptools.packages.find]
@@ -56,19 +57,23 @@ dev = [
     "pytest-cov",                   # Test coverage plugin for pytest
     "statsmodels",                  # Used to compare model pseudo-r2 in testing
     "matplotlib>=3.7",              # Used by comparison examples
+    "tox-uv",                       # Run tox with uv for faster installs
+]
+compare = [                         # Local-only: needs the ../PGAM checkout, not installable in CI
     "PGAM",                         # Used only for comparisons against the original implementation
     "docker",                       # Other way of running the original implementation
-    "tox-uv",                       # Run tox with uv for faster installs
 ]
 notebooks = [
     "jupyterlab",
     "jupyterlab-code-formatter",
     "jupytext",
     "jupyter-collaboration",
+    "jupyterlab-myst",
     "pandas",
     "pynapple",
     "seaborn",
     "plotly",
+    "anywidget",
 ]
 
 

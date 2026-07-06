@@ -182,7 +182,11 @@ def test_tree_compute_sqrt_penalty_accepts_per_leaf_callables():
     """
     import jax.numpy as jnp
 
-    from pgam_jax.penalty_utils import tree_compute_sqrt_penalty
+    from pgam_jax.penalty_utils import (
+        DROP_LAST_COL,
+        IDENTITY,
+        tree_compute_sqrt_penalty,
+    )
 
     # two penalty leaves, both 10x10, both with one penalty matrix (m=1)
     eye = jnp.eye(10)[None]
@@ -190,7 +194,7 @@ def test_tree_compute_sqrt_penalty_accepts_per_leaf_callables():
     reg = [jnp.zeros(1), jnp.zeros(1)]
 
     # leaf 0: drop last column; leaf 1: keep all columns
-    apply_id = (lambda x: x[..., :-1], lambda x: x)
+    apply_id = (DROP_LAST_COL, IDENTITY)
     out = tree_compute_sqrt_penalty(
         tree_penalty, reg, shift_by=0, apply_identifiability=apply_id
     )
@@ -205,12 +209,16 @@ def test_compute_penalty_blocks_accepts_per_leaf_callables():
     """
     import jax.numpy as jnp
 
-    from pgam_jax.penalty_utils import compute_penalty_blocks
+    from pgam_jax.penalty_utils import (
+        DROP_LAST_ROW_COL,
+        IDENTITY,
+        compute_penalty_blocks,
+    )
 
     eye = jnp.eye(10)[None]
     tree_penalty = [eye, eye]
 
-    apply_id = (lambda x: x[..., :-1, :-1], lambda x: x)
+    apply_id = (DROP_LAST_ROW_COL, IDENTITY)
     out = compute_penalty_blocks(
         tree_penalty, shift_by=1, apply_identifiability=apply_id
     )
