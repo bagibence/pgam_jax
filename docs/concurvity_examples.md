@@ -5,7 +5,7 @@ jupyter:
       extension: .md
       format_name: markdown
       format_version: '1.3'
-      jupytext_version: 1.19.3
+      jupytext_version: 1.19.4
   kernelspec:
     display_name: Python 3 (ipykernel)
     language: python
@@ -54,11 +54,13 @@ use the package default to stay runnable across versions.
 
 ```python
 import jax
+
 jax.config.update("jax_enable_x64", True)  # concurvity needs float64
 
-import numpy as np
 import matplotlib.pyplot as plt
 import nemos as nmo
+import numpy as np
+
 from pgam_jax import GAM
 
 rng = np.random.default_rng(20260522)
@@ -101,8 +103,9 @@ plt.show()
 ```
 
 ```python
-basis = (nmo.basis.BSplineEval(12, bounds=(0., 1.), label="s(x1)")
-         + nmo.basis.BSplineEval(12, bounds=(0., 1.), label="s(x2)"))
+basis = nmo.basis.BSplineEval(
+    12, bounds=(0.0, 1.0), label="s(x1)"
+) + nmo.basis.BSplineEval(12, bounds=(0.0, 1.0), label="s(x2)")
 gam = GAM(basis, use_scipy=True, maxiter=15).fit((x1, x2), y)
 gam.concurvity((x1, x2), as_dataframe=True)
 ```
@@ -141,9 +144,11 @@ and vice versa — the two terms compete for the same explanatory directions.
 The fit still converges, but it cannot reliably attribute the signal to $t$
 versus $x$.
 
+
 ```python
 def f2(z):
-    return 0.2 * z**11 * (10 * (1 - z))**6 + 10 * (10 * z)**3 * (1 - z)**10
+    return 0.2 * z**11 * (10 * (1 - z)) ** 6 + 10 * (10 * z) ** 3 * (1 - z) ** 10
+
 
 t = np.sort(rng.uniform(0, 1, n))
 x = f2(t) + rng.normal(0, 3, n)
@@ -160,8 +165,9 @@ plt.show()
 ```
 
 ```python
-basis = (nmo.basis.BSplineEval(15, bounds=(float(t.min()), float(t.max())), label="s(t)")
-         + nmo.basis.BSplineEval(15, bounds=(float(x.min()), float(x.max())), label="s(x)"))
+basis = nmo.basis.BSplineEval(
+    15, bounds=(float(t.min()), float(t.max())), label="s(t)"
+) + nmo.basis.BSplineEval(15, bounds=(float(x.min()), float(x.max())), label="s(x)")
 gam = GAM(basis, use_scipy=True, maxiter=20).fit((t, x), y)
 gam.concurvity((t, x), as_dataframe=True)
 ```
@@ -219,10 +225,10 @@ more terms. Predictions for the diagnostics:
 x1 = rng.uniform(-1, 1, n)
 x2 = rng.uniform(-1, 1, n)
 x3 = 0.8 * x1 + 0.5 * np.sin(2 * x2) + rng.normal(0, 0.3, n)
-eta = x1 + x2 ** 2 + np.sin(2 * x3)
+eta = x1 + x2**2 + np.sin(2 * x3)
 y = rng.poisson(np.exp(eta))
 
-fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
 for ax, (xa, xb, la, lb) in zip(
     axes,
     [(x1, x3, "x1", "x3"), (x2, x3, "x2", "x3"), (x1, x2, "x1", "x2")],
@@ -230,13 +236,16 @@ for ax, (xa, xb, la, lb) in zip(
     ax.scatter(xa, xb, s=8, alpha=0.5)
     ax.set(xlabel=la, ylabel=lb)
 fig.suptitle("Scenario 3 — pairwise relationships among (x1, x2, x3)")
-plt.show()
 ```
 
 ```python
-basis = (nmo.basis.BSplineEval(10, bounds=(-1., 1.), label="s(x1)")
-         + nmo.basis.BSplineEval(10, bounds=(-1., 1.), label="s(x2)")
-         + nmo.basis.BSplineEval(10, bounds=(float(x3.min()), float(x3.max())), label="s(x3)"))
+basis = (
+    nmo.basis.BSplineEval(10, bounds=(-1.0, 1.0), label="s(x1)")
+    + nmo.basis.BSplineEval(10, bounds=(-1.0, 1.0), label="s(x2)")
+    + nmo.basis.BSplineEval(
+        10, bounds=(float(x3.min()), float(x3.max())), label="s(x3)"
+    )
+)
 gam = GAM(basis, use_scipy=True, maxiter=20).fit((x1, x2, x3), y)
 gam.concurvity((x1, x2, x3), as_dataframe=True)
 ```
@@ -297,8 +306,9 @@ basis evaluated at those inputs, not of the optimizer.
 
 ```python
 # Pre-fit diagnostic on the scenario 2 (concurve) covariates.
-basis = (nmo.basis.BSplineEval(15, bounds=(float(t.min()), float(t.max())), label="s(t)")
-         + nmo.basis.BSplineEval(15, bounds=(float(x.min()), float(x.max())), label="s(x)"))
+basis = nmo.basis.BSplineEval(
+    15, bounds=(float(t.min()), float(t.max())), label="s(t)"
+) + nmo.basis.BSplineEval(15, bounds=(float(x.min()), float(x.max())), label="s(x)")
 gam_unfit = GAM(basis, use_scipy=True, maxiter=20)
 gam_unfit.concurvity((t, x), as_dataframe=True)
 ```
@@ -340,3 +350,7 @@ into a single tensor-product smooth `te(x1, x2)` if the joint surface is
 what you actually care about; or, if the covariates are causally
 ordered, regress one on the other and use the residual as the second
 predictor.
+
+```python
+
+```

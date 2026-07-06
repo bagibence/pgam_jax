@@ -27,15 +27,17 @@ from typing import Sequence
 
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
+
 from ._identifiable_features import _get_basis_component_infos
 
 
 @dataclass(frozen=True)
 class TermBlock:
     """Column range and label for one term in the design matrix."""
+
     label: str
     start: int  # 0-indexed, inclusive
-    stop: int   # 0-indexed, inclusive (i.e. `X[:, start:stop+1]` is the block)
+    stop: int  # 0-indexed, inclusive (i.e. `X[:, start:stop+1]` is the block)
 
     @property
     def slice(self) -> slice:
@@ -66,8 +68,8 @@ def _block_qr_pieces(X, term: TermBlock):
 
     # Non-pivoted QR of [X_other | X_i]; keep the right block of R.
     R = jnp.linalg.qr(jnp.concatenate([X_other, X_i], axis=1), mode="r")
-    R_right = R[:, r:]            # (r+k) x k = [[R12], [R22]]
-    R12 = R_right[:r, :]          # r x k
+    R_right = R[:, r:]  # (r+k) x k = [[R12], [R22]]
+    R12 = R_right[:r, :]  # r x k
 
     # Second QR to get R-tilde (k x k upper triangular).
     Rt = jnp.linalg.qr(R_right, mode="r")
@@ -85,14 +87,14 @@ def _measures_for_term(X, term: TermBlock, beta_block):
     worst = s[0] ** 2
 
     # estimate: Frobenius ratio.
-    estimate = jnp.sum(R12 ** 2) / jnp.sum(R_right ** 2)
+    estimate = jnp.sum(R12**2) / jnp.sum(R_right**2)
 
     # observed: only if a coefficient block was supplied.
     if beta_block is None:
         observed = None
     else:
         num = jnp.sum((R12 @ beta_block) ** 2)
-        den = jnp.sum((Rt  @ beta_block) ** 2)
+        den = jnp.sum((Rt @ beta_block) ** 2)
         observed = num / den
 
     return worst, observed, estimate
@@ -147,7 +149,7 @@ def concurvity(
     if full:
         worst = jnp.zeros(m)
         estim = jnp.zeros(m)
-        obs   = jnp.zeros(m) if beta is not None else None
+        obs = jnp.zeros(m) if beta is not None else None
         for i, t in enumerate(term_blocks):
             bi = beta[t.slice] if beta is not None else None
             w, o, e = _measures_for_term(X, t, bi)
@@ -165,22 +167,23 @@ def concurvity(
     # term i plays the role of 'rest of model' and term j is the focal
     # term whose curve gets decomposed. `worst` is symmetric so this
     # convention is invisible to it; `observed` and `estimate` are not.
-    worst = jnp.ones((m, m))   # diagonal is 1 by convention in mgcv
+    worst = jnp.ones((m, m))  # diagonal is 1 by convention in mgcv
     estim = jnp.ones((m, m))
-    obs   = jnp.ones((m, m)) if beta is not None else None
+    obs = jnp.ones((m, m)) if beta is not None else None
     for i, t_rest in enumerate(term_blocks):
         for j, t_focal in enumerate(term_blocks):
             if i == j:
                 continue
             # Build [X_rest | X_focal]; synthetic block points at X_focal.
-            cols = jnp.concatenate([
-                jnp.arange(t_rest.start,  t_rest.stop  + 1),
-                jnp.arange(t_focal.start, t_focal.stop + 1),
-            ])
+            cols = jnp.concatenate(
+                [
+                    jnp.arange(t_rest.start, t_rest.stop + 1),
+                    jnp.arange(t_focal.start, t_focal.stop + 1),
+                ]
+            )
             Xpair = X[:, cols]
             r = t_rest.ncol
-            synth = TermBlock(label=t_focal.label,
-                              start=r, stop=r + t_focal.ncol - 1)
+            synth = TermBlock(label=t_focal.label, start=r, stop=r + t_focal.ncol - 1)
             b_focal = beta[t_focal.slice] if beta is not None else None
             w, o, e = _measures_for_term(Xpair, synth, b_focal)
             worst = worst.at[i, j].set(w)
@@ -209,13 +212,16 @@ def _to_dataframe(result, term_blocks, full):
     measures = [m for m in _MEASURE_ORDER if m in result]
 
     if full:
-        return pd.DataFrame({m: result[m] for m in measures},
-                            index=pd.Index(labels, name="term"))
+        return pd.DataFrame(
+            {m: result[m] for m in measures}, index=pd.Index(labels, name="term")
+        )
 
     return {
-        m: pd.DataFrame(result[m],
-                        index=pd.Index(labels, name="explainer"),
-                        columns=pd.Index(labels, name="focal"))
+        m: pd.DataFrame(
+            result[m],
+            index=pd.Index(labels, name="explainer"),
+            columns=pd.Index(labels, name="focal"),
+        )
         for m in measures
     }
 
@@ -225,6 +231,7 @@ def _to_dataframe(result, term_blocks, full):
 # here so the design-matrix → term-block translation lives next to the
 # math that consumes it.
 # ---------------------------------------------------------------------------
+
 
 def design_with_intercept(gam, inputs):
     """Centered design matrix for a fitted GAM, with the intercept column
@@ -246,9 +253,11 @@ def term_blocks_for_gam(gam):
     blocks = [TermBlock(label="para", start=0, stop=0)]
     for info in infos:
         s = info.identifiable_feature_slice
-        blocks.append(TermBlock(
-            label=getattr(info.basis, "label", f"s_{len(blocks)}"),
-            start=s.start + 1,
-            stop=s.stop,  # slice.stop is exclusive -> +1 -1 cancels
-        ))
+        blocks.append(
+            TermBlock(
+                label=getattr(info.basis, "label", f"s_{len(blocks)}"),
+                start=s.start + 1,
+                stop=s.stop,  # slice.stop is exclusive -> +1 -1 cancels
+            )
+        )
     return blocks

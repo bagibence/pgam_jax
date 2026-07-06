@@ -16,10 +16,10 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
-from .concurvity import concurvity as _concurvity
-from .concurvity import design_with_intercept, term_blocks_for_gam
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
+from .concurvity import concurvity as _concurvity
+from .concurvity import design_with_intercept, term_blocks_for_gam
 from .iterative_optim import (
     VALID_CONVERGENCE_CRITERIA,
     model_constructors_for_weights_and_pseudo_data,
@@ -690,8 +690,7 @@ class GAM:
             X = jnp.concatenate([intercept_col, X_smooths], axis=1)
             beta = None
         blocks = term_blocks_for_gam(self)
-        return _concurvity(X, blocks, beta=beta, full=full,
-                           as_dataframe=as_dataframe)
+        return _concurvity(X, blocks, beta=beta, full=full, as_dataframe=as_dataframe)
 
     # TODO: Test against original implementation
     def smooth_compute(
