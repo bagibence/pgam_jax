@@ -883,7 +883,7 @@ class GAM:
             # No β yet, so the underlying call skips the `observed` measure.
             warnings.warn(
                 "GAM is not fitted: concurvity returns only the "
-                "coefficient-free 'worst' and 'estimate' measures."
+                "coefficient-free 'worst' and 'estimate' measures. "
                 "Call fit() to also get the 'observed' measure.",
                 UserWarning,
                 stacklevel=2,
