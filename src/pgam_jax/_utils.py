@@ -20,3 +20,14 @@ def elementwise_derivative(f):
         return grad
 
     return df
+
+
+def prepend_ones_for_intercept(X: jnp.ndarray) -> jnp.ndarray:
+    """
+    Prepend a column of ones (the intercept) to a 2D design matrix.
+
+    Raises if `X` is not 2D, so a design matrix that has accidentally
+    collapsed to 1D fails here rather than silently promoting to a column.
+    """
+    intercept_col = jnp.ones((X.shape[0], 1))
+    return jnp.concatenate([intercept_col, X], axis=1)

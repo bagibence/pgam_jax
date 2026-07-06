@@ -8,9 +8,8 @@ module exposes the low-level building blocks it delegates to:
   and is what the validation harness in ``_scripts/`` checks against
   ``mgcv::concurvity`` outputs to ~1e-14.
 - :class:`TermBlock` : column range + label for one term.
-- :func:`design_with_intercept`, :func:`term_blocks_for_gam` : adapters
-  that translate a fitted :class:`pgam_jax.GAM` into the inputs of
-  :func:`concurvity`.
+- :func:`term_blocks_for_gam` : adapter that translates a fitted
+  :class:`pgam_jax.GAM` into the term-block inputs of :func:`concurvity`.
 
 Mathematical derivation: ``docs/concurvity_mgcv.md``.
 
@@ -233,19 +232,11 @@ def _to_dataframe(result, term_blocks, full):
 # ---------------------------------------------------------------------------
 
 
-def design_with_intercept(gam, inputs):
-    """Centered design matrix for a fitted GAM, with the intercept column
-    prepended. Used by `GAM.concurvity` to assemble the full `X`."""
-    X_smooths = gam._transform_design_matrix(inputs)
-    intercept_col = jnp.ones((X_smooths.shape[0], 1))
-    return jnp.concatenate([intercept_col, X_smooths], axis=1)
-
-
 def term_blocks_for_gam(gam):
     """Build the TermBlock list for a fitted GAM (parametric block first,
     then one block per smooth component), using the same slice convention
     as `_get_basis_component_infos`. The +1 shifts account for the
-    prepended intercept column in `design_with_intercept`."""
+    prepended intercept column (see `prepend_ones_for_intercept`)."""
 
     infos = _get_basis_component_infos(
         gam.basis, drop_conv_basis_col=gam.drop_conv_basis_col

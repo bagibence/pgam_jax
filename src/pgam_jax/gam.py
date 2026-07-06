@@ -23,8 +23,9 @@ from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
+from ._utils import prepend_ones_for_intercept
 from .concurvity import concurvity as _concurvity
-from .concurvity import design_with_intercept, term_blocks_for_gam
+from .concurvity import term_blocks_for_gam
 from .iterative_optim import (
     VALID_CONVERGENCE_CRITERIA,
     model_constructors_for_weights_and_pseudo_data,
@@ -416,10 +417,9 @@ class GAM:
         rho directly over the Laplace-approximated REML, re-fitting beta_hat to
         the MAP at each rho evaluation.
         """
-        n_obs = X.shape[0]
         # laplace_reml works on the full design [intercept | smooths] and the
         # full coefficient vector; the PQL path keeps the intercept separate.
-        X_full = jnp.column_stack((jnp.ones(n_obs), X))
+        X_full = prepend_ones_for_intercept(X)
 
         # S_all: (M, P, P) penalty stack in the full coef space, intercept
         # row/col zero — same construction _pql_reml uses for its gradient.
@@ -579,7 +579,7 @@ class GAM:
         weights = jnp.clip(weights, 0.0, jnp.inf)
 
         # Xw^T Xw = X^T W X
-        X_full = jnp.column_stack((jnp.ones(n_obs), X))
+        X_full = prepend_ones_for_intercept(X)
         Xw = X_full * jnp.sqrt(weights)[:, None]
         R = jnp.linalg.qr(Xw, mode="r")
 
@@ -873,15 +873,15 @@ class GAM:
         """
         if hasattr(self, "coef_"):
             # Post-fit: reuse the cached centering and the fitted β.
-            X = design_with_intercept(self, xi)
+            X_smooths = self._transform_design_matrix(xi)
+            X = prepend_ones_for_intercept(X_smooths)
             beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
         else:
             # Pre-fit: set up the basis on `xi` and center on-the-fly.
             # No β yet, so the underlying call skips the `observed` measure.
             X_raw = self._compute_uncentered_design_matrix(xi, setup_basis=True)
             X_smooths = X_raw - X_raw.mean(axis=0)
-            intercept_col = jnp.ones((X_smooths.shape[0], 1))
-            X = jnp.concatenate([intercept_col, X_smooths], axis=1)
+            X = prepend_ones_for_intercept(X_smooths)
             beta = None
         blocks = term_blocks_for_gam(self)
         return _concurvity(X, blocks, beta=beta, full=full, as_dataframe=as_dataframe)
@@ -951,7 +951,7 @@ class GAM:
             + 1
         )
         if se_with_mean:
-            X_se = jnp.column_stack((jnp.ones(fX.shape[0]), fX))
+            X_se = prepend_ones_for_intercept(fX)
             cov_idx = jnp.concatenate((jnp.array([0]), coef_idx))
         else:
             X_se = fX
