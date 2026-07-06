@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Callable, Literal
 
 import jax
@@ -818,7 +819,8 @@ class GAM:
 
         - **Before** ``fit``: returns ``worst`` and ``estimate`` only (these
           are properties of the design matrix and don't need
-          :math:`\hat{\boldsymbol{\beta}}`). Side effect: ``basis.setup_basis``
+          :math:`\hat{\boldsymbol{\beta}}`) and emits a ``UserWarning`` noting
+          that ``observed`` is unavailable. Side effect: ``basis.setup_basis``
           is called on ``xi`` to make the basis usable for evaluation; a
           later ``fit(xi_train, …)`` will overwrite this state.
         - **After** ``fit``: returns all three measures using the cached
@@ -879,6 +881,13 @@ class GAM:
         else:
             # Pre-fit: set up the basis on `xi` and center on-the-fly.
             # No β yet, so the underlying call skips the `observed` measure.
+            warnings.warn(
+                "GAM is not fitted: concurvity returns only the "
+                "coefficient-free 'worst' and 'estimate' measures."
+                "Call fit() to also get the 'observed' measure.",
+                UserWarning,
+                stacklevel=2,
+            )
             X_raw = self._compute_uncentered_design_matrix(xi, setup_basis=True)
             X_smooths = X_raw - X_raw.mean(axis=0)
             X = prepend_ones_for_intercept(X_smooths)
