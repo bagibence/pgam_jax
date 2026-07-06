@@ -22,12 +22,17 @@ float32 diverges by ~1e-4. Callers should set
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 
 from ._identifiable_features import _get_basis_component_infos
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from .gam import GAM
 
 
 @dataclass(frozen=True)
@@ -47,12 +52,14 @@ class TermBlock:
         return self.stop - self.start + 1
 
 
-def _precondition(X):
+def _precondition(X: jnp.ndarray) -> jnp.ndarray:
     """Replace X with the R factor of its QR; preserves X.T @ X exactly."""
     return jnp.linalg.qr(X, mode="r")
 
 
-def _block_qr_pieces(X, term: TermBlock):
+def _block_qr_pieces(
+    X: jnp.ndarray, term: TermBlock
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Build R_12 and R-tilde for one term (the rest-of-model is everything
     else). Returns (R12, Rt, R_right) following the doc's notation."""
     p = X.shape[1]
@@ -75,7 +82,9 @@ def _block_qr_pieces(X, term: TermBlock):
     return R12, Rt, R_right
 
 
-def _measures_for_term(X, term: TermBlock, beta_block):
+def _measures_for_term(
+    X: jnp.ndarray, term: TermBlock, beta_block: jnp.ndarray | None
+) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray]:
     R12, Rt, R_right = _block_qr_pieces(X, term)
 
     # worst: top singular value squared of R12 @ inv(Rt).
@@ -100,13 +109,13 @@ def _measures_for_term(X, term: TermBlock, beta_block):
 
 
 def concurvity(
-    X,
+    X: jnp.ndarray,
     term_blocks: Sequence[TermBlock],
-    beta=None,
+    beta: jnp.ndarray | None = None,
     full: bool = True,
     precondition: bool = True,
     as_dataframe: bool = False,
-):
+) -> dict[str, jnp.ndarray] | pd.DataFrame | dict[str, pd.DataFrame]:
     """Compute mgcv-style concurvity for the given design matrix and terms.
 
     Parameters
@@ -198,7 +207,11 @@ def concurvity(
 _MEASURE_ORDER = ("worst", "observed", "estimate")
 
 
-def _to_dataframe(result, term_blocks, full):
+def _to_dataframe(
+    result: dict[str, jnp.ndarray],
+    term_blocks: Sequence[TermBlock],
+    full: bool,
+) -> pd.DataFrame | dict[str, pd.DataFrame]:
     """Wrap the raw-array result dict in pandas DataFrames.
 
     full=True  -> single DataFrame, rows=terms, cols=measures.
@@ -232,7 +245,7 @@ def _to_dataframe(result, term_blocks, full):
 # ---------------------------------------------------------------------------
 
 
-def term_blocks_for_gam(gam):
+def term_blocks_for_gam(gam: GAM) -> list[TermBlock]:
     """Build the TermBlock list for a fitted GAM (parametric block first,
     then one block per smooth component), using the same slice convention
     as `_get_basis_component_infos`. The +1 shifts account for the
