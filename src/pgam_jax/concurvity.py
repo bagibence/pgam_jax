@@ -110,6 +110,83 @@ def _measures_for_term(
     return worst, observed, estimate
 
 
+def _pack_measures(
+    worst: jnp.ndarray,
+    estimate: jnp.ndarray,
+    observed: jnp.ndarray | None,
+) -> dict[str, jnp.ndarray]:
+    """Collect available concurvity measures in their public result layout."""
+    result = {"worst": worst, "estimate": estimate}
+    if observed is not None:
+        result["observed"] = observed
+    return result
+
+
+def _full_concurvity(
+    X: jnp.ndarray,
+    term_blocks: Sequence[TermBlock],
+    beta: jnp.ndarray | None,
+) -> dict[str, jnp.ndarray]:
+    """Compare each term with the rest of the model."""
+    m = len(term_blocks)
+    worst = jnp.zeros(m)
+    estimate = jnp.zeros(m)
+    observed = jnp.zeros(m) if beta is not None else None
+
+    for i, term in enumerate(term_blocks):
+        beta_block = beta[term.slice] if beta is not None else None
+        w, o, e = _measures_for_term(X, term, beta_block)
+        worst = worst.at[i].set(w)
+        estimate = estimate.at[i].set(e)
+        if observed is not None:
+            observed = observed.at[i].set(o)
+
+    return _pack_measures(worst, estimate, observed)
+
+
+def _pairwise_concurvity(
+    X: jnp.ndarray,
+    term_blocks: Sequence[TermBlock],
+    beta: jnp.ndarray | None,
+) -> dict[str, jnp.ndarray]:
+    """Compare every ordered pair of terms."""
+    m = len(term_blocks)
+    worst = jnp.ones((m, m))  # diagonal is 1 by convention in mgcv
+    estimate = jnp.ones((m, m))
+    observed = jnp.ones((m, m)) if beta is not None else None
+
+    # Convention follows mgcv's `concurvity(., full=FALSE)`: entry [i, j]
+    # is "how much of term j is explained by term i", i.e. term i plays the
+    # role of 'rest of model' and term j is the focal term whose curve gets
+    # decomposed. `worst` is symmetric; `observed` and `estimate` are not.
+    for i, term_rest in enumerate(term_blocks):
+        for j, term_focal in enumerate(term_blocks):
+            if i == j:
+                continue
+            # Build [X_rest | X_focal]; synthetic block points at X_focal.
+            cols = jnp.concatenate(
+                [
+                    jnp.arange(term_rest.start, term_rest.stop + 1),
+                    jnp.arange(term_focal.start, term_focal.stop + 1),
+                ]
+            )
+            X_pair = X[:, cols]
+            r = term_rest.ncol
+            synthetic_focal = TermBlock(
+                label=term_focal.label,
+                start=r,
+                stop=r + term_focal.ncol - 1,
+            )
+            beta_block = beta[term_focal.slice] if beta is not None else None
+            w, o, e = _measures_for_term(X_pair, synthetic_focal, beta_block)
+            worst = worst.at[i, j].set(w)
+            estimate = estimate.at[i, j].set(e)
+            if observed is not None:
+                observed = observed.at[i, j].set(o)
+
+    return _pack_measures(worst, estimate, observed)
+
+
 def concurvity(
     X: jnp.ndarray,
     term_blocks: Sequence[TermBlock],
@@ -155,56 +232,14 @@ def concurvity(
     if precondition:
         X = _precondition(X)
 
-    m = len(term_blocks)
-
     if full:
-        worst = jnp.zeros(m)
-        estim = jnp.zeros(m)
-        obs = jnp.zeros(m) if beta is not None else None
-        for i, t in enumerate(term_blocks):
-            bi = beta[t.slice] if beta is not None else None
-            w, o, e = _measures_for_term(X, t, bi)
-            worst = worst.at[i].set(w)
-            estim = estim.at[i].set(e)
-            if obs is not None:
-                obs = obs.at[i].set(o)
-        out = {"worst": worst, "estimate": estim}
-        if obs is not None:
-            out["observed"] = obs
-        return _to_dataframe(out, term_blocks, full=True) if as_dataframe else out
+        result = _full_concurvity(X, term_blocks, beta)
+    else:
+        result = _pairwise_concurvity(X, term_blocks, beta)
 
-    # Pairwise. Convention follows mgcv's `concurvity(., full=FALSE)`:
-    # entry [i, j] is "how much of term j is explained by term i", i.e.
-    # term i plays the role of 'rest of model' and term j is the focal
-    # term whose curve gets decomposed. `worst` is symmetric so this
-    # convention is invisible to it; `observed` and `estimate` are not.
-    worst = jnp.ones((m, m))  # diagonal is 1 by convention in mgcv
-    estim = jnp.ones((m, m))
-    obs = jnp.ones((m, m)) if beta is not None else None
-    for i, t_rest in enumerate(term_blocks):
-        for j, t_focal in enumerate(term_blocks):
-            if i == j:
-                continue
-            # Build [X_rest | X_focal]; synthetic block points at X_focal.
-            cols = jnp.concatenate(
-                [
-                    jnp.arange(t_rest.start, t_rest.stop + 1),
-                    jnp.arange(t_focal.start, t_focal.stop + 1),
-                ]
-            )
-            Xpair = X[:, cols]
-            r = t_rest.ncol
-            synth = TermBlock(label=t_focal.label, start=r, stop=r + t_focal.ncol - 1)
-            b_focal = beta[t_focal.slice] if beta is not None else None
-            w, o, e = _measures_for_term(Xpair, synth, b_focal)
-            worst = worst.at[i, j].set(w)
-            estim = estim.at[i, j].set(e)
-            if obs is not None:
-                obs = obs.at[i, j].set(o)
-    out = {"worst": worst, "estimate": estim}
-    if obs is not None:
-        out["observed"] = obs
-    return _to_dataframe(out, term_blocks, full=False) if as_dataframe else out
+    if as_dataframe:
+        return _to_dataframe(result, term_blocks, full=full)
+    return result
 
 
 _MEASURE_ORDER = ("worst", "observed", "estimate")
