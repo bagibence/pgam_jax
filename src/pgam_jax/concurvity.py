@@ -123,9 +123,10 @@ def concurvity(
     Parameters
     ----------
     X : array, shape (n, p)
-        Design matrix; columns must be grouped by term according to
-        `term_blocks`. Rows with NaNs should already be removed by the
-        caller (mgcv does this internally; we leave it explicit).
+        Finite design matrix whose columns are grouped by term according to
+        `term_blocks`. The caller is responsible for omitting or imputing
+        rows containing NaNs. ``GAM.concurvity`` applies the model's
+        ``nan_handling`` policy before calling this function.
     term_blocks : sequence of TermBlock
         One per term, plus a leading TermBlock for the parametric block
         if the model has one (label conventionally 'para'). Slices must

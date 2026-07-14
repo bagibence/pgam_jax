@@ -285,7 +285,7 @@ def test_two_dimensional_smooth_term_blocks():
         TermBlock("te(b,c)", 6, 20),
     ]
     # The blocks must cover the design matrix exactly.
-    X_smooths = gam._compute_uncentered_design_matrix(xi, setup_basis=False)
+    X_smooths = gam._compute_raw_design_matrix(xi, setup_basis=False)
     assert X_smooths.shape[1] + 1 == sum(b.ncol for b in blocks)
 
     assert list(df.index) == ["para", "s(a)", "te(b,c)"]

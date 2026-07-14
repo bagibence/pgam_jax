@@ -21,6 +21,14 @@ from ._identifiable_features import (
     compute_features_identifiable,
 )
 from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
+from ._nan_policy import (
+    NanHandling,
+    _rows_with_nan,
+    apply_nan_policy_for_fit,
+    apply_nan_policy_for_transform,
+    get_valid_y_rows,
+    validate_nan_handling,
+)
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
@@ -172,6 +180,13 @@ class GAM:
         If no ``init_params`` are provided, ``fit`` initializes the parameters to
         zeros. When this is True, it then fits a regularized GLM (starting from
         those zeros) to warm-start the coefficients before the PQL iterations.
+    nan_handling :
+        Policy for NaNs in the raw design matrix. ``"zero"`` (default) replaces
+        NaN features with zero and retains their rows. ``"drop"`` omits rows
+        containing any design NaN during fitting, scoring, and concurvity;
+        prediction preserves row alignment and returns NaN at those rows.
+        Rows with NaN responses are omitted during fitting and scoring under
+        either policy.
 
     Attributes
     ----------
@@ -211,6 +226,7 @@ class GAM:
         method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_reml",
         method_kwargs: dict | None = None,
         use_glm_init: bool = True,
+        nan_handling: NanHandling = "zero",
     ) -> None:
         # TODO: Make basis immutable
         if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
@@ -221,6 +237,7 @@ class GAM:
         valid_methods = ["pql_gcv", "pql_reml", "laplace_reml"]
         if method not in valid_methods:
             raise ValueError(f"method must be one of {valid_methods}")
+        nan_handling = validate_nan_handling(nan_handling)
 
         _validate_eval_bases_have_bounds(basis)
         self.basis = basis
@@ -250,6 +267,7 @@ class GAM:
         self.drop_conv_basis_col = drop_conv_basis_col
         self.n_simpson_sample = int(1e4)
         self.use_glm_init = use_glm_init
+        self.nan_handling = nan_handling
 
         # Identifiability is applied per basis component to match how the design matrix is built:
         # BSplineConv leaves follow ``drop_conv_basis_col``; other leaves drop the last column.
@@ -472,12 +490,12 @@ class GAM:
             self.basis, self.n_simpson_sample, penalize_null_space=True
         )
 
-    def _compute_uncentered_design_matrix(
+    def _compute_raw_design_matrix(
         self,
         inputs: tuple[ArrayLike, ...],
         setup_basis: bool,
     ) -> jnp.ndarray:
-        """Build the identifiability-constrained design matrix before centering."""
+        """Build an uncentered design matrix with its NaNs intact."""
         if setup_basis:
             X = compute_features_identifiable(
                 self.basis,
@@ -490,26 +508,36 @@ class GAM:
                 *inputs,
                 drop_conv_basis_col=self.drop_conv_basis_col,
             )
-        X = jnp.array(X)
+        return jnp.asarray(X)
 
-        # TODO: Drop rows with NaNs instead?
-        # original PGAM zeros out nans, but nemos drops rows with NaNs
-        return jnp.where(jnp.isnan(X), 0.0, X)
-
-    def _fit_design_matrix(self, inputs: tuple[ArrayLike, ...]) -> jnp.ndarray:
+    def _fit_design_matrix(
+        self,
+        inputs: tuple[ArrayLike, ...],
+        y: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """
-        Build the training design matrix and cache its column means.
+        Apply the fitted NaN policy and cache the resulting column means.
 
         This is the only design-matrix path that calls ``basis.setup_basis``.
         Prediction must reuse this fitted basis state and centering.
         """
-        X = self._compute_uncentered_design_matrix(inputs, setup_basis=True)
-        self.feature_mean_ = X.mean(axis=0)
-        return X - self.feature_mean_
+        X_raw = self._compute_raw_design_matrix(inputs, setup_basis=True)
+        X, y, feature_mean = apply_nan_policy_for_fit(
+            X_raw,
+            y,
+            self.nan_handling,
+        )
+        self.feature_mean_ = feature_mean
+        if y is None:  # y was supplied, so this is an internal invariant.
+            raise RuntimeError("NaN policy unexpectedly returned no response.")
+        return X, y
 
-    def _transform_design_matrix(self, inputs: tuple[ArrayLike, ...]) -> jnp.ndarray:
+    def _transform_design_matrix_with_policy(
+        self,
+        inputs: tuple[ArrayLike, ...],
+    ) -> jnp.ndarray:
         """
-        Build a prediction/evaluation design matrix using fitted centering.
+        Build a row-preserving design using the fitted NaN policy.
 
         This intentionally does not call ``basis.setup_basis``: predict should
         transform new inputs with the basis state learned during fit.
@@ -518,14 +546,12 @@ class GAM:
             raise AttributeError(
                 "GAM instance is not fitted yet. Call fit before predict."
             )
-        X = self._compute_uncentered_design_matrix(inputs, setup_basis=False)
-        if X.shape[1] != self.feature_mean_.shape[0]:
-            raise ValueError(
-                "Prediction design matrix has "
-                f"{X.shape[1]} columns, but the fitted model expects "
-                f"{self.feature_mean_.shape[0]} columns."
-            )
-        return X - self.feature_mean_
+        X_raw = self._compute_raw_design_matrix(inputs, setup_basis=False)
+        return apply_nan_policy_for_transform(
+            X_raw,
+            self.feature_mean_,
+            self.nan_handling,
+        )
 
     def _init_regularizer_strength(
         self, penalty_tree: list[jnp.ndarray]
@@ -656,7 +682,8 @@ class GAM:
         xi :
             Input arrays, one per input dimension of the basis.
         y :
-            Response variable, shape ``(n_samples,)``.
+            Response variable, shape ``(n_samples,)``. Rows containing NaNs
+            are omitted before centering and fitting.
         init_params :
             Initial (coefficients, intercept).
             If None, initialized to zeros, then further tuned if ``use_glm_init`` is True.
@@ -674,9 +701,9 @@ class GAM:
         if not isinstance(xi, tuple):
             raise TypeError("Inputs xi have to be wrapped in a tuple.")
 
-        X = self._fit_design_matrix(xi)
-        penalty_tree = self._get_penalty_tree()
         y = jnp.asarray(y)
+        X, y = self._fit_design_matrix(xi, y)
+        penalty_tree = self._get_penalty_tree()
 
         ph = self._build_penalty_handler(penalty_tree)
         compute_sqrt, compute_log_det_and_grad = ph.build()
@@ -757,12 +784,12 @@ class GAM:
         -------
         :
             Predicted mean response (after applying the inverse link function),
-            shape ``(n_samples,)``.
+            shape ``(n_samples,)``. With ``nan_handling="drop"``, entries at
+            design-invalid rows are NaN.
         """
         w, b = params
-        return self.observation_model.default_inverse_link_function(
-            self._transform_design_matrix(xi) @ w + b
-        )
+        X = self._transform_design_matrix_with_policy(xi)
+        return self.observation_model.default_inverse_link_function(X @ w + b)
 
     def predict(self, xi: tuple[ArrayLike, ...]) -> jnp.ndarray:
         """
@@ -776,7 +803,9 @@ class GAM:
         Returns
         -------
         :
-            Predicted mean response, shape ``(n_samples,)``.
+            Predicted mean response, shape ``(n_samples,)``. Prediction never
+            removes rows; ``nan_handling="drop"`` produces NaN at rows whose
+            raw design contains a NaN.
         """
         params = (self.coef_, self.intercept_)
         return self._predict(params, xi)
@@ -863,7 +892,10 @@ class GAM:
         -----
         ``worst`` is symmetric in the pairwise case (a property of
         principal angles between subspaces); ``observed`` and ``estimate``
-        are not.
+        are not. Design rows follow ``self.nan_handling``: ``"zero"`` retains
+        zero-filled rows, while ``"drop"`` omits rows containing any raw
+        design NaN. Concurvity has no response and therefore applies no
+        response-NaN filtering.
 
         References
         ----------
@@ -874,7 +906,11 @@ class GAM:
         """
         if hasattr(self, "coef_"):
             # Post-fit: reuse the cached centering and the fitted β.
-            X_smooths = self._transform_design_matrix(xi)
+            X_transformed = self._transform_design_matrix_with_policy(xi)
+            valid_X_rows = ~_rows_with_nan(X_transformed)
+            if not bool(jnp.any(valid_X_rows)):
+                raise ValueError("No valid design rows remain for concurvity.")
+            X_smooths = X_transformed[valid_X_rows]
             X = prepend_ones_for_intercept(X_smooths)
             beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
         else:
@@ -887,8 +923,8 @@ class GAM:
                 UserWarning,
                 stacklevel=2,
             )
-            X_raw = self._compute_uncentered_design_matrix(xi, setup_basis=True)
-            X_smooths = X_raw - X_raw.mean(axis=0)
+            X_raw = self._compute_raw_design_matrix(xi, setup_basis=True)
+            X_smooths, _, _ = apply_nan_policy_for_fit(X_raw, None, self.nan_handling)
             X = prepend_ones_for_intercept(X_smooths)
             beta = None
         blocks = term_blocks_for_gam(self)
@@ -985,7 +1021,9 @@ class GAM:
         xi :
             Input arrays, one per input dimension of the basis.
         y :
-            Observed response variable, shape ``(n_samples,)``.
+            Observed response variable, shape ``(n_samples,)``. Rows with NaN
+            responses are omitted. With ``nan_handling="drop"``, rows whose
+            raw design contains a NaN are also omitted.
         aggregate_sample_scores :
             Function to aggregate per-sample log-likelihoods. Default is ``jnp.mean``.
 
@@ -994,10 +1032,20 @@ class GAM:
         score :
             Aggregated log-likelihood score.
         """
-        params = (self.coef_, self.intercept_)
+        y = jnp.asarray(y)
+        X = self._transform_design_matrix_with_policy(xi)
+        valid_X_rows = ~_rows_with_nan(X)
+        valid_y_rows = get_valid_y_rows(y, n_rows=X.shape[0])
+        score_rows = valid_X_rows & valid_y_rows
+        if not bool(jnp.any(score_rows)):
+            raise ValueError("No valid rows remain for scoring.")
+
+        mu = self.observation_model.default_inverse_link_function(
+            X[score_rows] @ self.coef_ + self.intercept_
+        )
         return self.observation_model.log_likelihood(
-            y,
-            self._predict(params, xi),
+            y[score_rows],
+            mu,
             scale=self.scale_,
             aggregate_sample_scores=aggregate_sample_scores,
         )
