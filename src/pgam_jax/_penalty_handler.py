@@ -9,18 +9,17 @@ import jax.numpy as jnp
 from jax.scipy.linalg import block_diag
 
 from ._slam_compute import log_det_and_grad_slam, transform_slam, transform_slam_with_Q
-from .penalty_utils import DROP_LAST_COL, IDENTITY
+from .penalty_utils import DROP_LAST_COL, IDENTITY, eigh_with_rank
 
 
 def _eigh_and_rank(S):
-    S = 0.5 * (S + S.T)
-    eig, U = jnp.linalg.eigh(S)
-    thresh = jnp.finfo(S.dtype).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
-    pos = eig > thresh
-    rank = jnp.sum(pos)
+    # Shares the single rank/null-space criterion (eigh_with_rank) with the
+    # penalty-tensor builder, so the handler's rho_len cannot diverge from the
+    # tree's component count.
+    eig, U, pos = eigh_with_rank(S)
     # Keep static shapes: zero out sub-threshold eigenvalues instead of selecting.
     # U is returned in full (q × q); eigenvectors are columns, as per eigh convention.
-    return jnp.where(pos, eig, 0.0), U, rank
+    return jnp.where(pos, eig, 0.0), U, jnp.sum(pos)
 
 
 def _log_pseudo_det_from_eigvals(eig):
@@ -78,7 +77,7 @@ def _full_rank_precompute(S_in):
     frobs = jnp.sqrt(jnp.sum(S_in**2, axis=(1, 2), keepdims=True))
     norm_avg = jnp.sum(S_in / frobs, axis=0)
     ev, U = jnp.linalg.eigh(norm_avg)
-    eps = float(jnp.finfo(float).eps ** 0.8)
+    eps = float(jnp.finfo(S_in.dtype).eps ** 0.8)
     keep = ev > ev[-1] * eps  # eager boolean index, precompute only
     U_keep = U[:, keep]
     full_rank_S = U_keep.T[None] @ S_in @ U_keep[None]

@@ -1,6 +1,6 @@
 import math
 from collections.abc import Callable
-from functools import partial
+from functools import partial, reduce
 from typing import Any
 
 import jax
@@ -310,6 +310,68 @@ def compute_energy_penalty(
     return energy_pen
 
 
+# Exponent of machine epsilon in the relative eigenvalue threshold that
+# separates positive from null eigenvalues. Defined once so every rank /
+# null-space determination uses an identical criterion.
+_RANK_THRESHOLD_EXPONENT = 0.7
+
+
+def eigh_with_rank(matrix):
+    """Symmetric eigendecomposition with the canonical rank mask.
+
+    Single source of the rank / null-space threshold shared by the penalty
+    tensor builder and the penalty handler, so the two cannot disagree on
+    whether a smooth's penalty has a null space (a disagreement that otherwise
+    yields mismatched regularisation-strength vector lengths).
+
+    Parameters
+    ----------
+    matrix :
+        A square, (approximately) symmetric matrix.
+
+    Returns
+    -------
+    eig :
+        Eigenvalues in ascending order.
+    U :
+        Eigenvectors as columns.
+    pos :
+        Boolean mask of eigenvalues above the threshold. ``pos.sum()`` is the
+        numerical rank and ``U[:, ~pos]`` is an orthonormal basis of the null
+        space.
+    """
+    matrix = 0.5 * (matrix + matrix.T)
+    eig, U = jnp.linalg.eigh(matrix)
+    thresh = jnp.finfo(matrix.dtype).eps ** _RANK_THRESHOLD_EXPONENT * jnp.maximum(
+        jnp.abs(eig).max(), 1e-300
+    )
+    return eig, U, eig > thresh
+
+
+def _kron_sum_null_projector(factors):
+    """Null-space projector of the Kronecker sum of PSD ``factors``.
+
+    The energy penalty of a tensor-product smooth is the Kronecker sum
+    ``S_1 ⊕ S_2 ⊕ ...``; for positive-semidefinite factors its null space
+    factorises as ``null(S_1) ⊗ null(S_2) ⊗ ...``, so the (orthonormal) null
+    projector is the Kronecker product of the per-factor null projectors. It is
+    computed from :func:`eigh_with_rank`, i.e. the same per-factor criterion the
+    penalty handler uses, guaranteeing the tree's component count matches the
+    handler's ``rho_len``.
+
+    Returns ``None`` when any factor is full rank (the sum then has no null
+    space and no null penalty is added).
+    """
+    projectors = []
+    for factor in factors:
+        _, U, pos = eigh_with_rank(jnp.asarray(factor))
+        if bool(jnp.all(pos)):
+            return None
+        null_basis = U[:, ~pos]
+        projectors.append(null_basis @ null_basis.T)
+    return reduce(jnp.kron, projectors)
+
+
 def compute_penalty_null_space(penalty):
     if not config.DEBUG:
         return compute_penalty_null_space_jax(penalty)
@@ -334,7 +396,9 @@ def compute_penalty_null_space_numpy(penalty):
     # original algorith summed (null-space should be the same)
     penalty = penalty.sum(axis=0)
     eig, U = np.linalg.eigh(penalty)
-    thresh = np.finfo(float).eps ** 0.7 * max(np.abs(eig).max(), 1e-300)
+    thresh = np.finfo(penalty.dtype).eps ** _RANK_THRESHOLD_EXPONENT * max(
+        np.abs(eig).max(), 1e-300
+    )
     zero_idx = eig <= thresh
     U = U[:, zero_idx]
     return np.dot(U, U.T)
@@ -355,11 +419,9 @@ def compute_penalty_null_space_jax(penalty):
         Null space projection matrix of shape (K, K).
     """
     penalty = (penalty / jnp.sum(penalty**2, axis=(1, 2), keepdims=True)).mean(axis=0)
-    eig, U = jnp.linalg.eigh(penalty)
-    thresh = jnp.finfo(penalty.dtype).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
-    zero_idx = eig <= thresh
-    U = U[:, zero_idx]
-    return jnp.dot(U, U.T)
+    _, U, pos = eigh_with_rank(penalty)
+    null_basis = U[:, ~pos]
+    return null_basis @ null_basis.T
 
 
 def compute_weighted_penalty(penalty_tensor: jnp.ndarray, reg_strength: jnp.ndarray):
@@ -569,22 +631,18 @@ def compute_energy_penalty_tensor_additive_component(
     one_dim_pen = compute_energy_penalty_factors(basis_component, n_samples)
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)
     if penalize_null_space:
-        # In GAMs one penalizes the null space of a linear combinations of positive-semidefinite
-        # matrices with positive coefficients (a convex cone). The null space of any matrix in the interior
-        # of the cone is the intersection of the null space of individual matrix.
-        # Example, take two positive-semidef matrices A, B and positive constant a,b>0, then
-        # 0 = v.T * (a * A + b * B) v = a * (v.T * A * v) + b * (v.T * B * v) which is true iif
-        # (v.T * A * v) = (v.T * B * v) = 0, since A and B are positive semidef. I.e. v is in null(A) intersect
-        # null(B). For this reason we can compute the null-space of the sum of the penality matrices and penalize that.
-        # In the original code the sum was used, however, the mean is more stable when summing many matrices.
-        null_pen = compute_penalty_null_space(out)
-        full_rank = (
-            null_pen[None]
-            if ~np.all(null_pen == 0)
-            else jnp.zeros((0, *null_pen.shape))
-        )
-        out = jnp.concatenate((out, full_rank), axis=0)
-    return out
+        # In GAMs one penalizes the null space of a linear combination of
+        # positive-semidefinite matrices with positive coefficients (a convex
+        # cone). The null space of any matrix in the interior of the cone is the
+        # intersection of the individual null spaces; for the Kronecker sum here
+        # that intersection is the tensor product of the per-factor null spaces.
+        # We therefore build the null projector directly from the factors, using
+        # the same rank threshold as the penalty handler, rather than a second
+        # eigendecomposition of the assembled matrix that could disagree with it.
+        null_pen = _kron_sum_null_projector(one_dim_pen)
+        if null_pen is not None:
+            return jnp.concatenate((jnp.asarray(out), null_pen[None]), axis=0)
+    return jnp.asarray(out)
 
 
 def compute_energy_penalty_tensor(
