@@ -97,6 +97,38 @@ def test_fit_runs_end_to_end(method):
     assert np.corrcoef(pred, np.exp(eta))[0, 1] > 0.5
 
 
+def test_initialize_params_warm_starts_intercept_at_link_of_mean():
+    """coef starts at 0 and the intercept at link(mean y), not 0.
+
+    Regression: a zero intercept starts a sparse-count model far from the
+    optimum, and the GLM warm-start solver could overshoot into the flat,
+    rate-floored tail of the Poisson NLL and stall at a garbage intercept
+    (``exp(eta) = 0`` -> NaNs downstream).
+    """
+    model = GAM(_basis())  # PoissonObservations, log link
+    rng = np.random.default_rng(0)
+    y = rng.poisson(0.03, size=3000).astype(float)
+    X = rng.standard_normal((3000, 7))
+
+    coef, intercept = model.initialize_params(X, y)
+
+    assert coef.shape == (7,)
+    assert np.all(np.asarray(coef) == 0.0)
+    np.testing.assert_allclose(np.asarray(intercept), np.log(y.mean()), rtol=1e-6)
+
+
+def test_initialize_params_intercept_finite_for_degenerate_response():
+    """All-zero counts -> log(mean) = -inf -> intercept falls back to finite 0."""
+    model = GAM(_basis())
+    y = np.zeros(500)
+    X = np.zeros((500, 5))
+
+    _, intercept = model.initialize_params(X, y)
+
+    assert np.all(np.isfinite(np.asarray(intercept)))
+    np.testing.assert_allclose(np.asarray(intercept), 0.0)
+
+
 def test_use_glm_init_reaches_same_solution():
     """Regardless of use_glm_init, the converged fit must converge to the same result."""
     x, y, _ = _poisson_data()
