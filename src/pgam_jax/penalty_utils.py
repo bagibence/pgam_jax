@@ -356,7 +356,7 @@ def compute_penalty_null_space_jax(penalty):
     """
     penalty = (penalty / jnp.sum(penalty**2, axis=(1, 2), keepdims=True)).mean(axis=0)
     eig, U = jnp.linalg.eigh(penalty)
-    thresh = jnp.finfo(float).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
+    thresh = jnp.finfo(penalty.dtype).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
     zero_idx = eig <= thresh
     U = U[:, zero_idx]
     return jnp.dot(U, U.T)
