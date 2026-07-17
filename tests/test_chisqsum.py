@@ -152,7 +152,11 @@ def _have_r_mgcv():
     if shutil.which("Rscript") is None:
         return False
     check = subprocess.run(
-        ["Rscript", "-e", "quit(status = if (requireNamespace('mgcv', quietly=TRUE)) 0 else 2)"],
+        [
+            "Rscript",
+            "-e",
+            "quit(status = if (requireNamespace('mgcv', quietly=TRUE)) 0 else 2)",
+        ],
         capture_output=True,
     )
     return check.returncode == 0

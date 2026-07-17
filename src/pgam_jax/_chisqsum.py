@@ -134,11 +134,11 @@ def _phase_and_envelope(
         The positive envelope :math:`e^{-\psi(u)} / u`.
     """
     x = 2.0 * weights * u
-    x_sq = x ** 2
+    x_sq = x**2
     ncp = noncentrality * x / (1.0 + x_sq)
     phase = 0.5 * np.sum(df * np.arctan(x) + ncp)
     log_modulus = (
-        -0.5 * sigma_sq * u ** 2
+        -0.5 * sigma_sq * u**2
         - 0.25 * np.sum(df * np.log1p(x_sq))
         - 0.5 * np.sum(x * ncp)
     )
