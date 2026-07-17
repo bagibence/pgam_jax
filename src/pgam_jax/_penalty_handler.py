@@ -15,7 +15,7 @@ from .penalty_utils import DROP_LAST_COL, IDENTITY
 def _eigh_and_rank(S):
     S = 0.5 * (S + S.T)
     eig, U = jnp.linalg.eigh(S)
-    thresh = jnp.finfo(float).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
+    thresh = jnp.finfo(S.dtype).eps ** 0.7 * jnp.maximum(jnp.abs(eig).max(), 1e-300)
     pos = eig > thresh
     rank = jnp.sum(pos)
     # Keep static shapes: zero out sub-threshold eigenvalues instead of selecting.
