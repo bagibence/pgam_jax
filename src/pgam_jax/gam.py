@@ -308,11 +308,19 @@ class GAM:
         :
             Zero-initialized (coefficients, intercept).
         """
-        in_ndim = X.shape[1]
-        out_ndim = 1 if y.ndim == 1 else y.shape[1]
+        coef = jnp.zeros(X.shape[1])
 
-        coef = jnp.zeros(in_ndim)
-        intercept = jnp.zeros(out_ndim)
+        # Warm-start the intercept at the link of the mean response (e.g.
+        # log(mean y) for Poisson). Starting at 0 sets the initial mean to
+        # inv_link(0), far above the true mean for sparse data; the first solver
+        # step then overshoots into the flat, rate-floored tail of the NLL and
+        # can stall at a garbage intercept (-> exp(eta) = 0 -> NaNs downstream).
+        # link(mean) starts at the intercept-only optimum; fall back to 0 if it
+        # is non-finite (degenerate response).
+        link = INVERSE_FUNCS[self.observation_model.default_inverse_link_function]
+        mean_response = jnp.mean(y if y.ndim > 1 else y[:, None], axis=0)
+        intercept = link(mean_response)
+        intercept = jnp.where(jnp.isfinite(intercept), intercept, 0.0)
 
         return (coef, intercept)
 
