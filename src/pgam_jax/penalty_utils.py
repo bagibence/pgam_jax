@@ -373,50 +373,25 @@ def _kron_sum_null_projector(factors):
 
 
 def compute_penalty_null_space(penalty):
-    if not config.DEBUG:
-        return compute_penalty_null_space_jax(penalty)
-    else:
-        return compute_penalty_null_space_numpy(penalty)
-
-
-def compute_penalty_null_space_numpy(penalty):
     """
-    Compute the null space projection of a penalty matrix.
+    Compute the null-space projection of a stacked penalty matrix.
+
+    numpy and JAX arrays are interoperable here, so a single implementation
+    serves both; it shares the rank threshold with the rest of the penalty
+    machinery via :func:`eigh_with_rank`.
 
     Parameters
     ----------
     penalty :
-        Penalty matrix of shape (m, K, K).
+        Penalty tensor of shape (m, K, K). For a positive-coefficient
+        combination the null space is the intersection of the per-term null
+        spaces, recovered here from the Frobenius-normalised mean over the m
+        terms (more stable than the raw sum when m is large).
 
     Returns
     -------
     :
-        Null space projection matrix of shape (K, K).
-    """
-    # original algorith summed (null-space should be the same)
-    penalty = penalty.sum(axis=0)
-    eig, U = np.linalg.eigh(penalty)
-    thresh = np.finfo(penalty.dtype).eps ** _RANK_THRESHOLD_EXPONENT * max(
-        np.abs(eig).max(), 1e-300
-    )
-    zero_idx = eig <= thresh
-    U = U[:, zero_idx]
-    return np.dot(U, U.T)
-
-
-def compute_penalty_null_space_jax(penalty):
-    """
-    Compute the null space projection of a penalty matrix.
-
-    Parameters
-    ----------
-    penalty :
-        Penalty matrix of shape (m, K, K).
-
-    Returns
-    -------
-    :
-        Null space projection matrix of shape (K, K).
+        Null-space projection matrix of shape (K, K).
     """
     penalty = (penalty / jnp.sum(penalty**2, axis=(1, 2), keepdims=True)).mean(axis=0)
     _, U, pos = eigh_with_rank(penalty)
