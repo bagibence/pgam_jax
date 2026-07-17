@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from conftest import central_diff, diff2_penalty
 from jax.scipy.linalg import block_diag
 
 from pgam_jax._penalty_handler import (
@@ -49,7 +50,7 @@ def _diff2_penalty(n):
 @pytest.fixture(scope="module")
 def S1():
     """10×10 second-derivative penalty, rank 8, 2-dim null space."""
-    return _diff2_penalty(10)
+    return diff2_penalty(10)
 
 
 @pytest.fixture(scope="module")
@@ -530,7 +531,7 @@ class TestLogDetAndGrad:
         ph.add(S1, penalize_null_space=False, identifiability_fn=id_fn)
         rho = jnp.array([rho])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- SINGLE_WITH_NULL --------------------------------------------------
@@ -556,7 +557,7 @@ class TestLogDetAndGrad:
         ph.add(S1, penalize_null_space=True, identifiability_fn=id_fn)
         rho = jnp.array([rho_pen, rho_null])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- KRONECKER ---------------------------------------------------------
@@ -581,7 +582,7 @@ class TestLogDetAndGrad:
         ph.add_kron([S1, S1], penalize_null_space=False, identifiability_fn=id_fn)
         rho = jnp.array([rho0, rho1])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- KRONECKER_WITH_NULL -----------------------------------------------
@@ -612,7 +613,7 @@ class TestLogDetAndGrad:
         ph.add_kron([S1, S1], penalize_null_space=True, identifiability_fn=id_fn)
         rho = jnp.array([rho0, rho1, rho_null])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- GENERAL -----------------------------------------------------------
@@ -637,7 +638,7 @@ class TestLogDetAndGrad:
         ph.add(S_kron, penalize_null_space=True, identifiability_fn=id_fn)
         rho = jnp.array([rho0, rho1])
         _, g = self._ph_ld_grad(ph, [rho])
-        g_cd = _cd_grad(lambda r: self._ph_ld_grad(ph, [r])[0], rho)
+        g_cd = central_diff(lambda r: self._ph_ld_grad(ph, [jnp.asarray(r)])[0], rho)
         np.testing.assert_allclose(g, g_cd, rtol=1e-5)
 
     # ---- GENERAL matches KRONECKER on same tensor --------------------------

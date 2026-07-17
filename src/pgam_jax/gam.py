@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import warnings
 from typing import Callable, Literal
 
+import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxopt import LBFGS, ScipyMinimize
@@ -18,9 +20,21 @@ from ._identifiable_features import (
     _should_drop_basis_col,
     compute_features_identifiable,
 )
+from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
+from ._nan_policy import (
+    NanHandling,
+    _rows_with_nan,
+    apply_nan_policy_for_fit,
+    apply_nan_policy_for_transform,
+    get_valid_y_rows,
+    validate_nan_handling,
+)
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
+from ._utils import prepend_ones_for_intercept
+from .concurvity import concurvity as _concurvity
+from .concurvity import term_blocks_for_gam
 from .iterative_optim import (
     VALID_CONVERGENCE_CRITERIA,
     model_constructors_for_weights_and_pseudo_data,
@@ -32,6 +46,7 @@ from .penalty_utils import (
     IDENTITY,
     compute_energy_penalty_factors,
     compute_energy_penalty_tensor,
+    compute_penalty_blocks,
     prepend_zeros_for_intercept,
 )
 
@@ -144,13 +159,34 @@ class GAM:
         Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
         but the option is added for matching the original implementation if required.
     method :
-        Smoothing-parameter selection criterion.  ``"gcv"`` (default) uses
-        Generalized Cross-Validation; ``"reml"`` uses Restricted Maximum
-        Likelihood on the linearized working model.
+        Smoothing-parameter selection algorithm. Default ``"pql_reml"``.
+
+        - ``"pql_gcv"``: Generalized Cross-Validation on the PQL-linearized
+          working model.
+        - ``"pql_reml"``: Restricted Maximum Likelihood on the PQL-linearized
+          working model.
+        - ``"laplace_reml"``: Laplace-approximated REML on the true GLM
+          likelihood at the MAP. Currently Poisson-only (φ fixed at 1).
+
+        The ``pql_*`` methods share the IRLS outer loop (``pql_outer_iteration``);
+        ``laplace_reml`` instead optimizes ρ directly over the Laplace REML
+        objective, re-fitting β̂ to the MAP at each ρ evaluation.
+    method_kwargs :
+        Optional per-method tuning dict. For ``"laplace_reml"`` the recognized
+        keys are ``inner_solver`` / ``inner_solver_kwargs`` (MAP β̂ solve) and
+        ``outer_solver`` / ``outer_solver_kwargs`` (ρ optimization), each a
+        ``nemos.solvers`` registry name and its constructor kwargs.
     use_glm_init :
         If no ``init_params`` are provided, ``fit`` initializes the parameters to
         zeros. When this is True, it then fits a regularized GLM (starting from
         those zeros) to warm-start the coefficients before the PQL iterations.
+    nan_handling :
+        Policy for NaNs in the raw design matrix. ``"zero"`` (default) replaces
+        NaN features with zero and retains their rows. ``"drop"`` omits rows
+        containing any design NaN during fitting, scoring, and concurvity;
+        prediction preserves row alignment and returns NaN at those rows.
+        Rows with NaN responses are omitted during fitting and scoring under
+        either policy.
 
     Attributes
     ----------
@@ -187,8 +223,10 @@ class GAM:
         use_scipy: bool = False,
         convergence_criterion: str = "gcv",
         drop_conv_basis_col: bool = False,
-        method: Literal["gcv", "reml"] = "gcv",
+        method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_reml",
+        method_kwargs: dict | None = None,
         use_glm_init: bool = True,
+        nan_handling: NanHandling = "zero",
     ) -> None:
         # TODO: Make basis immutable
         if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
@@ -196,13 +234,30 @@ class GAM:
                 f"convergence_criterion must be one of {VALID_CONVERGENCE_CRITERIA}, "
                 f"got {convergence_criterion!r}."
             )
-        if method not in ["gcv", "reml"]:
-            raise ValueError('method must be one of ["gcv", "reml"]')
+        valid_methods = ["pql_gcv", "pql_reml", "laplace_reml"]
+        if method not in valid_methods:
+            raise ValueError(f"method must be one of {valid_methods}")
+        nan_handling = validate_nan_handling(nan_handling)
 
         _validate_eval_bases_have_bounds(basis)
         self.basis = basis
         self.method = method
+        self.method_kwargs = method_kwargs or {}
         self.observation_model = observation_model
+
+        # Laplace-REML currently supports only Poisson: phi is fixed at 1 there.
+        # The empirical phi-scaling test (_script/check_phi_scaling.py) shows
+        # rho-hat does NOT factor from phi for the Laplace objective, so non-
+        # Poisson families need a joint rho/phi outer iteration not yet built.
+        if method == "laplace_reml" and not isinstance(
+            observation_model, PoissonObservations
+        ):
+            raise NotImplementedError(
+                'method="laplace_reml" currently supports only '
+                "PoissonObservations (phi fixed at 1). Gaussian/Gamma require a "
+                "joint rho/phi outer iteration, which is not yet implemented."
+            )
+
         self.variance_function = _make_variance_function(self.observation_model)
         self.maxiter = maxiter
         self.tol_update = tol_update
@@ -212,6 +267,7 @@ class GAM:
         self.drop_conv_basis_col = drop_conv_basis_col
         self.n_simpson_sample = int(1e4)
         self.use_glm_init = use_glm_init
+        self.nan_handling = nan_handling
 
         # Identifiability is applied per basis component to match how the design matrix is built:
         # BSplineConv leaves follow ``drop_conv_basis_col``; other leaves drop the last column.
@@ -339,15 +395,15 @@ class GAM:
         return ph
 
     def _make_inner_func(self, penalty_tree, compute_sqrt, compute_log_det_and_grad):
-        """Build the smoothing-parameter objective for the current ``method``."""
-        if self.method == "gcv":
+        """Build the PQL inner-loop smoothing-parameter objective for ``method``."""
+        if self.method == "pql_gcv":
             return gcv_compute_factory(
                 compute_sqrt,
                 self._apply_identifiability_column,
                 self._apply_identifiability_square,
                 1.5,
             )
-        if self.method == "reml":
+        if self.method == "pql_reml":
             return reml_compute_factory(
                 compute_sqrt,
                 compute_log_det_and_grad,
@@ -355,7 +411,74 @@ class GAM:
                 self._apply_identifiability_square,
             )
 
-        raise ValueError('method must be one of ["gcv", "reml"]')
+        raise ValueError(
+            f"_make_inner_func handles only the PQL methods; got method={self.method!r}"
+        )
+
+    def _fit_laplace_reml(
+        self,
+        X,
+        y,
+        penalty_tree,
+        compute_sqrt,
+        compute_log_det_and_grad,
+        init_params,
+        init_regularizer_strength,
+    ):
+        """Direct Laplace-REML fit: optimise rho via the Laplace-approximated REML.
+
+        Mirrors the output contract of ``pql_outer_iteration`` — returns
+        ``((coef, intercept), regularizer_strength, n_iter)`` — so ``fit`` can
+        treat both paths uniformly.
+
+        Unlike the PQL path (which alternates IRLS coefficient updates with a
+        linearised smoothing-parameter step), here the outer optimiser drives
+        rho directly over the Laplace-approximated REML, re-fitting beta_hat to
+        the MAP at each rho evaluation.
+        """
+        # laplace_reml works on the full design [intercept | smooths] and the
+        # full coefficient vector; the PQL path keeps the intercept separate.
+        X_full = prepend_ones_for_intercept(X)
+
+        # S_all: (M, P, P) penalty stack in the full coef space, intercept
+        # row/col zero — same construction _pql_reml uses for its gradient.
+        penalty_blocks = compute_penalty_blocks(
+            penalty_tree,
+            apply_identifiability=self._apply_identifiability_square,
+            shift_by=1,
+        )
+        S_all = jnp.concatenate(jax.tree_util.tree_leaves(penalty_blocks), axis=0)
+
+        coef0, intercept0 = init_params
+        init_beta = jnp.concatenate([jnp.atleast_1d(intercept0), coef0])
+
+        # M_null: _get_penalty_tree penalises every smooth's null space
+        # (penalize_null_space=True), so the only unpenalised direction is the
+        # intercept — M_null is 1, analytically, with no rank estimation.
+        M_null = 1
+
+        # phi = 1: Laplace-REML is Poisson-only here (enforced at construction).
+        inner_solve = make_inner_solver(
+            self.method_kwargs.get("inner_solver", "LBFGS"),
+            self.method_kwargs.get("inner_solver_kwargs"),
+        )
+        rhos_opt, beta_opt, n_iter = laplace_reml_outer_iteration(
+            init_regularizer_strength,
+            init_beta,
+            X_full,
+            y,
+            self.observation_model,
+            self.observation_model.default_inverse_link_function,
+            S_all,
+            1.0,  # phi
+            M_null,
+            compute_sqrt,
+            compute_log_det_and_grad,
+            inner_solve=inner_solve,
+            outer_solver_name=self.method_kwargs.get("outer_solver", "LBFGS"),
+            outer_solver_kwargs=self.method_kwargs.get("outer_solver_kwargs"),
+        )
+        return (beta_opt[1:], beta_opt[:1]), rhos_opt, n_iter
 
     def _get_penalty_tree(self) -> list[jnp.ndarray]:
         """
@@ -367,12 +490,12 @@ class GAM:
             self.basis, self.n_simpson_sample, penalize_null_space=True
         )
 
-    def _compute_uncentered_design_matrix(
+    def _compute_raw_design_matrix(
         self,
         inputs: tuple[ArrayLike, ...],
         setup_basis: bool,
     ) -> jnp.ndarray:
-        """Build the identifiability-constrained design matrix before centering."""
+        """Build an uncentered design matrix with its NaNs intact."""
         if setup_basis:
             X = compute_features_identifiable(
                 self.basis,
@@ -385,26 +508,36 @@ class GAM:
                 *inputs,
                 drop_conv_basis_col=self.drop_conv_basis_col,
             )
-        X = jnp.array(X)
+        return jnp.asarray(X)
 
-        # TODO: Drop rows with NaNs instead?
-        # original PGAM zeros out nans, but nemos drops rows with NaNs
-        return jnp.where(jnp.isnan(X), 0.0, X)
-
-    def _fit_design_matrix(self, inputs: tuple[ArrayLike, ...]) -> jnp.ndarray:
+    def _fit_design_matrix(
+        self,
+        inputs: tuple[ArrayLike, ...],
+        y: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """
-        Build the training design matrix and cache its column means.
+        Apply the fitted NaN policy and cache the resulting column means.
 
         This is the only design-matrix path that calls ``basis.setup_basis``.
         Prediction must reuse this fitted basis state and centering.
         """
-        X = self._compute_uncentered_design_matrix(inputs, setup_basis=True)
-        self.feature_mean_ = X.mean(axis=0)
-        return X - self.feature_mean_
+        X_raw = self._compute_raw_design_matrix(inputs, setup_basis=True)
+        X, y, feature_mean = apply_nan_policy_for_fit(
+            X_raw,
+            y,
+            self.nan_handling,
+        )
+        self.feature_mean_ = feature_mean
+        if y is None:  # y was supplied, so this is an internal invariant.
+            raise RuntimeError("NaN policy unexpectedly returned no response.")
+        return X, y
 
-    def _transform_design_matrix(self, inputs: tuple[ArrayLike, ...]) -> jnp.ndarray:
+    def _transform_design_matrix_with_policy(
+        self,
+        inputs: tuple[ArrayLike, ...],
+    ) -> jnp.ndarray:
         """
-        Build a prediction/evaluation design matrix using fitted centering.
+        Build a row-preserving design using the fitted NaN policy.
 
         This intentionally does not call ``basis.setup_basis``: predict should
         transform new inputs with the basis state learned during fit.
@@ -413,14 +546,12 @@ class GAM:
             raise AttributeError(
                 "GAM instance is not fitted yet. Call fit before predict."
             )
-        X = self._compute_uncentered_design_matrix(inputs, setup_basis=False)
-        if X.shape[1] != self.feature_mean_.shape[0]:
-            raise ValueError(
-                "Prediction design matrix has "
-                f"{X.shape[1]} columns, but the fitted model expects "
-                f"{self.feature_mean_.shape[0]} columns."
-            )
-        return X - self.feature_mean_
+        X_raw = self._compute_raw_design_matrix(inputs, setup_basis=False)
+        return apply_nan_policy_for_transform(
+            X_raw,
+            self.feature_mean_,
+            self.nan_handling,
+        )
 
     def _init_regularizer_strength(
         self, penalty_tree: list[jnp.ndarray]
@@ -475,7 +606,7 @@ class GAM:
         weights = jnp.clip(weights, 0.0, jnp.inf)
 
         # Xw^T Xw = X^T W X
-        X_full = jnp.column_stack((jnp.ones(n_obs), X))
+        X_full = prepend_ones_for_intercept(X)
         Xw = X_full * jnp.sqrt(weights)[:, None]
         R = jnp.linalg.qr(Xw, mode="r")
 
@@ -551,7 +682,8 @@ class GAM:
         xi :
             Input arrays, one per input dimension of the basis.
         y :
-            Response variable, shape ``(n_samples,)``.
+            Response variable, shape ``(n_samples,)``. Rows containing NaNs
+            are omitted before centering and fitting.
         init_params :
             Initial (coefficients, intercept).
             If None, initialized to zeros, then further tuned if ``use_glm_init`` is True.
@@ -569,9 +701,9 @@ class GAM:
         if not isinstance(xi, tuple):
             raise TypeError("Inputs xi have to be wrapped in a tuple.")
 
-        X = self._fit_design_matrix(xi)
-        penalty_tree = self._get_penalty_tree()
         y = jnp.asarray(y)
+        X, y = self._fit_design_matrix(xi, y)
+        penalty_tree = self._get_penalty_tree()
 
         ph = self._build_penalty_handler(penalty_tree)
         compute_sqrt, compute_log_det_and_grad = ph.build()
@@ -588,23 +720,36 @@ class GAM:
                     X, y, init_params, sqrt_penalty
                 )
 
-        opt_coef, opt_pen, n_iter = pql_outer_iteration(
-            init_regularizer_strength,  # initial log(λ) for each smooth
-            init_params,  # initial (coefficients, intercept)
-            X,
-            y,
-            penalty_tree,
-            self.observation_model,
-            self.variance_function,
-            self._make_inner_func(penalty_tree, compute_sqrt, compute_log_det_and_grad),
-            compute_sqrt,
-            fisher_scoring=False,  # use observed information, not expected
-            max_iter=self.maxiter,
-            tol_update=self.tol_update,  # convergence tolerance for coefficient updates
-            tol_optim=self.tol_optim,  # tolerance for inner GCV optimization
-            use_scipy=self.use_scipy,
-            convergence_criterion=self.convergence_criterion,
-        )
+        if self.method == "laplace_reml":
+            opt_coef, opt_pen, n_iter = self._fit_laplace_reml(
+                X,
+                y,
+                penalty_tree,
+                compute_sqrt,
+                compute_log_det_and_grad,
+                init_params,
+                init_regularizer_strength,
+            )
+        else:
+            opt_coef, opt_pen, n_iter = pql_outer_iteration(
+                init_regularizer_strength,  # initial log(λ) for each smooth
+                init_params,  # initial (coefficients, intercept)
+                X,
+                y,
+                penalty_tree,
+                self.observation_model,
+                self.variance_function,
+                self._make_inner_func(
+                    penalty_tree, compute_sqrt, compute_log_det_and_grad
+                ),
+                compute_sqrt,
+                fisher_scoring=False,  # use observed information, not expected
+                max_iter=self.maxiter,
+                tol_update=self.tol_update,  # convergence tol for coefficient updates
+                tol_optim=self.tol_optim,  # tolerance for inner GCV optimization
+                use_scipy=self.use_scipy,
+                convergence_criterion=self.convergence_criterion,
+            )
 
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
@@ -639,12 +784,12 @@ class GAM:
         -------
         :
             Predicted mean response (after applying the inverse link function),
-            shape ``(n_samples,)``.
+            shape ``(n_samples,)``. With ``nan_handling="drop"``, entries at
+            design-invalid rows are NaN.
         """
         w, b = params
-        return self.observation_model.default_inverse_link_function(
-            self._transform_design_matrix(xi) @ w + b
-        )
+        X = self._transform_design_matrix_with_policy(xi)
+        return self.observation_model.default_inverse_link_function(X @ w + b)
 
     def predict(self, xi: tuple[ArrayLike, ...]) -> jnp.ndarray:
         """
@@ -658,10 +803,132 @@ class GAM:
         Returns
         -------
         :
-            Predicted mean response, shape ``(n_samples,)``.
+            Predicted mean response, shape ``(n_samples,)``. Prediction never
+            removes rows; ``nan_handling="drop"`` produces NaN at rows whose
+            raw design contains a NaN.
         """
         params = (self.coef_, self.intercept_)
         return self._predict(params, xi)
+
+    def concurvity(
+        self,
+        xi: tuple[ArrayLike, ...],
+        full: bool = True,
+        as_dataframe: bool = False,
+    ):
+        r"""Concurvity diagnostics for this GAM.
+
+        Concurvity generalizes collinearity to smooth terms: it measures the
+        fraction of a smooth's fitted curve that can be reproduced by some
+        combination of the other terms in the model. High concurvity makes
+        individual smooths weakly identifiable and their coefficient
+        estimates unstable, even though the model as a whole can fit well.
+
+        For each term, the contribution
+        :math:`\mathbf{f}_i = \mathbf{X}_i \boldsymbol{\beta}_i` is split as
+        :math:`\mathbf{f}_i = \mathbf{g}_i + (\mathbf{f}_i - \mathbf{g}_i)`,
+        where :math:`\mathbf{g}_i` is the projection of
+        :math:`\mathbf{f}_i` onto the column space of the *other* terms.
+        Three indices summarize :math:`\|\mathbf{g}_i\|^2/\|\mathbf{f}_i\|^2`,
+        all in :math:`[0, 1]` (0 = identifiable, 1 = fully redundant):
+
+        - ``worst`` — :math:`\sup_{\boldsymbol{\beta}_i}
+          \|\mathbf{g}_i\|^2/\|\mathbf{f}_i\|^2`. Worst case over coefficient
+          space; pessimistic but coefficient-free.
+        - ``estimate`` — the Frobenius-norm ratio
+          :math:`\|\mathbf{R}_{12}\|_F^2/\|\mathbf{R}_{:,2}\|_F^2` from the
+          block-QR of :math:`[\mathbf{X}_{-i} \mid \mathbf{X}_i]`. Free of
+          both pessimism and optimism; depends only on the design matrix.
+        - ``observed`` — the ratio evaluated at the fitted
+          :math:`\hat{\boldsymbol{\beta}}_i`. Most direct interpretation, but
+          can be over-optimistic if shrinkage pushed :math:`\hat{\boldsymbol{\beta}}_i`
+          away from the worst-case direction. **Only available after fit.**
+
+        Callable in two states:
+
+        - **Before** ``fit``: returns ``worst`` and ``estimate`` only (these
+          are properties of the design matrix and don't need
+          :math:`\hat{\boldsymbol{\beta}}`) and emits a ``UserWarning`` noting
+          that ``observed`` is unavailable. Side effect: ``basis.setup_basis``
+          is called on ``xi`` to make the basis usable for evaluation; a
+          later ``fit(xi_train, …)`` will overwrite this state.
+        - **After** ``fit``: returns all three measures using the cached
+          ``feature_mean_`` and the fitted coefficients.
+
+        Parameters
+        ----------
+        xi :
+            Inputs at which to evaluate concurvity, one array per basis
+            dimension. After ``fit`` you almost always want to pass the
+            training inputs; before ``fit``, pass the inputs you plan to
+            train on (so the design matrix is the one the actual fit will
+            see).
+        full :
+            If ``True`` (default), decompose each term against the rest of
+            the model. If ``False``, return pairwise concurvity between
+            every ordered pair of terms; the diagonal is 1 by convention.
+        as_dataframe :
+            If ``True``, return pandas DataFrames instead of raw arrays.
+            See *Returns*.
+
+        Returns
+        -------
+        dict[str, jax.Array] | pandas.DataFrame | dict[str, pandas.DataFrame]
+            Layout depends on ``full`` and ``as_dataframe``; ``observed``
+            is included only post-fit.
+
+            - ``full=True, as_dataframe=False``: dict of 1-D arrays of
+              length ``m`` (one entry per term, parametric block included
+              as the first entry labelled ``'para'``).
+            - ``full=False, as_dataframe=False``: dict of ``(m, m)`` arrays
+              where ``M[i, j]`` = fraction of term ``j`` explained by term
+              ``i`` (i.e. row = explainer, column = focal).
+            - ``full=True, as_dataframe=True``: single ``DataFrame``,
+              one row per term, columns are the available measures.
+            - ``full=False, as_dataframe=True``: ``dict[measure -> DataFrame]``,
+              each frame ``(m, m)`` with term labels on both axes.
+
+        Notes
+        -----
+        ``worst`` is symmetric in the pairwise case (a property of
+        principal angles between subspaces); ``observed`` and ``estimate``
+        are not. Design rows follow ``self.nan_handling``: ``"zero"`` retains
+        zero-filled rows, while ``"drop"`` omits rows containing any raw
+        design NaN. Concurvity has no response and therefore applies no
+        response-NaN filtering.
+
+        References
+        ----------
+        - Wood, S. N. (2017). *Generalized Additive Models: An Introduction
+          with R*, 2nd ed., §5.6.3. CRC Press.
+        - `mgcv` source: ``R/mgcv.r``, function ``concurvity``. The exact
+          formulas implemented here are derived from that source.
+        """
+        if hasattr(self, "coef_"):
+            # Post-fit: reuse the cached centering and the fitted β.
+            X_transformed = self._transform_design_matrix_with_policy(xi)
+            valid_X_rows = ~_rows_with_nan(X_transformed)
+            if not bool(jnp.any(valid_X_rows)):
+                raise ValueError("No valid design rows remain for concurvity.")
+            X_smooths = X_transformed[valid_X_rows]
+            X = prepend_ones_for_intercept(X_smooths)
+            beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
+        else:
+            # Pre-fit: set up the basis on `xi` and center on-the-fly.
+            # No β yet, so the underlying call skips the `observed` measure.
+            warnings.warn(
+                "GAM is not fitted: concurvity returns only the "
+                "coefficient-free 'worst' and 'estimate' measures. "
+                "Call fit() to also get the 'observed' measure.",
+                UserWarning,
+                stacklevel=2,
+            )
+            X_raw = self._compute_raw_design_matrix(xi, setup_basis=True)
+            X_smooths, _, _ = apply_nan_policy_for_fit(X_raw, None, self.nan_handling)
+            X = prepend_ones_for_intercept(X_smooths)
+            beta = None
+        blocks = term_blocks_for_gam(self)
+        return _concurvity(X, blocks, beta=beta, full=full, as_dataframe=as_dataframe)
 
     # TODO: Test against original implementation
     def smooth_compute(
@@ -728,7 +995,7 @@ class GAM:
             + 1
         )
         if se_with_mean:
-            X_se = jnp.column_stack((jnp.ones(fX.shape[0]), fX))
+            X_se = prepend_ones_for_intercept(fX)
             cov_idx = jnp.concatenate((jnp.array([0]), coef_idx))
         else:
             X_se = fX
@@ -754,7 +1021,9 @@ class GAM:
         xi :
             Input arrays, one per input dimension of the basis.
         y :
-            Observed response variable, shape ``(n_samples,)``.
+            Observed response variable, shape ``(n_samples,)``. Rows with NaN
+            responses are omitted. With ``nan_handling="drop"``, rows whose
+            raw design contains a NaN are also omitted.
         aggregate_sample_scores :
             Function to aggregate per-sample log-likelihoods. Default is ``jnp.mean``.
 
@@ -763,10 +1032,20 @@ class GAM:
         score :
             Aggregated log-likelihood score.
         """
-        params = (self.coef_, self.intercept_)
+        y = jnp.asarray(y)
+        X = self._transform_design_matrix_with_policy(xi)
+        valid_X_rows = ~_rows_with_nan(X)
+        valid_y_rows = get_valid_y_rows(y, n_rows=X.shape[0])
+        score_rows = valid_X_rows & valid_y_rows
+        if not bool(jnp.any(score_rows)):
+            raise ValueError("No valid rows remain for scoring.")
+
+        mu = self.observation_model.default_inverse_link_function(
+            X[score_rows] @ self.coef_ + self.intercept_
+        )
         return self.observation_model.log_likelihood(
-            y,
-            self._predict(params, xi),
+            y[score_rows],
+            mu,
             scale=self.scale_,
             aggregate_sample_scores=aggregate_sample_scores,
         )

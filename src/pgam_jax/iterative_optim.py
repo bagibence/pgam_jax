@@ -6,8 +6,6 @@ Statsmodels terminology:
 3. variance: the variance function of the observation model
 """
 
-from functools import wraps
-
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -15,6 +13,7 @@ from jaxopt import LBFGSB, ScipyBoundedMinimize
 from nemos.glm.initialize_parameters import INVERSE_FUNCS
 from nemos.tree_utils import pytree_map_and_reduce
 
+from ._utils import elementwise_derivative as _elementwise_derivative
 from .penalty_utils import prepend_zeros_for_intercept
 
 FLOAT_EPS = jnp.finfo(float).eps
@@ -22,17 +21,6 @@ FLOAT_EPS = jnp.finfo(float).eps
 
 def tree_concat(tree1, tree2, axis):
     return jtu.tree_map(lambda x, y: jnp.concatenate([x, y], axis=axis), tree1, tree2)
-
-
-def _elementwise_derivative(f):
-    """Efficient derivative if f(x) is an elementwise function."""
-
-    @wraps(f)
-    def df(x):
-        _, grad = jax.jvp(f, (x,), (jnp.ones_like(x),))
-        return grad
-
-    return df
 
 
 def model_constructors_for_weights_and_pseudo_data(

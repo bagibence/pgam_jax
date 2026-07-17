@@ -37,7 +37,7 @@ dependencies = [
 
 
 [tool.uv.sources]
-PGAM = { path = "../PGAM", editable = true }
+PGAM = { git = "https://github.com/BalzaniEdoardo/PGAM.git" }
 
 # Configure package discovery for setuptools
 [tool.setuptools.packages.find]
@@ -129,9 +129,12 @@ markers = [
 addopts = ["-s", "--strict-markers"]
 
 [tool.coverage.report]
-exclude_lines = [
+# exclude_also extends coverage's defaults (which include "pragma: no cover")
+# instead of replacing them like exclude_lines does.
+exclude_also = [
     "@abc.abstractmethod",
-    "if __name__ == .__main__.:"
+    "if __name__ == .__main__.:",
+    "assert_never\\(",
 ]
 
 [tool.ruff.lint]

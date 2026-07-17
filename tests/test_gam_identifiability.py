@@ -166,8 +166,8 @@ def test_predict_reuses_fitted_basis_and_training_centering():
     pred = gam.predict((x_pred,))
 
     assert pred.shape == x_pred.shape
-    transformed = gam._transform_design_matrix((x_pred,))
-    uncentered = gam._compute_uncentered_design_matrix((x_pred,), setup_basis=False)
+    transformed = gam._transform_design_matrix_with_policy((x_pred,))
+    uncentered = gam._compute_raw_design_matrix((x_pred,), setup_basis=False)
     np.testing.assert_allclose(
         np.asarray(transformed),
         np.asarray(uncentered) - feature_mean,
