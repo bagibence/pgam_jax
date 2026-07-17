@@ -449,7 +449,13 @@ class PenaltyHandler:
     def __init__(self):
         self._penalties: list[_AbstractPenalty] = []
 
-    def add(self, S_tensor, penalize_null_space: bool, identifiability_fn: Callable):
+    def add(
+        self,
+        S_tensor,
+        penalize_null_space: bool,
+        identifiability_fn: Callable,
+        has_null: bool | None = None,
+    ):
         """
         Register a single (possibly stacked) penalty matrix.
 
@@ -466,12 +472,18 @@ class PenaltyHandler:
             identity is stable and can be used as a group key for vmap batching.
             Use ``penalty_utils.IDENTITY`` (no-op) or
             ``penalty_utils.DROP_LAST_COL``, or define your own at module level.
+        has_null :
+            Whether the penalty has a null space to penalise. When ``None`` it is
+            derived from the matrix rank; callers that already know (e.g. from the
+            penalty-tensor ``shape[0]``) should pass it to avoid a second,
+            independent determination.
         """
         S = jnp.asarray(S_tensor)
         if S.ndim == 2 or S.shape[0] == 1:
             S2d = S if S.ndim == 2 else S[0]
             eig, U, rank = _eigh_and_rank(S2d)
-            has_null = penalize_null_space and bool(rank < S2d.shape[0])
+            if has_null is None:
+                has_null = penalize_null_space and bool(rank < S2d.shape[0])
             cls = _SingleWithNullPenalty if has_null else _SinglePenalty
             p = cls.from_eigh(S2d, eig, U, rank, identifiability_fn)
         else:
@@ -479,7 +491,11 @@ class PenaltyHandler:
         self._penalties.append(p)
 
     def add_kron(
-        self, factor_list, penalize_null_space: bool, identifiability_fn: Callable
+        self,
+        factor_list,
+        penalize_null_space: bool,
+        identifiability_fn: Callable,
+        has_null: bool | None = None,
     ):
         """
         Register a Kronecker-sum penalty from its factor matrices.
@@ -495,12 +511,18 @@ class PenaltyHandler:
             space of the Kronecker sum is penalized via a separate lambda.
         identifiability_fn :
             See ``add``.
+        has_null :
+            Whether the Kronecker sum has a null space to penalise. When ``None``
+            it is derived from the per-factor ranks; callers that already know
+            (e.g. from the penalty-tensor ``shape[0] == n_factors + 1``) should
+            pass it so the null-space decision is made only once.
         """
         eigh_and_rank_per_factor = [_eigh_and_rank(S) for S in factor_list]
-        has_null = penalize_null_space and all(
-            bool(rank < S.shape[0])
-            for (_, _, rank), S in zip(eigh_and_rank_per_factor, factor_list)
-        )
+        if has_null is None:
+            has_null = penalize_null_space and all(
+                bool(rank < S.shape[0])
+                for (_, _, rank), S in zip(eigh_and_rank_per_factor, factor_list)
+            )
         cls = _KroneckerWithNullPenalty if has_null else _KroneckerPenalty
         self._penalties.append(
             cls.from_eigh(eigh_and_rank_per_factor, identifiability_fn)

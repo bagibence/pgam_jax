@@ -377,6 +377,10 @@ class GAM:
                 if _should_drop_basis_col(basis_comp, self.drop_conv_basis_col)
                 else IDENTITY
             )
+            # The penalty tensor already encodes the null-space decision in its
+            # leading dimension: a component with a penalised null space carries
+            # one extra slice. Read that off and pass it down, so the null space
+            # is determined once (in the tree) rather than re-derived here.
             if isinstance(basis_comp, MultiplicativeBasis):
                 factors = compute_energy_penalty_factors(
                     basis_comp, self.n_simpson_sample
@@ -385,12 +389,14 @@ class GAM:
                     factors,
                     penalize_null_space=True,
                     identifiability_fn=id_fn,
+                    has_null=S_tensor.shape[0] > len(factors),
                 )
             else:
                 ph.add(
                     S_tensor[0],
                     penalize_null_space=True,
                     identifiability_fn=id_fn,
+                    has_null=S_tensor.shape[0] > 1,
                 )
         return ph
 
