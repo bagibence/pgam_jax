@@ -110,7 +110,7 @@ def test_large_dof_deep_tail_is_accurate():
     q = mean + 6 * sd  # p ~ 1e-6
     default = psum_chisq(q, w, df=df)
     tight = psum_chisq(q, w, df=df, epsabs=1e-13, epsrel=1e-13, limit=400)
-    assert default == pytest.approx(tight, rel=1e-6)
+    assert default == pytest.approx(tight, rel=1e-9)
 
 
 def test_scalar_df_broadcasts():
