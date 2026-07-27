@@ -117,16 +117,14 @@ def test_initialize_params_warm_starts_intercept_at_link_of_mean():
     np.testing.assert_allclose(np.asarray(intercept), np.log(y.mean()), rtol=1e-6)
 
 
-def test_initialize_params_intercept_finite_for_degenerate_response():
-    """All-zero counts -> log(mean) = -inf -> intercept falls back to finite 0."""
+def test_initialize_params_raises_for_degenerate_response():
+    """All-zero counts -> log(mean) = -inf -> raise ValueError"""
     model = GAM(_basis())
     y = np.zeros(500)
     X = np.zeros((500, 5))
 
-    _, intercept = model.initialize_params(X, y)
-
-    assert np.all(np.isfinite(np.asarray(intercept)))
-    np.testing.assert_allclose(np.asarray(intercept), 0.0)
+    with pytest.raises(ValueError, match="Failed to initialize"):
+        _, intercept = model.initialize_params(X, y)
 
 
 def test_use_glm_init_reaches_same_solution():

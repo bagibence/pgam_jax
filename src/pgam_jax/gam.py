@@ -8,7 +8,10 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxopt import LBFGS, ScipyMinimize
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
-from nemos.glm.initialize_parameters import INVERSE_FUNCS
+from nemos.glm.initialize_parameters import (
+    INVERSE_FUNCS,
+    initialize_intercept_matching_mean_rate,
+)
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
@@ -315,12 +318,10 @@ class GAM:
         # inv_link(0), far above the true mean for sparse data; the first solver
         # step then overshoots into the flat, rate-floored tail of the NLL and
         # can stall at a garbage intercept (-> exp(eta) = 0 -> NaNs downstream).
-        # link(mean) starts at the intercept-only optimum; fall back to 0 if it
-        # is non-finite (degenerate response).
-        link = INVERSE_FUNCS[self.observation_model.default_inverse_link_function]
-        mean_response = jnp.mean(y if y.ndim > 1 else y[:, None], axis=0)
-        intercept = link(mean_response)
-        intercept = jnp.where(jnp.isfinite(intercept), intercept, 0.0)
+        # link(mean) starts at the intercept-only optimum.
+        intercept = initialize_intercept_matching_mean_rate(
+            self.observation_model.default_inverse_link_function, y
+        )
 
         return (coef, intercept)
 
