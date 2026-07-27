@@ -68,15 +68,18 @@ def _quad(
     epsabs: float,
     epsrel: float,
     limit: int,
-) -> float:
+) -> tuple[float, float]:
     """Thin typed wrapper around :func:`scipy.integrate.quad`.
 
     SciPy ships no type stubs, so its return value is untyped; isolating the call
     here keeps that "unknown" type from propagating through the module.  When
     ``weight`` is ``None`` this is ordinary adaptive quadrature; when it is
     ``"cos"``/``"sin"`` SciPy uses its oscillatory Fourier integrator with angular
-    frequency ``wvar``.  Only the integral value is returned (the error estimate
-    is discarded).
+    frequency ``wvar``.
+
+    Returns the integral and its estimated absolute error.  Raises
+    :class:`RuntimeError` if QUADPACK reports non-convergence or returns a
+    non-finite value or invalid error estimate.
     """
     result = quad(  # type: ignore
         func,
@@ -88,8 +91,23 @@ def _quad(
         epsabs=epsabs,
         epsrel=epsrel,
         limit=limit,
+        full_output=True,
     )
-    return result[0]
+    value, abs_error, _info, *diagnostics = result
+    name = getattr(func, "__name__", "integrand")
+
+    if diagnostics:
+        raise RuntimeError(f"{name} quadrature failed: {diagnostics[0]}")
+
+    value = float(value)
+    abs_error = float(abs_error)
+    if not np.isfinite(value):
+        raise RuntimeError(f"{name} quadrature returned a non-finite value")
+    if not np.isfinite(abs_error) or abs_error < 0.0:
+        raise RuntimeError(
+            f"{name} quadrature returned an invalid error estimate: {abs_error}"
+        )
+    return value, abs_error
 
 
 def _phase_and_envelope(
@@ -192,19 +210,46 @@ def _cdf_single(
     epsabs: float,
     epsrel: float,
     limit: int,
-) -> float:
-    """``Pr(Q <= q)`` for a scalar ``q`` via characteristic-function inversion."""
+) -> tuple[float, float]:
+    """``Pr(Q <= q)`` and its estimated absolute error for a scalar ``q``."""
     params: tuple[object, ...] = (weights, df, noncentrality, sigma_sq)
-    head = _quad(
-        _head_integrand, 0.0, split, (q, *params), None, None, epsabs, epsrel, limit
+    head, head_error = _quad(
+        _head_integrand,
+        0.0,
+        split,
+        (q, *params),
+        None,
+        None,
+        epsabs,
+        epsrel,
+        limit,
     )
-    tail_cos = _quad(
-        _tail_cos_coefficient, split, np.inf, params, "cos", q, epsabs, epsrel, limit
+    tail_cos, tail_cos_error = _quad(
+        _tail_cos_coefficient,
+        split,
+        np.inf,
+        params,
+        "cos",
+        q,
+        epsabs,
+        epsrel,
+        limit,
     )
-    tail_sin = _quad(
-        _tail_sin_coefficient, split, np.inf, params, "sin", q, epsabs, epsrel, limit
+    tail_sin, tail_sin_error = _quad(
+        _tail_sin_coefficient,
+        split,
+        np.inf,
+        params,
+        "sin",
+        q,
+        epsabs,
+        epsrel,
+        limit,
     )
-    return 0.5 - (head + tail_cos - tail_sin) / np.pi
+    cdf = 0.5 - (head + tail_cos - tail_sin) / np.pi
+    quadrature_error = (head_error + tail_cos_error + tail_sin_error) / np.pi
+
+    return cdf, quadrature_error
 
 
 def _broadcast(values: ArrayLike, size: int, name: str) -> FloatArray:
@@ -249,8 +294,8 @@ def psum_chisq(
         Non-centrality parameters :math:`\delta_j^2` (must be non-negative).  A
         scalar is applied to every term.  Defaults to ``0`` (central).
     sigma : float, optional
-        Standard deviation of the additive normal term (negative values are
-        treated as ``0``).  Defaults to ``0``.
+        Standard deviation of the additive normal term. Must be finite and
+        non-negative. Defaults to ``0``.
     lower_tail : bool, optional
         If ``True`` return :math:`\Pr(Q \le q)`; otherwise return the survival
         function :math:`\Pr(Q > q)`.  Defaults to ``False`` (upper tail), the
@@ -263,7 +308,7 @@ def psum_chisq(
     Returns
     -------
     float or numpy.ndarray
-        The (survival) probability, clipped to ``[0, 1]``.  A Python ``float`` is
+        The (survival) probability.  A Python ``float`` is
         returned for scalar ``q``; otherwise an array matching ``q``.
 
     Notes
@@ -284,7 +329,13 @@ def psum_chisq(
         raise ValueError("'noncentrality' must be non-negative")
     if not np.any(weight_arr != 0.0):
         raise ValueError("at least one weight must be non-zero")
-    sigma_sq = max(sigma, 0.0) ** 2
+
+    sigma = float(sigma)
+    if not np.isfinite(sigma):
+        raise ValueError("'sigma' must be finite.")
+    if sigma < 0:
+        raise ValueError("'sigma' must be non-negative.")
+    sigma_sq = sigma**2
 
     variance = sigma_sq + np.sum(weight_arr**2 * (2.0 * df_arr + 4.0 * ncp_arr))
     split = 1.0 / np.sqrt(variance)
@@ -292,7 +343,7 @@ def psum_chisq(
     q_arr = np.atleast_1d(np.asarray(q, dtype=float))
     out = np.empty(q_arr.shape, dtype=float)
     for i in range(q_arr.size):
-        cdf = _cdf_single(
+        cdf, _cdf_error = _cdf_single(
             float(q_arr.flat[i]),
             weight_arr,
             df_arr,
@@ -304,10 +355,12 @@ def psum_chisq(
             limit,
         )
         out.flat[i] = cdf if lower_tail else 1.0 - cdf
-    np.clip(out, 0.0, 1.0, out=out)
 
     if np.isnan(out).any():
         warnings.warn("psum_chisq: quadrature produced NaN", stacklevel=2)
+
+    if np.any(out < 0.0) or np.any(out > 1.0):
+        raise RuntimeError("Probabilities must be in [0, 1].")
 
     if np.ndim(q) == 0:
         return out.item()

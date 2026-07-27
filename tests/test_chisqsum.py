@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from scipy.stats import chi2, ncx2
 
+import pgam_jax._chisqsum as chisqsum
 from pgam_jax._chisqsum import psum_chisq
 
 _FIXTURE = Path(__file__).parent / "data" / "chisqsum_cases.json"
@@ -18,6 +19,51 @@ _FIXTURE = Path(__file__).parent / "data" / "chisqsum_cases.json"
 def _load_cases():
     with open(_FIXTURE) as fh:
         return json.load(fh)
+
+
+def test_quad_returns_value_and_absolute_error(monkeypatch):
+    seen = {}
+
+    def fake_quad(*args, **kwargs):
+        seen.update(kwargs)
+        return 1.25, 2.5e-9, {"neval": 21}
+
+    monkeypatch.setattr(chisqsum, "quad", fake_quad)
+
+    result = chisqsum._quad(
+        lambda x: x,
+        0.0,
+        1.0,
+        (),
+        None,
+        None,
+        1e-10,
+        1e-10,
+        200,
+    )
+
+    assert result == (1.25, 2.5e-9)
+    assert seen["full_output"] is True
+
+
+def test_quad_raises_when_quadpack_reports_failure(monkeypatch):
+    def fake_quad(*args, **kwargs):
+        return 1.25, 0.1, {}, "maximum number of cycles reached", {1: "failed"}
+
+    monkeypatch.setattr(chisqsum, "quad", fake_quad)
+
+    with pytest.raises(RuntimeError, match="maximum number of cycles"):
+        chisqsum._quad(
+            lambda x: x,
+            0.0,
+            np.inf,
+            (),
+            "cos",
+            1.0,
+            1e-10,
+            1e-10,
+            200,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -127,6 +173,8 @@ def test_scalar_df_broadcasts():
         ({"weights": [1.0], "df": [0]}, "positive"),
         ({"weights": [1.0], "noncentrality": [-1.0]}, "non-negative"),
         ({"weights": [1.0, 1.0], "df": [1, 1, 1]}, "length"),
+        ({"weights": [1.0], "sigma": -1.0}, "non-negative"),
+        ({"weights": [1.0], "sigma": np.inf}, "finite"),
     ],
 )
 def test_invalid_inputs_raise(kwargs, match):
