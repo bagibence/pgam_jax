@@ -201,7 +201,7 @@ def _tail_sin_coefficient(
     return envelope * np.cos(phase)
 
 
-def _cdf_single(
+def _cdf_approx(
     q: float,
     weights: FloatArray,
     df: FloatArray,
@@ -529,6 +529,54 @@ def _regime_gate(
         )
 
 
+def _cdf_single(
+    q: float,
+    sd: float,
+    std_weights: FloatArray,
+    df_arr: FloatArray,
+    ncp_arr: FloatArray,
+    epsabs: float,
+    epsrel: float,
+    limit: int,
+) -> tuple[float, float]:
+    """
+    ``Pr(Q <= q)`` and its absolute error at one point, exactly where possible.
+
+    Takes the raw ``q`` and the standard deviation of ``Q``, and standardises
+    them here.  The weights arrive already standardised, which is what the
+    ``std_`` prefix marks.  Exact answers return a zero error, since nothing
+    was integrated to obtain them.
+    """
+    z = float(q) / sd
+    # An infinite z is q at infinitely many standard deviations, which is
+    # the same statement as an infinite q.  Both are exact, and neither is
+    # a question the quadrature can be asked.
+    if np.isposinf(z):
+        return 1.0, 0.0
+    if np.isneginf(z):
+        return 0.0, 0.0
+    if not np.isfinite(z):
+        raise RuntimeError(
+            f"standardized evaluation point is not a number: q={q}, sd={sd}"
+        )
+
+    reduced = _reduce(z, std_weights, df_arr, ncp_arr)
+    if reduced is not None:
+        return reduced, 0.0
+
+    _regime_gate(z, std_weights, df_arr, ncp_arr)
+    return _cdf_approx(
+        z,
+        std_weights,
+        df_arr,
+        ncp_arr,
+        1.0,
+        epsabs,
+        epsrel,
+        limit,
+    )
+
+
 def psum_chisq(
     q: ArrayLike,
     weights: ArrayLike,
@@ -633,35 +681,16 @@ def psum_chisq(
 
     out = np.empty(q_arr.shape, dtype=float)
     for i in range(q_arr.size):
-        z = float(q_arr.flat[i]) / sd
-        # An infinite z is q at infinitely many standard deviations, which is
-        # the same statement as an infinite q.  Both are exact, and neither is
-        # a question the quadrature can be asked.
-        if np.isposinf(z):
-            cdf = 1.0
-        elif np.isneginf(z):
-            cdf = 0.0
-        elif np.isfinite(z):
-            reduced = _reduce(z, std_weights, df_arr, ncp_arr)
-            if reduced is None:
-                _regime_gate(z, std_weights, df_arr, ncp_arr)
-                cdf, _cdf_error = _cdf_single(
-                    z,
-                    std_weights,
-                    df_arr,
-                    ncp_arr,
-                    1.0,
-                    epsabs,
-                    epsrel,
-                    limit,
-                )
-            else:
-                cdf = reduced
-        else:
-            raise RuntimeError(
-                f"standardized evaluation point is not a number: "
-                f"q={q_arr.flat[i]}, sd={sd}"
-            )
+        cdf, _cdf_error = _cdf_single(
+            float(q_arr.flat[i]),
+            sd,
+            std_weights,
+            df_arr,
+            ncp_arr,
+            epsabs,
+            epsrel,
+            limit,
+        )
         out.flat[i] = cdf if lower_tail else 1.0 - cdf
 
     if np.isnan(out).any():

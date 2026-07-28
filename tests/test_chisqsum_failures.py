@@ -14,7 +14,7 @@ from pgam_jax._chisqsum import psum_chisq
 
 
 def _unreachable(*_args, **_kwargs):
-    """Stand-in for :func:`_cdf_single` on paths that must never integrate."""
+    """Stand-in for :func:`_cdf_approx` on paths that must never integrate."""
     raise AssertionError("quadrature must not be reached")
 
 
@@ -38,7 +38,7 @@ def _sf_by_quadrature(q, weights, df=1.0, noncentrality=0.0):
     w, d, ncp = chisqsum._collapse_terms(w, d, ncp)
 
     sd = chisqsum._standard_deviation(w, d, ncp)
-    cdf, _error = chisqsum._cdf_single(q / sd, w / sd, d, ncp, 1.0, 1e-10, 1e-10, 200)
+    cdf, _error = chisqsum._cdf_approx(q / sd, w / sd, d, ncp, 1.0, 1e-10, 1e-10, 200)
     return 1.0 - cdf
 
 
@@ -153,7 +153,7 @@ def test_negative_infinite_q_is_exact(case):
 
 def test_infinite_q_does_not_reach_quadrature(monkeypatch):
     """The answer at an infinite ``q`` is exact, so no integrand is evaluated."""
-    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
 
     assert psum_chisq(np.inf, [1.0, 0.6], df=[3, 1]) == 0.0
     assert psum_chisq(-np.inf, [1.0, 0.6], df=[3, 1]) == 1.0
@@ -217,7 +217,7 @@ def test_validation_precedes_quadrature(monkeypatch):
     The old symptom of every one of these was a QUADPACK message about roundoff.
     Nothing may reach the integrator before the inputs have been checked.
     """
-    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
 
     with pytest.raises(ValueError, match="'q'"):
         psum_chisq(np.nan, [1.0])
@@ -404,7 +404,7 @@ def test_two_term_reduction_matches_an_independent_integral(w_pos, m, w_neg, n):
 
 def test_two_term_reduction_does_not_integrate(monkeypatch):
     """The closed form is exact, so no integrand is evaluated."""
-    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
 
     assert psum_chisq(0.0, [1.0, -3.84 / 50], df=[1, 50]) == pytest.approx(
         f_dist.sf(3.84, 1, 50), rel=1e-12
@@ -446,7 +446,7 @@ def test_two_term_reduction_declines_outside_its_domain(z, weights, df, noncentr
 )
 def test_single_term_is_exact_and_does_not_integrate(monkeypatch, q, weight, dof, ncp):
     """One term is a scaled (non-central) chi-square, whatever its weight."""
-    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
 
     expected = chi2.sf(q / weight, dof) if ncp == 0.0 else ncx2.sf(q / weight, dof, ncp)
     got = psum_chisq(q, [weight], df=[dof], noncentrality=[ncp])
@@ -464,7 +464,7 @@ def test_single_negative_term_is_exact(q):
 @pytest.mark.parametrize("q", [-1e300, -5.0, -1e-300, 0.0])
 def test_positive_weights_are_certain_at_non_positive_q(monkeypatch, q):
     """``Q`` is positive almost surely, so ``Pr(Q > q) = 1`` for ``q <= 0``."""
-    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
 
     case = {"weights": [1.0, 0.6, 0.4], "df": [3, 1, 1]}
     assert psum_chisq(q, lower_tail=False, **case) == 1.0
@@ -521,7 +521,7 @@ def test_unsupported_regimes_raise(case):
 @pytest.mark.parametrize("case", _UNSUPPORTED)
 def test_unsupported_regimes_do_not_integrate(monkeypatch, case):
     """The refusal comes before the integrator, not from it."""
-    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
 
     with pytest.raises(NotImplementedError):
         psum_chisq(**case)
