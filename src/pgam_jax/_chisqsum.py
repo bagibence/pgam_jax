@@ -78,6 +78,60 @@ _TANHSINH_RTOL = 1e-13
 _TANHSINH_MINLEVEL = 9
 _TANHSINH_MAXLEVEL = 14
 
+# QUADPACK's QAWF stops after this many oscillation cycles. SciPy's own default
+# is 50 and is not part of its documented signature, so it is set here to keep
+# the tail integrations reproducible across SciPy versions.
+_LIMLST = 200
+
+# The two quadrature routes, named so that the dispatcher, the cross-check and
+# the failure messages all refer to them the same way.
+_TANHSINH = "tanh-sinh"
+_QAWF = "QAWF"
+
+# Where each route is recomputed for its cross-check. Neither value changes the
+# integral; both change the nodes used to find it.
+_QAWF_CROSS_CHECK_SPLIT = 2.5
+_TANHSINH_CROSS_CHECK_SPLIT = 1.0
+
+# How far two independent computations of the same integral may sit apart before
+# the disagreement is treated as evidence that one of them is wrong, as a
+# multiple of their combined error estimates. Calibrated, not assumed: over 335
+# healthy in-contract cases the worst ratio of disagreement to allowance was
+# 0.018 for QAWF, and for tanh-sinh the ratio is meaningless because its
+# estimates go to zero, which is what the floor below is for.
+_ERROR_ESTIMATE_SAFETY_FACTOR = 8.0
+
+# Both routes can report an error of exactly zero and still differ in the last
+# bits, so the allowance never falls below this. It is the noise level of the
+# comparison rather than an accuracy target: the worst disagreement measured
+# over those same healthy cases was 2.5e-12, and this sits above it with room.
+# The resulting trip point of 8e-11 is eight orders of magnitude below the
+# smallest genuine failure this catches, which is 1.4e-2. A caller who requests
+# an epsabs far below 1e-11 gets a cross-check no finer than this, because two
+# routes that disagree by 2.5e-12 on healthy input cannot testify about less.
+_CROSS_CHECK_FLOOR = 1e-11
+
+# A probability this many times its own estimated error, or less, is reported as
+# zero rather than as noise. One means a value is kept as soon as it exceeds
+# its own error bar.
+_FLOOR_SAFETY_FACTOR = 1.0
+
+
+class _QuadratureNotConverged(RuntimeError):
+    """
+    One quadrature route declined to answer.
+
+    This is separate from a plain :class:`RuntimeError` because the two mean
+    different things to the caller. A non-finite value or a negative error
+    estimate is corruption, and nothing may be built on it. Non-convergence is
+    a route reporting that it could not resolve this integrand to the requested
+    accuracy, which leaves the other route free to try. Only the latter is
+    caught by :func:`_cdf_approx`.
+
+    It subclasses :class:`RuntimeError` so that callers who only care that the
+    computation failed need not know about the distinction.
+    """
+
 
 def _quad(
     func: Callable[..., float],
@@ -89,19 +143,29 @@ def _quad(
     epsabs: float,
     epsrel: float,
     limit: int,
+    limlst: int | None = None,
 ) -> tuple[float, float]:
     """Thin typed wrapper around :func:`scipy.integrate.quad`.
 
     SciPy ships no type stubs, so its return value is untyped; isolating the call
-    here keeps that "unknown" type from propagating through the module.  When
+    here keeps that "unknown" type from propagating through the module. When
     ``weight`` is ``None`` this is ordinary adaptive quadrature; when it is
     ``"cos"``/``"sin"`` SciPy uses its oscillatory Fourier integrator with angular
     frequency ``wvar``.
 
-    Returns the integral and its estimated absolute error.  Raises
-    :class:`RuntimeError` if QUADPACK reports non-convergence or returns a
-    non-finite value or invalid error estimate.
+    ``limlst`` caps the number of oscillation cycles and applies only to the
+    Fourier integrator, so it is passed only when one is requested. Leaving it
+    unset would inherit SciPy's undocumented default.
+
+    ``epsrel`` reaches QUADPACK only on the non-oscillatory branch. QAWF takes
+    an absolute request alone, so on the tails the relative target is ignored.
+
+    Returns the integral and its estimated absolute error. Raises
+    :class:`_QuadratureNotConverged` if QUADPACK reports non-convergence, and
+    :class:`RuntimeError` if it returns a non-finite value or an invalid error
+    estimate.
     """
+    extra: dict[str, int] = {} if limlst is None else {"limlst": limlst}
     result = quad(  # type: ignore
         func,
         a,
@@ -113,12 +177,13 @@ def _quad(
         epsrel=epsrel,
         limit=limit,
         full_output=True,
+        **extra,
     )
     value, abs_error, _info, *diagnostics = result
     name = getattr(func, "__name__", "integrand")
 
     if diagnostics:
-        raise RuntimeError(f"{name} quadrature failed: {diagnostics[0]}")
+        raise _QuadratureNotConverged(f"{name} quadrature failed: {diagnostics[0]}")
 
     value = float(value)
     abs_error = float(abs_error)
@@ -140,7 +205,7 @@ def _phase_and_envelope(
     r"""Phase and envelope of the inversion integrand at frequency ``u``.
 
     The integrand of the characteristic-function inversion is
-    :math:`\sin\!\big(\phi(u) - q u\big)\, e^{-\psi(u)} / u`.  This returns the
+    :math:`\sin\!\big(\phi(u) - q u\big)\, e^{-\psi(u)} / u`. This returns the
     tuple :math:`(\phi(u),\, e^{-\psi(u)} / u)`, with (writing
     :math:`x_j = 2 w_j u`)
 
@@ -304,17 +369,16 @@ def _combined_integrand(
     return _divide_with_fallback(numerator, u_arr, limit_at_zero)
 
 
-def _cdf_tanhsinh(
-    q: float,
-    weights: FloatArray,
-    df: FloatArray,
-    noncentrality: FloatArray,
+def _tanhsinh_piece(
+    integrand: Callable[[FloatArray], FloatArray],
+    a: float,
+    b: float,
 ) -> tuple[float, float]:
-    """``Pr(Q <= q)`` from the unsplit Imhof integrand via tanh-sinh."""
+    """One tanh-sinh integration, with its convergence report turned into a raise."""
     result = tanhsinh(
-        lambda u: _combined_integrand(u, q, weights, df, noncentrality),
-        0.0,
-        np.inf,
+        integrand,
+        a,
+        b,
         atol=_TANHSINH_ATOL,
         rtol=_TANHSINH_RTOL,
         minlevel=_TANHSINH_MINLEVEL,
@@ -328,7 +392,7 @@ def _cdf_tanhsinh(
         status = int(np.asarray(result.status).item())
         nfev = int(np.asarray(result.nfev).item())
         maxlevel = int(np.asarray(result.maxlevel).item())
-        raise RuntimeError(
+        raise _QuadratureNotConverged(
             "tanh-sinh quadrature failed: "
             f"status={status}, error={abs_error}, nfev={nfev}, "
             f"maxlevel={maxlevel}"
@@ -339,6 +403,35 @@ def _cdf_tanhsinh(
         raise RuntimeError(
             f"tanh-sinh quadrature returned an invalid error estimate: {abs_error}"
         )
+
+    return integral, abs_error
+
+
+def _cdf_tanhsinh(
+    q: float,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+    domain_split: float | None = None,
+) -> tuple[float, float]:
+    """
+    ``Pr(Q <= q)`` from the unsplit Imhof integrand via tanh-sinh.
+
+    ``domain_split`` exists for the cross-check.  The integral over
+    ``[0, inf)`` does not depend on where it is cut, but cutting it puts a
+    different set of tanh-sinh nodes under the same integrand, so a run that
+    resolved the mass badly moves.
+    """
+
+    def integrand(u: FloatArray) -> FloatArray:
+        return _combined_integrand(u, q, weights, df, noncentrality)
+
+    if domain_split is None:
+        integral, abs_error = _tanhsinh_piece(integrand, 0.0, np.inf)
+    else:
+        head, head_error = _tanhsinh_piece(integrand, 0.0, domain_split)
+        tail, tail_error = _tanhsinh_piece(integrand, domain_split, np.inf)
+        integral, abs_error = head + tail, head_error + tail_error
 
     return 0.5 - integral / np.pi, abs_error / np.pi
 
@@ -353,8 +446,20 @@ def _cdf_qawf(
     epsrel: float,
     limit: int,
 ) -> tuple[float, float]:
-    """``Pr(Q <= q)`` and its estimated absolute error for a scalar ``q``."""
+    """
+    ``Pr(Q <= q)`` and its estimated absolute error for a scalar ``q``.
+
+    The value is assembled from three integrations, so ``epsabs`` is divided
+    between them rather than handed to each in full.  Requesting the whole
+    budget three times makes the public tolerance a per-piece figure that the
+    end-to-end result can exceed, which is the accounting half of F6.  The
+    tails also cancel against each other, so their errors are added, not
+    combined in quadrature.
+
+    ``epsrel`` reaches only the head.  QAWF accepts an absolute request alone.
+    """
     params: tuple[object, ...] = (weights, df, noncentrality)
+    piece_epsabs = epsabs / 3.0
     head, head_error = _quad(
         _head_integrand,
         0.0,
@@ -362,7 +467,7 @@ def _cdf_qawf(
         (q, *params),
         None,
         None,
-        epsabs,
+        piece_epsabs,
         epsrel,
         limit,
     )
@@ -373,9 +478,10 @@ def _cdf_qawf(
         params,
         "cos",
         q,
-        epsabs,
+        piece_epsabs,
         epsrel,
         limit,
+        _LIMLST,
     )
     tail_sin, tail_sin_error = _quad(
         _tail_sin_coefficient,
@@ -384,14 +490,131 @@ def _cdf_qawf(
         params,
         "sin",
         q,
-        epsabs,
+        piece_epsabs,
         epsrel,
         limit,
+        _LIMLST,
     )
     cdf = 0.5 - (head + tail_cos - tail_sin) / np.pi
     quadrature_error = (head_error + tail_cos_error + tail_sin_error) / np.pi
 
     return cdf, quadrature_error
+
+
+def _route(
+    name: str,
+    q: float,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+    split: float,
+    epsabs: float,
+    epsrel: float,
+    limit: int,
+    independent: bool,
+) -> tuple[float, float]:
+    """
+    ``Pr(Q <= q)`` by the named quadrature route.
+
+    With ``independent`` set, the same integral is computed a second way: the
+    value is mathematically identical, but the nodes are not.  QAWF moves its
+    split point, which is where its cycle grid starts, so a run that missed
+    mass lands somewhere else. tanh-sinh cuts the domain in two, which
+    replaces its node set entirely.
+    """
+    if name == _TANHSINH:
+        return _cdf_tanhsinh(
+            q,
+            weights,
+            df,
+            noncentrality,
+            _TANHSINH_CROSS_CHECK_SPLIT if independent else None,
+        )
+    elif name == _QAWF:
+        return _cdf_qawf(
+            q,
+            weights,
+            df,
+            noncentrality,
+            _QAWF_CROSS_CHECK_SPLIT if independent else split,
+            epsabs,
+            epsrel,
+            limit,
+        )
+    else:
+        raise NotImplementedError(f"unknown quadrature route: {name!r}")
+
+
+def _cross_check(
+    name: str,
+    value: float,
+    error: float,
+    q: float,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+    split: float,
+    epsabs: float,
+    epsrel: float,
+    limit: int,
+) -> None:
+    """
+    Confirm a quadrature result against a numerically independent recomputation.
+
+    This is the only guard here that can catch a failure mode nobody has
+    catalogued.  It exists because F4 established that QUADPACK's own
+    diagnostics are blind in this problem: it reports ``ier=0`` and an absolute
+    error of ``4e-15`` on a value that is wrong in the second decimal place.
+    An error estimate produced by the same nodes that missed the mass cannot
+    detect that the mass was missed.  A different set of nodes can.
+
+    The two outcomes are deliberately different exceptions. A recomputation
+    that will not converge leaves this route unvalidated, which is the same
+    thing to the caller as this route not converging, so
+    :class:`_QuadratureNotConverged` is raised and the dispatcher may try the
+    other route. A recomputation that converges to a *different* answer means
+    one of the two is confidently wrong, which is not a reason to quietly
+    change method, so that raises :class:`RuntimeError` and stops.
+
+    Raises
+    ------
+    _QuadratureNotConverged
+        If the independent recomputation does not converge.
+    RuntimeError
+        If the two routes converge to answers further apart than their combined
+        error estimates allow.
+    """
+    other, other_error = _route(
+        name,
+        q,
+        weights,
+        df,
+        noncentrality,
+        split,
+        epsabs,
+        epsrel,
+        limit,
+        independent=True,
+    )
+
+    difference = abs(value - other)
+    # The estimates are what is on trial here, so they cannot be the whole
+    # allowance.  The floor covers the case where both routes report an error
+    # of exactly zero and still differ in the last bits.
+    allowance = max(error + other_error, _CROSS_CHECK_FLOOR)
+    if difference > allowance * _ERROR_ESTIMATE_SAFETY_FACTOR:
+        raise RuntimeError(
+            f"psum_chisq: the {name} quadrature did not survive its "
+            f"independent cross-check. It returned {value!r} with an estimated "
+            f"error of {error!r}, while recomputing the same integral with a "
+            f"different node set returned {other!r} with an estimated error of "
+            f"{other_error!r}. The difference is {difference!r}, which exceeds "
+            f"the combined estimate by more than the safety factor of "
+            f"{_ERROR_ESTIMATE_SAFETY_FACTOR}. At least one of the two is "
+            f"wrong. Standardized inputs: z={q!r}, "
+            f"weights={weights.tolist()}, df={df.tolist()}, "
+            f"noncentrality={noncentrality.tolist()}. Please report this case."
+        )
 
 
 def _cdf_approx(
@@ -403,26 +626,63 @@ def _cdf_approx(
     epsabs: float,
     epsrel: float,
     limit: int,
+    check: bool = True,
 ) -> tuple[float, float]:
-    """``Pr(Q <= q)`` using the quadrature suited to standardized ``q``."""
-    if abs(q) <= _Z_SWITCH:
-        return _cdf_tanhsinh(
-            q,
-            weights,
-            df,
-            noncentrality,
-        )
+    """
+    ``Pr(Q <= q)`` using whichever quadrature can actually resolve this input.
 
-    return _cdf_qawf(
-        q,
-        weights,
-        df,
-        noncentrality,
-        split,
-        epsabs,
-        epsrel,
-        limit,
-    )
+    ``abs(q)`` picks the route that should work: tanh-sinh handles the small
+    frequencies where QAWF's first cycle steps over the whole integrand, and
+    QAWF handles everything above, where tanh-sinh needs impractically many
+    nodes.  That choice is a prediction, not a fact, and it is wrong for slowly
+    decaying integrands.  The envelope falls off like
+    ``u**-(1 + sum(df)/2)``, so a total of two degrees of freedom, which is what
+    mgcv's fractional-rank test produces at known dispersion, decays only like
+    ``u**-2`` and tanh-sinh will not converge on it anywhere in its own band.
+
+    A route that declines is therefore not fatal: the other one is tried.  What
+    makes that safe rather than a guess is the cross-check, which the fallback
+    result must pass even when the caller asked to skip checking.  QAWF is
+    silently wrong at small ``abs(q)`` on some structures, and falling back onto
+    an unvalidated wrong answer would reintroduce exactly the failure this
+    module exists to prevent.
+
+    Raises
+    ------
+    RuntimeError
+        If neither route produces a validated value.  The message names both.
+    """
+    if abs(q) <= _Z_SWITCH:
+        preferred, fallback = _TANHSINH, _QAWF
+    else:
+        preferred, fallback = _QAWF, _TANHSINH
+
+    arguments = (q, weights, df, noncentrality, split, epsabs, epsrel, limit)
+
+    try:
+        value, error = _route(preferred, *arguments, independent=False)
+        if check:
+            _cross_check(preferred, value, error, *arguments)
+        return value, error
+    except _QuadratureNotConverged as preferred_failure:
+        try:
+            value, error = _route(fallback, *arguments, independent=False)
+            # Not conditional on ``check``.  The dispatcher predicted this route
+            # would be the wrong one, so its result is only admissible with
+            # independent evidence behind it.
+            _cross_check(fallback, value, error, *arguments)
+            return value, error
+        except _QuadratureNotConverged as fallback_failure:
+            raise RuntimeError(
+                f"psum_chisq: neither quadrature route resolved this input. "
+                f"The {preferred} route was chosen for z={q!r} and reported: "
+                f"{preferred_failure}. Falling back to the {fallback} route "
+                f"reported: {fallback_failure}. Standardized inputs: "
+                f"weights={weights.tolist()}, df={df.tolist()}, "
+                f"noncentrality={noncentrality.tolist()}, where z and the "
+                f"weights are divided by the standard deviation of Q. Please "
+                f"report this case."
+            ) from fallback_failure
 
 
 def _broadcast(values: ArrayLike, size: int, name: str) -> FloatArray:
@@ -711,6 +971,7 @@ def _cdf_single(
     epsabs: float,
     epsrel: float,
     limit: int,
+    check: bool,
 ) -> tuple[float, float]:
     """
     ``Pr(Q <= q)`` and its absolute error at one point, exactly where possible.
@@ -747,7 +1008,82 @@ def _cdf_single(
         epsabs,
         epsrel,
         limit,
+        check,
     )
+
+
+def _finalize(
+    probabilities: FloatArray,
+    errors: FloatArray,
+) -> FloatArray:
+    """
+    Bring computed probabilities into ``[0, 1]``, or refuse to.
+
+    Two things happen here, and both are about the same fact: a quadrature
+    result is a number plus an uncertainty, and reading it as though it were
+    exact produces nonsense at the ends of the range.
+
+    **The range check.**  A survival probability computed as ``0.5`` minus an
+    integral can land just outside ``[0, 1]`` by less than its own error
+    estimate.  That is arithmetic, not a bug, and clipping it is the correct
+    reading.  Landing outside by more than the error allowance is a bug, and
+    that still raises.  The old check had no allowance at all and rejected an
+    overshoot of ``-1.3e-15`` on a value whose estimated error was ``3.8e-13``.
+
+    **The floor.** Once the true probability drops below the resolution of the
+    quadrature, what comes back is not a small number but noise, and noise is
+    not monotone.  For ``[1, 0.6, 0.4]`` with ``df=[3, 1, 1]`` the survival
+    function is genuine at ``q = 60`` (``1.2e-12``, against an estimated error
+    of ``4.4e-13``) and pure noise by ``q = 80`` (``-1.3e-15``, against
+    ``3.7e-13``).  Anything that does not exceed its own error estimate is
+    reported as ``0.0`` with a warning, which is both honest and monotone.
+
+    The floor is driven by the error estimate rather than by a fixed constant so
+    that it cannot touch the exact closed forms.  Those return an error of
+    exactly zero, having integrated nothing, and their deep-tail values are good
+    to full relative precision.
+
+    Parameters
+    ----------
+    probabilities : numpy.ndarray
+        The probabilities in the tail the caller asked for.
+    errors : numpy.ndarray
+        Estimated absolute error of each, zero where the answer is exact.
+
+    Returns
+    -------
+    numpy.ndarray
+        The probabilities, clipped and floored.
+
+    Raises
+    ------
+    RuntimeError
+        If any probability lies outside ``[0, 1]`` by more than its error
+        allowance.
+    """
+    allowance = errors * _ERROR_ESTIMATE_SAFETY_FACTOR
+    overshoot = np.maximum(-probabilities, probabilities - 1.0)
+    if np.any(overshoot > allowance):
+        worst = int(np.argmax(overshoot - allowance))
+        raise RuntimeError(
+            "psum_chisq: computed a probability outside [0, 1] by more than "
+            f"its own error allowance. Got {probabilities.flat[worst]!r} with "
+            f"an estimated error of {errors.flat[worst]!r}."
+        )
+
+    probabilities = np.clip(probabilities, 0.0, 1.0)
+
+    unresolved = (errors > 0.0) & (probabilities < errors * _FLOOR_SAFETY_FACTOR)
+    if np.any(unresolved):
+        warnings.warn(
+            "psum_chisq: the probability is smaller than the quadrature can "
+            "resolve at this tolerance and has been returned as 0.0. Tighten "
+            "epsabs to resolve it, or read the result as an upper bound.",
+            stacklevel=3,
+        )
+        probabilities = np.where(unresolved, 0.0, probabilities)
+
+    return probabilities
 
 
 def psum_chisq(
@@ -759,6 +1095,7 @@ def psum_chisq(
     epsabs: float = 1e-10,
     epsrel: float = 1e-10,
     limit: int = 200,
+    check: bool = True,
 ) -> float | FloatArray:
     r"""
     Distribution function of a weighted sum of chi-squared variables.
@@ -788,9 +1125,23 @@ def psum_chisq(
         function :math:`\Pr(Q > q)`.  Defaults to ``False`` (upper tail), the
         convention used for p-values.
     epsabs, epsrel : float, optional
-        Absolute and relative accuracy targets passed to the quadrature.
+        Absolute and relative accuracy targets.  ``epsabs`` is an end-to-end
+        budget: the oscillatory route assembles its answer from three
+        integrations and divides it between them.  ``epsrel`` reaches only the
+        non-oscillatory head, since QUADPACK's Fourier integrator accepts an
+        absolute request alone.  ``epsabs`` also sets the resolution floor
+        described below.
     limit : int, optional
         Maximum number of quadrature subintervals.
+    check : bool, optional
+        Recompute every quadrature result by a numerically independent route
+        and raise if the two disagree by more than their combined error
+        estimates allow.  Defaults to ``True``, and roughly doubles the cost.
+        It is worth that: the integrator's own diagnostics report success with
+        an absolute error of ``4e-15`` on values that are wrong in the second
+        decimal place, so nothing else here can catch a failure mode that has
+        not already been catalogued.  A result obtained from the route that
+        ``q`` did *not* select is cross-checked even when this is ``False``.
 
     Returns
     -------
@@ -804,6 +1155,19 @@ def psum_chisq(
         If any argument lies outside the domain described above.
     NotImplementedError
         If the sum is outside the supported regime described in the notes.
+    RuntimeError
+        If no quadrature route resolves the input, or if a result fails its
+        independent cross-check.  Both messages name what was tried.
+
+    Warns
+    -----
+    UserWarning
+        If the probability is smaller than the quadrature can resolve at the
+        requested ``epsabs``, in which case ``0.0`` is returned.  Below that
+        resolution what comes back is not a small number but noise, which is
+        not even monotone, so it is reported as zero instead.  Tightening
+        ``epsabs`` resolves more of the tail.  The exact closed forms below
+        integrate nothing and are never subject to this.
 
     Notes
     -----
@@ -830,11 +1194,20 @@ def psum_chisq(
 
     The problem is nondimensionalised before any numerical decision is made:
     ``q`` becomes ``z = q / sd`` and the weights are divided by ``sd``, the
-    standard deviation of ``Q``.  The integrand is then split into a
-    non-oscillatory head on ``[0, 1]`` in those standardised coordinates and a
-    semi-infinite oscillatory tail integrated with SciPy's Fourier quadrature,
-    which remains accurate for the slowly decaying tails produced by low degrees
-    of freedom.
+    standard deviation of ``Q``.  Two quadrature routes then share the range of
+    ``z``: a tanh-sinh rule on the unsplit integrand where ``z`` is small enough
+    that an oscillatory cycle would step over the whole integrand, and a
+    non-oscillatory head on ``[0, 1]`` plus two semi-infinite Fourier tails
+    everywhere else.
+
+    Which of the two is tried first is a prediction from ``z``, and it is wrong
+    for slowly decaying integrands: the envelope falls off like
+    ``u**-(1 + sum(df)/2)``, so a total of two degrees of freedom decays only
+    like ``u**-2`` and tanh-sinh will not converge on it.  A route that reports
+    it cannot resolve the integrand is therefore not fatal; the other one is
+    tried, and its answer is admitted only if it survives the cross-check.  A
+    narrow band remains, at the lowest degrees of freedom and very small ``z``,
+    where no two independent routes both converge.  That raises.
     """
     weight_arr = np.atleast_1d(np.asarray(weights, dtype=float))
     n_terms = int(weight_arr.size)
@@ -853,8 +1226,9 @@ def psum_chisq(
     std_weights = weight_arr / sd
 
     out = np.empty(q_arr.shape, dtype=float)
+    errors = np.empty(q_arr.shape, dtype=float)
     for i in range(q_arr.size):
-        cdf, _cdf_error = _cdf_single(
+        cdf, cdf_error = _cdf_single(
             float(q_arr.flat[i]),
             sd,
             std_weights,
@@ -863,14 +1237,15 @@ def psum_chisq(
             epsabs,
             epsrel,
             limit,
+            check,
         )
         out.flat[i] = cdf if lower_tail else 1.0 - cdf
+        errors.flat[i] = cdf_error
 
     if np.isnan(out).any():
         warnings.warn("psum_chisq: quadrature produced NaN", stacklevel=2)
 
-    if np.any(out < 0.0) or np.any(out > 1.0):
-        raise RuntimeError("Probabilities must be in [0, 1].")
+    out = _finalize(out, errors)
 
     if np.ndim(q) == 0:
         return out.item()

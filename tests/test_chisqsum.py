@@ -139,6 +139,25 @@ def test_survival_is_monotone_decreasing():
     assert np.all((p >= 0) & (p <= 1))
 
 
+def test_survival_stays_ordered_past_the_resolution_floor():
+    """
+    Beyond about ``q = 55`` at the default tolerance the answer is unresolved.
+
+    The module reports that as a flat ``0.0`` with a warning rather than as
+    noise, so the ordering is not strict out here.  It is still an ordering,
+    which is what a survival function has to give: the old code returned
+    ``7.8e-16`` for a true ``1.6e-21`` and then went negative.
+    """
+    q = np.array([15.0, 30.0, 45.0, 60.0, 90.0, 129.0, 200.0])
+
+    with pytest.warns(UserWarning, match="smaller than the quadrature can resolve"):
+        p = psum_chisq(q, [1, 0.6, 0.4], df=[3, 1, 1], lower_tail=False)
+
+    assert np.all(np.diff(p) <= 0)
+    assert np.all((p >= 0) & (p <= 1))
+    assert p[-1] == 0.0
+
+
 def test_scalar_returns_float_array_returns_array():
     scalar = psum_chisq(5.0, [1, 1], df=[1, 1])
     assert isinstance(scalar, float)

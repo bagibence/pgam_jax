@@ -11,6 +11,7 @@ from scipy.stats import ncx2
 from test_chisqsum_oracles import (
     sf_teststat,
     sf_teststat_at_q,
+    sf_two_chi1,
     sf_two_chi1_plus_chi2k,
 )
 
@@ -285,7 +286,14 @@ def test_quadrature_methods_agree_across_the_handover_band(z, weights, df):
 
 
 def test_quadrature_dispatches_at_the_calibrated_switch(monkeypatch):
-    """The boundary itself belongs to tanh-sinh; the next float belongs to QAWF."""
+    """
+    The boundary itself belongs to tanh-sinh; the next float belongs to QAWF.
+
+    ``check=False`` keeps this about the dispatch decision.  With the
+    cross-check on, each route is also recomputed by its independent variant,
+    which doubles the recorded calls without saying anything about which branch
+    the switch chose.
+    """
     calls = []
 
     def tanhsinh_branch(*_args):
@@ -299,7 +307,16 @@ def test_quadrature_dispatches_at_the_calibrated_switch(monkeypatch):
     monkeypatch.setattr(chisqsum, "_cdf_tanhsinh", tanhsinh_branch)
     monkeypatch.setattr(chisqsum, "_cdf_qawf", qawf_branch)
 
-    args = (np.array([1.0]), np.array([1.0]), np.array([0.0]), 1.0, 1e-10, 1e-10, 200)
+    args = (
+        np.array([1.0]),
+        np.array([1.0]),
+        np.array([0.0]),
+        1.0,
+        1e-10,
+        1e-10,
+        200,
+        False,
+    )
     assert chisqsum._cdf_approx(chisqsum._Z_SWITCH, *args) == (0.25, 0.0)
     assert chisqsum._cdf_approx(np.nextafter(chisqsum._Z_SWITCH, np.inf), *args) == (
         0.75,
@@ -809,3 +826,542 @@ def test_positive_central_mixtures_stay_supported(q):
     assert psum_chisq(q, [1.0, 0.6, 0.4], df=[3, 1, 1]) == pytest.approx(
         _sf_by_quadrature(q, [1.0, 0.6, 0.4], df=[3, 1, 1]), rel=1e-12
     )
+
+
+# --------------------------------------------------------------------------- #
+# F4.  QUADPACK reports ``ier=0`` and an absolute error of 4e-15 on a value that
+# is wrong in the second decimal place.  An error estimate produced by the same
+# nodes that missed the mass cannot report that the mass was missed, so the only
+# guard that can see it is a recomputation using different nodes.
+#
+# This is also the guard that makes the fallback below admissible: without it,
+# falling back onto a route the dispatcher had already predicted was wrong would
+# be a guess.
+# --------------------------------------------------------------------------- #
+
+
+def _standardize(weights, df):
+    """Weights and sd for a central structure, as the cross-check sees them."""
+    w = np.asarray(weights, dtype=float)
+    d = np.asarray(df, dtype=float)
+    ncp = np.zeros_like(w)
+    w, d, ncp = chisqsum._collapse_terms(w, d, ncp)
+    sd = chisqsum._standard_deviation(w, d, ncp)
+    return w / sd, d, ncp
+
+
+@pytest.mark.parametrize(
+    "weights, df",
+    [
+        pytest.param([1.0, -3.84 / 50], [1, 50], id="rank1-k50-d3.84"),
+        pytest.param(
+            [1.1830127, 0.3169873, -3.84 / 50], [1, 1, 50], id="rank1.5-k50-d3.84"
+        ),
+        pytest.param([1.0, 1.0, -6.0 / 50], [1, 1, 50], id="rank2-k50-d6"),
+    ],
+)
+def test_cross_check_sees_what_quadpack_reports_as_success(weights, df):
+    """
+    The measured F4 rows: QAWF converges confidently on a wrong answer.
+
+    At ``z = 1e-4`` these structures make QAWF's first cycle step over the
+    integrand.  It returns without complaint, and its own error estimate is
+    around 1e-11 while the answer is wrong in the second decimal place.  Moving
+    the split point, which is where the cycle grid starts, moves the answer by
+    more than a hundred million times the claimed uncertainty.
+    """
+    w, d, ncp = _standardize(weights, df)
+    z = 1e-4
+
+    value, error = chisqsum._cdf_qawf(z, w, d, ncp, 1.0, 1e-10, 1e-10, 200)
+    other, other_error = chisqsum._cdf_qawf(
+        z, w, d, ncp, chisqsum._QAWF_CROSS_CHECK_SPLIT, 1e-10, 1e-10, 200
+    )
+
+    # The failure is real and large, and neither run suspects it.
+    assert abs(value - other) > 1e-2
+    assert error + other_error < 1e-9
+
+    with pytest.raises(RuntimeError, match="did not survive its independent"):
+        chisqsum._cross_check(
+            chisqsum._QAWF, value, error, z, w, d, ncp, 1.0, 1e-10, 1e-10, 200
+        )
+
+
+def _corrupt_the_first_split_only(offset=1e-3):
+    """
+    A ``_quad`` stand-in that spoils the cosine tail on the primary split only.
+
+    Perturbing both runs by the same amount would move them together and the
+    cross-check would rightly stay quiet, so the corruption is keyed to the
+    split point the primary computation uses.  This imitates the real failure:
+    one cycle grid misses mass that the other one finds.
+    """
+    truthful = chisqsum._quad
+
+    def corrupt(func, a, b, *args, **kwargs):
+        value, error = truthful(func, a, b, *args, **kwargs)
+        if func is chisqsum._tail_cos_coefficient and a == 1.0:
+            return value + offset, error
+        return value, error
+
+    return corrupt
+
+
+def test_cross_check_raises_when_a_piece_is_corrupted(monkeypatch):
+    """A wrong value from one of the three QAWF pieces must not get through."""
+    monkeypatch.setattr(chisqsum, "_quad", _corrupt_the_first_split_only())
+
+    with pytest.raises(RuntimeError, match="did not survive its independent"):
+        psum_chisq(5.0, [1.0, 0.6, 0.4], df=[3, 1, 1])
+
+
+def test_check_false_bypasses_the_cross_check(monkeypatch):
+    """The guard is skippable, and skipping it is what ``check=False`` means."""
+    monkeypatch.setattr(chisqsum, "_quad", _corrupt_the_first_split_only())
+
+    # The same call that raises above returns a (wrong) number here, which is
+    # the point: the caller asked for the check to be skipped.
+    assert 0.0 <= psum_chisq(5.0, [1.0, 0.6, 0.4], df=[3, 1, 1], check=False) <= 1.0
+
+
+def test_cross_check_counts_a_second_computation(monkeypatch):
+    """The guard must actually recompute, not re-read the first result."""
+    calls = []
+    truthful = chisqsum._cdf_qawf
+
+    def counting(q, weights, df, ncp, split, *args):
+        calls.append(split)
+        return truthful(q, weights, df, ncp, split, *args)
+
+    monkeypatch.setattr(chisqsum, "_cdf_qawf", counting)
+    psum_chisq(5.0, [1.0, 0.6, 0.4], df=[3, 1, 1])
+
+    assert calls == [1.0, chisqsum._QAWF_CROSS_CHECK_SPLIT]
+
+
+def test_no_spurious_cross_check_failures_on_healthy_inputs():
+    """
+    The guard must be quiet on inputs where nothing is wrong.
+
+    A guard that fires on healthy input is worse than no guard, because it
+    trains the caller to disable it.  The safety factor and the comparison
+    floor were both calibrated against this sweep.
+    """
+    rng = np.random.default_rng(20260728)
+    checked = 0
+    for _ in range(150):
+        size = int(rng.integers(2, 6))
+        weights = np.unique(rng.uniform(0.05, 3.0, size=size))
+        if weights.size < 2:
+            continue
+        df = rng.integers(1, 8, size=weights.size).astype(float)
+        mean = float(np.sum(weights * df))
+        q = float(rng.uniform(0.0, 2.0)) * mean
+
+        # No assertion on the value: this is only about the guard staying quiet.
+        psum_chisq(q, weights, df=df)
+        checked += 1
+
+    assert checked > 100
+
+
+# --------------------------------------------------------------------------- #
+# The fallback between quadrature routes.
+#
+# ``abs(z)`` predicts which route will work, and the prediction is wrong for
+# slowly decaying integrands.  The envelope falls off like ``u**-(1+sum(df)/2)``,
+# so a total of two degrees of freedom decays only like ``u**-2`` and tanh-sinh
+# will not converge on it anywhere in its own band.
+#
+# This is not a corner case.  ``notes/mgcv.r:3837`` is the known-dispersion
+# branch of mgcv's ``testStat``, ``psum.chisq(d, val)`` with ``df`` defaulting to
+# all ones, and for a rank between 1 and 2 it builds ``val`` of length exactly
+# two.  Poisson GAMs have ``scale.estimated = FALSE``, so that is the branch this
+# package takes.  Every one of these rows raised before the fallback existed.
+# --------------------------------------------------------------------------- #
+
+
+def _mgcv_fractional_rank_weights(rank):
+    """``val`` as ``mgcv:::testStat`` builds it for a rank between 1 and 2."""
+    rp = rank  # mgcv's rp = nu + 1, with nu = rank - 1
+    first = (rp + np.sqrt(rp * (2.0 - rp))) / 2.0
+    return [first, rp - first]
+
+
+@pytest.mark.parametrize("rank", [1.2, 1.5, 1.8])
+@pytest.mark.parametrize("stat", [1e-4, 1e-3, 1e-2, 1e-1])
+def test_mgcv_fractional_rank_known_dispersion_is_answered(rank, stat):
+    """The rank-1.x rows of mgcv's known-dispersion test, which used to raise."""
+    first, second = _mgcv_fractional_rank_weights(rank)
+
+    assert psum_chisq(stat, [first, second], df=[1, 1]) == pytest.approx(
+        sf_two_chi1(np.array(stat), first, second), rel=1e-10
+    )
+
+
+def test_fallback_is_reached_by_the_low_degree_of_freedom_rows():
+    """
+    These rows are answered by the route ``abs(z)`` did not pick.
+
+    Without this the test above would keep passing if the switch were merely
+    retuned, and the fallback it is supposed to exercise could rot.
+    """
+    first, second = _mgcv_fractional_rank_weights(1.5)
+    w, d, ncp = _standardize([first, second], [1, 1])
+    z = 1e-3 / chisqsum._standard_deviation(
+        *(np.asarray(x, dtype=float) for x in ([first, second], [1.0, 1.0])),
+        np.zeros(2),
+    )
+
+    # The dispatcher prefers tanh-sinh here, and tanh-sinh cannot do it.
+    assert abs(z) <= chisqsum._Z_SWITCH
+    with pytest.raises(chisqsum._QuadratureNotConverged):
+        chisqsum._cdf_tanhsinh(z, w, d, ncp)
+
+    # The fallback route can, and the dispatcher returns its answer.
+    value, _error = chisqsum._cdf_approx(z, w, d, ncp, 1.0, 1e-10, 1e-10, 200)
+    qawf_value, _ = chisqsum._cdf_qawf(z, w, d, ncp, 1.0, 1e-10, 1e-10, 200)
+    assert value == pytest.approx(qawf_value, rel=1e-12)
+
+
+def test_fallback_is_cross_checked_even_when_checking_is_off():
+    """
+    ``check=False`` does not extend to a fallback result.
+
+    The dispatcher predicted this route was the wrong one for this input, so its
+    answer is only admissible with independent evidence behind it.  QAWF is
+    silently wrong at small ``abs(z)`` on other structures, and an unvalidated
+    fallback onto it would reintroduce F4.
+    """
+    first, second = _mgcv_fractional_rank_weights(1.5)
+    w, d, ncp = _standardize([first, second], [1, 1])
+    z = 1e-4
+
+    calls = []
+    truthful = chisqsum._cdf_qawf
+
+    def counting(q, weights, dof, ncp_, split, *args):
+        calls.append(split)
+        return truthful(q, weights, dof, ncp_, split, *args)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "_cdf_qawf", counting)
+        chisqsum._cdf_approx(z, w, d, ncp, 1.0, 1e-10, 1e-10, 200, check=False)
+
+    assert calls == [1.0, chisqsum._QAWF_CROSS_CHECK_SPLIT]
+
+
+def test_both_routes_failing_names_both():
+    """
+    A band remains where no two independent routes both converge.
+
+    It must raise, and the message must say what was tried.  Returning the one
+    route that happened to converge would be returning an unvalidated number,
+    which is the thing this module exists not to do.
+    """
+    first, second = _mgcv_fractional_rank_weights(1.5)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        psum_chisq(1e-5, [first, second], df=[1, 1])
+
+    message = str(excinfo.value)
+    assert "neither quadrature route" in message
+    assert chisqsum._TANHSINH in message
+    assert chisqsum._QAWF in message
+    assert "weights=" in message
+    assert "report" in message
+
+
+def test_a_corrupt_result_is_not_laundered_through_the_fallback():
+    """
+    Disagreement stops; only non-convergence falls back.
+
+    A route that converges to a different answer means one of the two is
+    confidently wrong, which is a reason to raise, not a reason to quietly
+    change method and report the other one.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "_quad", _corrupt_the_first_split_only())
+        with pytest.raises(RuntimeError) as excinfo:
+            psum_chisq(5.0, [1.0, 0.6, 0.4], df=[3, 1, 1])
+
+    assert "did not survive its independent" in str(excinfo.value)
+    assert "neither quadrature route" not in str(excinfo.value)
+
+
+def test_tanhsinh_accuracy_limit_at_two_degrees_of_freedom():
+    """
+    A known limitation, pinned so that it cannot quietly get worse.
+
+    Just below where tanh-sinh stops converging on a two-degrees-of-freedom
+    integrand there is a narrow band where it converges to an answer about twice
+    the requested absolute tolerance away, and its domain-split variant agrees
+    with it, so the cross-check does not see it.  The measured worst case is
+    2.2e-10 against a request of 1e-10.  QAWF is accurate to 1e-13 there but the
+    dispatcher does not prefer it, because ``abs(z)`` is well inside tanh-sinh's
+    band.
+
+    This is a tolerance miss of about a factor of two, not an F4-class failure,
+    and it is confined to the lowest degrees of freedom the contract allows.
+    The bound is asserted one-sided: the limitation must not get worse, and a
+    future SciPy that resolves it should not turn this red.
+
+    Which ``z`` converges is not stable enough to pin, so this sweeps a band
+    and looks only at the points where tanh-sinh reported success.
+    """
+    worst = 0.0
+    converged = 0
+    for a, b in [(0.125, 0.25), (0.125, 1.0), (0.5, 1.0), (1.0, 2.0)]:
+        w, d, ncp = _standardize([a, b], [1, 1])
+        sd = chisqsum._standard_deviation(
+            np.array([a, b]), np.array([1.0, 1.0]), np.zeros(2)
+        )
+        for z in np.geomspace(1e-5, 1e-4, 12):
+            exact = 1.0 - float(sf_two_chi1(np.array(z * sd), a, b))
+            try:
+                value, _error = chisqsum._cdf_tanhsinh(z, w, d, ncp)
+            except chisqsum._QuadratureNotConverged:
+                continue
+            converged += 1
+            worst = max(worst, abs(value - exact))
+
+    assert converged > 0
+    assert worst < 1e-8
+
+
+# --------------------------------------------------------------------------- #
+# F5.  Below the resolution of the quadrature the survival function is not a
+# small number, it is noise, and noise is not monotone.  The old code returned
+# 7.8e-16 for a true 1.6e-21, and raised outright on a -1.3e-15 whose own error
+# estimate was 3.8e-13.
+# --------------------------------------------------------------------------- #
+
+_DEEP_TAIL_STRUCTURE = ([1.0, 0.6, 0.4], [3.0, 1.0, 1.0])
+
+
+def test_deep_tail_is_monotone_and_never_leaves_the_unit_interval():
+    """The whole point of the floor: an ordered, in-range survival function."""
+    weights, df = _DEEP_TAIL_STRUCTURE
+    q = np.linspace(1.0, 200.0, 60)
+
+    with pytest.warns(UserWarning, match="smaller than the quadrature can resolve"):
+        p = psum_chisq(q, weights, df=df)
+
+    assert np.all(np.isfinite(p))
+    assert np.all((p >= 0.0) & (p <= 1.0))
+    assert np.all(np.diff(p) <= 0.0)
+
+
+def test_below_the_floor_is_exactly_zero():
+    """Not a small number, and not a negative one."""
+    weights, df = _DEEP_TAIL_STRUCTURE
+
+    with pytest.warns(UserWarning, match="smaller than the quadrature can resolve"):
+        p = psum_chisq([80.0, 129.0, 200.0], weights, df=df)
+
+    assert np.all(p == 0.0)
+
+
+def test_q_129_no_longer_raises():
+    """
+    The measured regression: a value inside its own error allowance was rejected.
+
+    ``-1.3e-15`` against an estimated error of ``3.8e-13`` is arithmetic, not a
+    bug, and the old range check had no allowance at all.
+    """
+    weights, df = _DEEP_TAIL_STRUCTURE
+
+    with pytest.warns(UserWarning, match="smaller than the quadrature can resolve"):
+        assert psum_chisq(129.0, weights, df=df) == 0.0
+
+
+def test_tightening_epsabs_resolves_more_of_the_tail():
+    """
+    The floor is the requested tolerance, not a fixed property of the module.
+
+    This is what makes the warning's advice actionable.
+    """
+    weights, df = _DEEP_TAIL_STRUCTURE
+
+    with pytest.warns(UserWarning):
+        loose = psum_chisq(60.0, weights, df=df)
+    tight = psum_chisq(60.0, weights, df=df, epsabs=1e-13, epsrel=1e-13)
+
+    assert loose == 0.0
+    assert 1e-13 < tight < 1e-11
+
+
+def test_values_kept_above_the_floor_are_accurate():
+    """A kept value must be worth keeping, not merely above the threshold."""
+    weights, df = _DEEP_TAIL_STRUCTURE
+    q = [30.0, 35.0, 40.0, 45.0, 50.0]
+
+    loose = psum_chisq(q, weights, df=df)
+    tight = psum_chisq(q, weights, df=df, epsabs=1e-13, epsrel=1e-13)
+
+    assert np.all(loose > 0.0)
+    np.testing.assert_allclose(loose, tight, rtol=1e-6, atol=1e-14)
+
+
+def test_exact_reductions_are_never_floored():
+    """
+    The floor is driven by the error estimate so that it cannot touch these.
+
+    A closed form integrated nothing, reports an error of exactly zero, and is
+    good to full relative precision far below any quadrature floor.
+    """
+    assert psum_chisq(400.0, [1.0], df=[1]) == pytest.approx(
+        chi2.sf(400.0, 1), rel=1e-12
+    )
+    assert psum_chisq(400.0, [1.0], df=[1]) < 1e-88
+
+
+def test_a_probability_outside_its_allowance_still_raises():
+    """The range check is relaxed by the error estimate, not removed."""
+    probabilities = np.array([-1e-6])
+    errors = np.array([1e-13])
+
+    with pytest.raises(RuntimeError, match="outside \\[0, 1\\]"):
+        chisqsum._finalize(probabilities, errors)
+
+
+def test_a_probability_inside_its_allowance_is_clipped():
+    """
+    An overshoot smaller than the error estimate is arithmetic, so it clips.
+
+    The clipped zero is then also below the floor, which is consistent: a value
+    the quadrature placed below zero is certainly one it could not resolve.
+    """
+    probabilities = np.array([-1.3e-15, 1.0 + 1e-15])
+    errors = np.array([3.8e-13, 3.8e-13])
+
+    with pytest.warns(UserWarning, match="smaller than the quadrature can resolve"):
+        finalized = chisqsum._finalize(probabilities, errors)
+
+    assert np.all(finalized == np.array([0.0, 1.0]))
+
+
+# --------------------------------------------------------------------------- #
+# F6 and F7.  The public ``epsabs`` was handed in full to each of three
+# integrations, so it was a per-piece figure that the assembled result could
+# exceed.  ``limlst`` was inherited from a SciPy default that is not part of its
+# documented signature.
+# --------------------------------------------------------------------------- #
+
+
+def test_each_quadrature_piece_gets_a_third_of_the_budget():
+    """``epsabs`` is an end-to-end budget for the three pieces together."""
+    requested = []
+
+    def recording(func, a, b, args, weight, wvar, epsabs, epsrel, limit, limlst=None):
+        recording.calls.append((func.__name__, epsabs, limlst))
+        return 0.0, 0.0
+
+    recording.calls = requested
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "_quad", recording)
+        chisqsum._cdf_qawf(
+            2.0,
+            np.array([1.0]),
+            np.array([1.0]),
+            np.array([0.0]),
+            1.0,
+            3e-10,
+            1e-10,
+            200,
+        )
+
+    assert [call[1] for call in requested] == pytest.approx([1e-10, 1e-10, 1e-10])
+
+
+def test_limlst_is_set_explicitly_on_both_fourier_tails():
+    """
+    The oscillatory cycle cap must not be inherited from SciPy's hidden default.
+
+    It has no measurable effect on any case probed here, so there is no outcome
+    to assert against.  What can be asserted is that the module states it.
+    """
+    calls = []
+
+    def recording(func, a, b, args, weight, wvar, epsabs, epsrel, limit, limlst=None):
+        calls.append((weight, limlst))
+        return 0.0, 0.0
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "_quad", recording)
+        chisqsum._cdf_qawf(
+            2.0,
+            np.array([1.0]),
+            np.array([1.0]),
+            np.array([0.0]),
+            1.0,
+            1e-10,
+            1e-10,
+            200,
+        )
+
+    assert calls == [
+        (None, None),
+        ("cos", chisqsum._LIMLST),
+        ("sin", chisqsum._LIMLST),
+    ]
+
+
+def test_limlst_reaches_scipy():
+    """The wrapper passes it on rather than accepting and dropping it."""
+    seen = {}
+
+    def fake_quad(*args, **kwargs):
+        seen.update(kwargs)
+        return 1.25, 2.5e-9, {"neval": 21}
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "quad", fake_quad)
+        chisqsum._quad(lambda x: x, 0.0, np.inf, (), "cos", 1.0, 1e-10, 1e-10, 200, 321)
+
+    assert seen["limlst"] == 321
+
+
+def test_limlst_is_not_passed_to_the_non_oscillatory_head():
+    """SciPy only uses it for the Fourier integrator, so it is not sent there."""
+    seen = {}
+
+    def fake_quad(*args, **kwargs):
+        seen.update(kwargs)
+        return 1.25, 2.5e-9, {"neval": 21}
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "quad", fake_quad)
+        chisqsum._quad(lambda x: x, 0.0, 1.0, (), None, None, 1e-10, 1e-10, 200)
+
+    assert "limlst" not in seen
+
+
+def test_non_convergence_is_distinguishable_from_corruption():
+    """
+    The fallback keys off this distinction, so it has to be real.
+
+    A route reporting that it could not resolve the integrand leaves the other
+    route free to try.  A route returning a non-finite number does not.
+    """
+    assert issubclass(chisqsum._QuadratureNotConverged, RuntimeError)
+
+    def diverging(*_args, **_kwargs):
+        return 1.25, 0.1, {}, "maximum number of cycles reached", {1: "failed"}
+
+    def corrupting(*_args, **_kwargs):
+        return np.inf, 0.1, {"neval": 21}
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "quad", diverging)
+        with pytest.raises(chisqsum._QuadratureNotConverged):
+            chisqsum._quad(lambda x: x, 0.0, np.inf, (), "cos", 1.0, 1e-10, 1e-10, 200)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "quad", corrupting)
+        with pytest.raises(RuntimeError) as excinfo:
+            chisqsum._quad(lambda x: x, 0.0, 1.0, (), None, None, 1e-10, 1e-10, 200)
+
+    assert not isinstance(excinfo.value, chisqsum._QuadratureNotConverged)
