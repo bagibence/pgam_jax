@@ -60,7 +60,7 @@ from typing import Callable
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-from scipy.integrate import quad
+from scipy.integrate import quad, tanhsinh
 from scipy.stats import chi2
 from scipy.stats import f as f_dist
 from scipy.stats import ncx2
@@ -68,6 +68,15 @@ from scipy.stats import ncx2
 __all__ = ["psum_chisq"]
 
 FloatArray = NDArray[np.float64]
+
+_Z_SWITCH = 5e-3
+_TANHSINH_ATOL = 1e-13
+_TANHSINH_RTOL = 1e-13
+# Levels 6 through 8 can stop on an aliased node set for a positive three-term
+# mixture near the handover even with ``success=True``.  Level 9 is the first
+# forced refinement that meets the independent-oracle calibration.
+_TANHSINH_MINLEVEL = 9
+_TANHSINH_MAXLEVEL = 14
 
 
 def _quad(
@@ -201,7 +210,140 @@ def _tail_sin_coefficient(
     return envelope * np.cos(phase)
 
 
-def _cdf_approx(
+def _divide_with_fallback(
+    numerator: FloatArray,
+    denominator: FloatArray,
+    fallback: float,
+) -> FloatArray:
+    """
+    Divide elementwise, using ``fallback`` where the denominator is zero.
+
+    ``numerator`` and ``denominator`` are arrays of tanh-sinh nodes, so this is
+    the vectorized equivalent of an ``if denominator != 0`` at every node.
+    NumPy does not evaluate the division where the mask is false. Those entries
+    retain the fallback with which ``result`` was initialized.
+    """
+    result = np.full_like(numerator, fallback)
+    np.divide(
+        numerator,
+        denominator,
+        out=result,
+        where=denominator != 0.0,
+    )
+    return result
+
+
+def _combined_integrand(
+    u: FloatArray,
+    q: float,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+) -> FloatArray:
+    r"""
+    Combined Imhof integrand, vectorised for tanh-sinh quadrature.
+
+    Unlike the QAWF path, this keeps :math:`\sin(\phi(u) - q u)` intact and
+    integrates it over :math:`[0, \infty)` without a head/tail split.  SciPy's
+    infinite-interval transform evaluates the function at both zero and values
+    near the largest representable float, so both ends require explicit care.
+
+    At zero, the apparent :math:`1/u` singularity is removable:
+
+    .. math::
+
+        \lim_{u \to 0}
+        \frac{\sin(\phi(u) - q u)e^{-\psi(u)}}{u}
+        = \sum_j w_j(\nu_j + \delta_j^2) - q.
+
+    At the other end, the ratios involving :math:`x_j = 2w_ju` are expressed
+    through :math:`h_j = \operatorname{hypot}(1, x_j) = \sqrt{1+x_j^2}`.
+    Unlike forming :math:`x_j^2` directly, ``hypot`` remains finite whenever
+    ``x_j`` does.
+    """
+    u_arr = np.asarray(u, dtype=float)
+
+    # The final axis is the term axis. Every preceding axis indexes a batch of
+    # tanh-sinh nodes. Some infinite-interval nodes are so large that this
+    # product legitimately overflows to +/-inf.
+    with np.errstate(over="ignore"):
+        x = 2.0 * u_arr[..., np.newaxis] * weights
+
+    # h = sqrt(1 + x**2) and s = x/h. np.hypot forms h without
+    # overflowing when x is a large finite number.
+    hypot_x = np.hypot(1.0, x)
+
+    # This is an elementwise if: finite x uses x/h, while an x that overflowed
+    # to +/-inf uses its analytic limit, +/-1
+    with np.errstate(invalid="ignore"):
+        unit_x = np.where(np.isfinite(x), x / hypot_x, np.sign(x))
+
+    # The three potentially troublesome expressions now share the same stable
+    # h and s:
+    #   x / (1 + x**2) = s / h
+    #   x**2 / (1 + x**2) = s**2
+    #   log(1 + x**2) = 2 log(h)
+    x_over_one_plus_x_sq = unit_x / hypot_x
+    x_sq_over_one_plus_x_sq = unit_x**2
+    log_one_plus_x_sq = 2.0 * np.log(hypot_x)
+
+    phase = 0.5 * np.sum(
+        df * np.arctan(x) + noncentrality * x_over_one_plus_x_sq,
+        axis=-1,
+    )
+    log_modulus = -0.25 * np.sum(df * log_one_plus_x_sq, axis=-1)
+    log_modulus -= 0.5 * np.sum(
+        noncentrality * x_sq_over_one_plus_x_sq,
+        axis=-1,
+    )
+    numerator = np.sin(phase - q * u_arr) * np.exp(log_modulus)
+
+    # The apparent 0/0 at u=0 has this analytic limit. The helper performs the
+    # division only at nonzero nodes and inserts the limit at zero.
+    limit_at_zero = float(np.sum(weights * (df + noncentrality)) - q)
+    return _divide_with_fallback(numerator, u_arr, limit_at_zero)
+
+
+def _cdf_tanhsinh(
+    q: float,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+) -> tuple[float, float]:
+    """``Pr(Q <= q)`` from the unsplit Imhof integrand via tanh-sinh."""
+    result = tanhsinh(
+        lambda u: _combined_integrand(u, q, weights, df, noncentrality),
+        0.0,
+        np.inf,
+        atol=_TANHSINH_ATOL,
+        rtol=_TANHSINH_RTOL,
+        minlevel=_TANHSINH_MINLEVEL,
+        maxlevel=_TANHSINH_MAXLEVEL,
+    )
+
+    integral = float(np.asarray(result.integral).item())
+    abs_error = float(np.asarray(result.error).item())
+    success = bool(np.asarray(result.success).item())
+    if not success:
+        status = int(np.asarray(result.status).item())
+        nfev = int(np.asarray(result.nfev).item())
+        maxlevel = int(np.asarray(result.maxlevel).item())
+        raise RuntimeError(
+            "tanh-sinh quadrature failed: "
+            f"status={status}, error={abs_error}, nfev={nfev}, "
+            f"maxlevel={maxlevel}"
+        )
+    if not np.isfinite(integral):
+        raise RuntimeError("tanh-sinh quadrature returned a non-finite value")
+    if not np.isfinite(abs_error) or abs_error < 0.0:
+        raise RuntimeError(
+            f"tanh-sinh quadrature returned an invalid error estimate: {abs_error}"
+        )
+
+    return 0.5 - integral / np.pi, abs_error / np.pi
+
+
+def _cdf_qawf(
     q: float,
     weights: FloatArray,
     df: FloatArray,
@@ -250,6 +392,37 @@ def _cdf_approx(
     quadrature_error = (head_error + tail_cos_error + tail_sin_error) / np.pi
 
     return cdf, quadrature_error
+
+
+def _cdf_approx(
+    q: float,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+    split: float,
+    epsabs: float,
+    epsrel: float,
+    limit: int,
+) -> tuple[float, float]:
+    """``Pr(Q <= q)`` using the quadrature suited to standardized ``q``."""
+    if abs(q) <= _Z_SWITCH:
+        return _cdf_tanhsinh(
+            q,
+            weights,
+            df,
+            noncentrality,
+        )
+
+    return _cdf_qawf(
+        q,
+        weights,
+        df,
+        noncentrality,
+        split,
+        epsabs,
+        epsrel,
+        limit,
+    )
 
 
 def _broadcast(values: ArrayLike, size: int, name: str) -> FloatArray:

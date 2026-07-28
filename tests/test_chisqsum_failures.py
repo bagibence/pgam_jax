@@ -67,6 +67,30 @@ def _standard_deviation(weights, df):
     return float(np.sqrt(np.sum(w**2 * 2 * np.asarray(df, dtype=float))))
 
 
+def test_divide_with_fallback_skips_zero_denominators():
+    """The fallback branch must not evaluate the masked division by zero."""
+    numerator = np.array([6.0, 1.0, 8.0])
+    denominator = np.array([2.0, 0.0, 4.0])
+
+    with np.errstate(divide="raise", invalid="raise"):
+        got = chisqsum._divide_with_fallback(numerator, denominator, fallback=99.0)
+
+    np.testing.assert_array_equal(got, [3.0, 99.0, 2.0])
+
+
+def test_combined_integrand_handles_zero_and_an_overflowed_x():
+    """The removable zero limit and the large-node analytic limit stay finite."""
+    got = chisqsum._combined_integrand(
+        np.array([0.0, np.finfo(float).max]),
+        0.0,
+        np.array([1.0]),
+        np.array([1.0]),
+        np.array([0.0]),
+    )
+
+    np.testing.assert_array_equal(got, [1.0, 0.0])
+
+
 # The five estimated-dispersion structures of the report, as
 # ``(positive weights on 1-df terms, k0, d)``.  The negative weight is
 # ``-d / k0`` on a ``k0``-df term.  Rank is the number of positive weights only
@@ -190,6 +214,98 @@ def test_positive_structure_is_accurate_at_small_z(z):
     assert psum_chisq(q, weights, df=df) == pytest.approx(
         sf_two_chi1_plus_chi2k(q, 0.6, 0.4, 1.0, 3), rel=1e-10
     )
+
+
+# The eight ``testStat`` structures used to calibrate the original prototype,
+# plus the positive mixture from the sweep above.  These are raw weights and
+# degrees of freedom; the test standardizes them before calling either
+# quadrature directly.
+_HANDOVER_STRUCTURES = [
+    pytest.param([1.0, -3.84 / 50], [1, 50], id="rank1-k50-d3.84"),
+    pytest.param([1.0, -0.5 / 5], [1, 5], id="rank1-k5-d0.5"),
+    pytest.param([1.0, -12.0 / 500], [1, 500], id="rank1-k500-d12"),
+    pytest.param(
+        [1.1830127, 0.3169873, -3.84 / 50],
+        [1, 1, 50],
+        id="rank1.5-k50-d3.84",
+    ),
+    pytest.param(
+        [1.1830127, 0.3169873, -1e-4 / 50],
+        [1, 1, 50],
+        id="rank1.5-k50-d1e-4",
+    ),
+    pytest.param(
+        [1.1830127, 0.3169873, -1.0 / 500],
+        [1, 1, 500],
+        id="rank1.5-k500-d1",
+    ),
+    pytest.param(
+        [1.9486833, 0.0513167, -2.0 / 5],
+        [1, 1, 5],
+        id="rank1.9-k5-d2",
+    ),
+    pytest.param([1.0, 1.0, -6.0 / 50], [1, 1, 50], id="rank2-k50-d6"),
+    pytest.param([1.0, 0.6, 0.4], [3, 1, 1], id="positive-mixture"),
+]
+_HANDOVER_Z = np.geomspace(1e-3, 1e-2, 9)
+
+
+@pytest.mark.parametrize("weights, df", _HANDOVER_STRUCTURES)
+@pytest.mark.parametrize("z", _HANDOVER_Z)
+def test_quadrature_methods_agree_across_the_handover_band(z, weights, df):
+    """
+    The method switch lies inside an overlap where both quadratures are accurate.
+
+    QAWF is requested at ``1e-11`` for this calibration: that is the largest
+    per-piece absolute tolerance measured to give 1e-12 relative agreement over
+    the whole set.  The public default remains 1e-10, and the dispatcher keeps
+    QAWF away from the small-z rows where that looser request misses the
+    integrand.
+    """
+    w = np.asarray(weights, dtype=float)
+    d = np.asarray(df, dtype=float)
+    ncp = np.zeros_like(w)
+    w, d, ncp = chisqsum._collapse_terms(w, d, ncp)
+    sd = chisqsum._standard_deviation(w, d, ncp)
+    w = w / sd
+
+    tanhsinh_cdf, _ = chisqsum._cdf_tanhsinh(z, w, d, ncp)
+    qawf_cdf, _ = chisqsum._cdf_qawf(
+        z,
+        w,
+        d,
+        ncp,
+        1.0,
+        1e-11,
+        1e-11,
+        200,
+    )
+
+    assert 1.0 - qawf_cdf == pytest.approx(1.0 - tanhsinh_cdf, rel=1e-12)
+
+
+def test_quadrature_dispatches_at_the_calibrated_switch(monkeypatch):
+    """The boundary itself belongs to tanh-sinh; the next float belongs to QAWF."""
+    calls = []
+
+    def tanhsinh_branch(*_args):
+        calls.append("tanhsinh")
+        return 0.25, 0.0
+
+    def qawf_branch(*_args):
+        calls.append("qawf")
+        return 0.75, 0.0
+
+    monkeypatch.setattr(chisqsum, "_cdf_tanhsinh", tanhsinh_branch)
+    monkeypatch.setattr(chisqsum, "_cdf_qawf", qawf_branch)
+
+    args = (np.array([1.0]), np.array([1.0]), np.array([0.0]), 1.0, 1e-10, 1e-10, 200)
+    assert chisqsum._cdf_approx(chisqsum._Z_SWITCH, *args) == (0.25, 0.0)
+    assert chisqsum._cdf_approx(np.nextafter(chisqsum._Z_SWITCH, np.inf), *args) == (
+        0.75,
+        0.0,
+    )
+    assert calls == ["tanhsinh", "qawf"]
 
 
 # --------------------------------------------------------------------------- #
