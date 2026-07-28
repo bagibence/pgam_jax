@@ -27,6 +27,7 @@ inside the bulk of the Gaussian weight, and is wrong by 1.7e-05 at ``q = 4``.
 import numpy as np
 import pytest
 from scipy.integrate import quad
+from scipy.special import i0e
 from scipy.stats import chi2
 from scipy.stats import f as f_dist
 
@@ -65,6 +66,57 @@ def sf_two_chi1(t, a, b, n=40001):
     positive = np.maximum(t, 0.0)
     sf = np.mean(np.exp(-positive[..., None] / (2.0 * g)), axis=-1)
     return np.where(t > 0.0, sf, 1.0)
+
+
+def sf_two_chi1_bessel(t, a, b):
+    """
+    Independent Bessel-density reference for two positive ``chi2_1`` terms.
+
+    The density of ``a X1 + b X2`` is evaluated with the exponentially scaled
+    modified Bessel function.  The substitution ``x = root_x**2`` smooths the
+    near-zero density as one weight vanishes.  Integrating the smaller tail
+    avoids subtracting two numbers close to one except when the survival
+    probability itself is close to one, where subtracting the small CDF is
+    well conditioned in absolute error.
+    """
+    t = np.asarray(t, dtype=float)
+    out = np.empty_like(t)
+    product = a * b
+    difference_scale = abs(a - b) / (4.0 * product)
+    normalization = 2.0 * np.sqrt(product)
+    largest_weight = max(a, b)
+
+    def density(x):
+        argument = x * difference_scale
+        return np.exp(-x / (2.0 * largest_weight)) * i0e(argument) / normalization
+
+    def square_transformed_density(root_x):
+        return 2.0 * root_x * density(root_x**2)
+
+    for index in np.ndindex(t.shape):
+        point = float(t[index])
+        if point <= 0.0:
+            out[index] = 1.0
+        elif point <= a + b:
+            cdf = quad(
+                square_transformed_density,
+                0.0,
+                np.sqrt(point),
+                epsabs=1e-15,
+                epsrel=1e-13,
+                limit=500,
+            )[0]
+            out[index] = 1.0 - cdf
+        else:
+            out[index] = quad(
+                density,
+                point,
+                np.inf,
+                epsabs=1e-15,
+                epsrel=1e-13,
+                limit=500,
+            )[0]
+    return out
 
 
 def sf_teststat(d, weights_pos, k0):
@@ -229,6 +281,26 @@ def test_one_vanishing_weight_degenerates_to_one_term():
     """
     assert float(sf_two_chi1(np.array(4.0), 1.0, 1e-9)) == pytest.approx(
         chi2.sf(4.0, 1), rel=1e-8
+    )
+    assert float(sf_two_chi1_bessel(np.array(4.0), 1.0, 1e-9)) == pytest.approx(
+        chi2.sf(4.0, 1), rel=1e-8
+    )
+
+
+@pytest.mark.parametrize(
+    "t, a, b",
+    [
+        (1e-10, 0.125, 0.25),
+        (1e-5, 0.125, 0.625),
+        (0.5, 0.2, 1.3),
+        (4.0, 0.6, 1.2),
+        (30.0, 0.4, 2.0),
+    ],
+)
+def test_bessel_reference_agrees_with_angular_reference(t, a, b):
+    """The two independent two-term representations agree."""
+    assert float(sf_two_chi1_bessel(np.array(t), a, b)) == pytest.approx(
+        sf_two_chi1(np.array(t), a, b), rel=2e-12, abs=2e-14
     )
 
 

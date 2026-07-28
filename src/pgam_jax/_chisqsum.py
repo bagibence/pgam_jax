@@ -11,7 +11,7 @@ non-central) chi-squared variables.  Weights may be of either sign.  This is the
 null distribution used to obtain covariate-inclusion p-values for penalised GAM
 smooth terms.
 
-The probability is obtained by inverting the characteristic function of ``Q``
+The general case is obtained by inverting the characteristic function of ``Q``
 (Gil-Pelaez / Imhof, 1961):
 
 .. math::
@@ -841,6 +841,94 @@ def _standard_deviation(
     return scale * float(unit)
 
 
+def _two_chi1_angular_integrand(
+    theta: float,
+    z: float,
+    first_weight: float,
+    second_weight: float,
+    lower_tail: bool,
+) -> float:
+    """
+    Angular CDF or survival integrand for two positive central chi-squares.
+
+    If ``X1`` and ``X2`` are independent ``chi2_1`` variables, write their
+    underlying normals in polar coordinates.  The squared radius is ``chi2_2``
+    and the angle is uniform, which leaves a smooth integral over one quadrant.
+    """
+    cosine = np.cos(theta)
+    cosine_squared = cosine * cosine
+    scale = first_weight * cosine_squared + second_weight * (1.0 - cosine_squared)
+    with np.errstate(divide="ignore", over="ignore", under="ignore"):
+        exponent = -z / (2.0 * scale)
+        if lower_tail:
+            return float(-np.expm1(exponent))
+        return float(np.exp(exponent))
+
+
+def _two_chi1_probability(
+    z: float,
+    weights: FloatArray,
+    lower_tail: bool,
+    epsabs: float,
+    epsrel: float,
+    limit: int,
+) -> tuple[float, float]:
+    """
+    Evaluate one tail of two positive central ``chi2_1`` terms.
+
+    The requested tail is integrated directly.  In particular, the lower-tail
+    integrand uses ``-expm1`` rather than subtracting a survival probability
+    close to one.  The quadrant is split where the two weighted angular
+    contributions are equal and, when it lies inside the range of angular
+    scales, where that scale equals ``z``.  These points expose the narrow
+    endpoint layer that appears when one weight is almost zero.
+    """
+    first_weight, second_weight = sorted(map(float, weights))
+    arguments: tuple[object, ...] = (
+        z,
+        first_weight,
+        second_weight,
+        lower_tail,
+    )
+
+    # Multiplication by 2 / pi turns the angular integral into a probability.
+    # Dividing epsabs between every interval keeps their combined probability
+    # error within the caller's end-to-end absolute budget.
+    equal_contributions = np.arctan(np.sqrt(first_weight / second_weight))
+    breakpoints = [0.0, float(equal_contributions), np.pi / 4.0, np.pi / 2.0]
+    endpoint_layer = float(equal_contributions)
+    if first_weight < z < second_weight:
+        scale_fraction = (z - first_weight) / (second_weight - first_weight)
+        matching_scale = np.arcsin(np.sqrt(scale_fraction))
+        breakpoints.append(float(matching_scale))
+        endpoint_layer = max(endpoint_layer, float(matching_scale))
+    if endpoint_layer < np.pi / 4.0:
+        breakpoints.append(float(np.sqrt(endpoint_layer * np.pi / 4.0)))
+    breakpoints = sorted(set(breakpoints))
+
+    n_intervals = len(breakpoints) - 1
+    piece_epsabs = epsabs * np.pi / (2.0 * n_intervals)
+    pieces = [
+        _quad(
+            _two_chi1_angular_integrand,
+            left,
+            right,
+            arguments,
+            None,
+            None,
+            piece_epsabs,
+            epsrel,
+            limit,
+        )
+        for left, right in zip(breakpoints[:-1], breakpoints[1:])
+    ]
+    factor = 2.0 / np.pi
+    return (
+        factor * sum(value for value, _ in pieces),
+        factor * sum(error for _, error in pieces),
+    )
+
+
 def _reduce(
     z: float,
     weights: FloatArray,
@@ -979,23 +1067,25 @@ def _cdf_single(
     epsrel: float,
     limit: int,
     check: bool,
+    lower_tail: bool,
 ) -> tuple[float, float]:
     """
-    ``Pr(Q <= q)`` and its absolute error at one point, exactly where possible.
+    The requested tail and its absolute error at one point.
 
     Takes the raw ``q`` and the standard deviation of ``Q``, and standardises
     them here.  The weights arrive already standardised, which is what the
-    ``std_`` prefix marks.  Exact answers return a zero error, since nothing
-    was integrated to obtain them.
+    ``std_`` prefix marks.  Closed-form answers return a zero error, since
+    nothing was integrated to obtain them.  The specialized two-``chi2_1``
+    reduction integrates the requested tail directly.
     """
     z = float(q) / sd
     # An infinite z is q at infinitely many standard deviations, which is
     # the same statement as an infinite q.  Both are exact, and neither is
     # a question the quadrature can be asked.
     if np.isposinf(z):
-        return 1.0, 0.0
+        return (1.0 if lower_tail else 0.0), 0.0
     if np.isneginf(z):
-        return 0.0, 0.0
+        return (0.0 if lower_tail else 1.0), 0.0
     if not np.isfinite(z):
         raise RuntimeError(
             f"standardized evaluation point is not a number: q={q}, sd={sd}"
@@ -1003,10 +1093,27 @@ def _cdf_single(
 
     reduced = _reduce(z, std_weights, df_arr, ncp_arr)
     if reduced is not None:
-        return reduced, 0.0
+        return (reduced if lower_tail else 1.0 - reduced), 0.0
+
+    central = not np.any(ncp_arr)
+    two_positive_chi1 = (
+        central
+        and std_weights.size == 2
+        and bool(np.all(std_weights > 0.0))
+        and bool(np.all(df_arr == 1.0))
+    )
+    if two_positive_chi1:
+        return _two_chi1_probability(
+            z,
+            std_weights,
+            lower_tail,
+            epsabs,
+            epsrel,
+            limit,
+        )
 
     _regime_gate(z, std_weights, df_arr, ncp_arr)
-    return _cdf_approx(
+    cdf, cdf_error = _cdf_approx(
         z,
         std_weights,
         df_arr,
@@ -1017,6 +1124,7 @@ def _cdf_single(
         limit,
         check,
     )
+    return (cdf if lower_tail else 1.0 - cdf), cdf_error
 
 
 def _finalize(
@@ -1138,21 +1246,25 @@ def psum_chisq(
     epsabs, epsrel : float, optional
         Absolute and relative accuracy targets.  ``epsabs`` is an end-to-end
         budget: the oscillatory route assembles its answer from three
-        integrations and divides it between them.  ``epsrel`` reaches only the
-        non-oscillatory head, since QUADPACK's Fourier integrator accepts an
-        absolute request alone.  ``epsabs`` also sets the resolution floor
-        described below.
+        integrations and divides it between them.  For that route, ``epsrel``
+        reaches only the non-oscillatory head, since QUADPACK's Fourier
+        integrator accepts an absolute request alone.  The two-term angular
+        reduction applies both tolerances to its two finite pieces.
+        ``epsabs`` also sets the resolution floor described below.
     limit : int, optional
         Maximum number of quadrature subintervals.
     check : bool, optional
-        Recompute every quadrature result by a numerically independent route
-        and raise if the two disagree by more than their combined error
-        estimates allow.  Defaults to ``True``, and roughly doubles the cost.
-        It is worth that: the integrator's own diagnostics report success with
-        an absolute error of ``4e-15`` on values that are wrong in the second
-        decimal place, so nothing else here can catch a failure mode that has
-        not already been catalogued.  A result obtained from the route that
-        ``q`` did *not* select is cross-checked even when this is ``False``.
+        Recompute every characteristic-function quadrature result by a
+        numerically independent route and raise if the two disagree by more
+        than their combined error estimates allow.  Defaults to ``True``, and
+        roughly doubles the cost.  It is worth that: the integrator's own
+        diagnostics report success with an absolute error of ``4e-15`` on
+        values that are wrong in the second decimal place, so nothing else
+        here can catch a failure mode that has not already been catalogued.  A
+        result obtained from the route that ``q`` did *not* select is
+        cross-checked even when this is ``False``.  The positive,
+        two-``chi2_1`` angular reduction is a bounded non-oscillatory integral
+        and uses its direct quadrature error instead.
 
     Returns
     -------
@@ -1187,11 +1299,13 @@ def psum_chisq(
     exactly ``q = 0``, both with zero non-centrality.  Anything else raises,
     rather than returning a number no oracle has checked.
 
-    Several shapes never reach the quadrature at all, because they have exact
-    closed forms: a single term of either sign, positive weights at a
-    non-positive ``q``, and two central terms of opposite sign at ``q = 0``,
-    which is an F survival probability.  Non-centrality is therefore honoured
-    only for a single term, where the answer is a non-central chi-square.
+    Several shapes never reach characteristic-function quadrature.  A single
+    term of either sign, positive weights at a non-positive ``q``, and two
+    central terms of opposite sign at ``q = 0`` have closed forms.  Two
+    positive central terms with one degree of freedom each use a bounded
+    angular integral, with the requested tail evaluated directly.
+    Non-centrality is therefore honoured only for a single term, where the
+    answer is a non-central chi-square.
 
     Terms are canonicalised before anything is evaluated: zero-weight terms are
     dropped and equal weights are merged, both exactly.
@@ -1217,8 +1331,8 @@ def psum_chisq(
     like ``u**-2`` and tanh-sinh will not converge on it.  A route that reports
     it cannot resolve the integrand is therefore not fatal; the other one is
     tried, and its answer is admitted only if it survives the cross-check.  A
-    narrow band remains, at the lowest degrees of freedom and very small ``z``,
-    where no two independent routes both converge.  That raises.
+    narrow band can remain for other slowly decaying mixtures where no two
+    independent routes both converge.  That raises.
     """
     weight_arr = np.atleast_1d(np.asarray(weights, dtype=float))
     n_terms = int(weight_arr.size)
@@ -1239,7 +1353,7 @@ def psum_chisq(
     out = np.empty(q_arr.shape, dtype=float)
     errors = np.empty(q_arr.shape, dtype=float)
     for i in range(q_arr.size):
-        cdf, cdf_error = _cdf_single(
+        probability, probability_error = _cdf_single(
             float(q_arr.flat[i]),
             sd,
             std_weights,
@@ -1249,9 +1363,10 @@ def psum_chisq(
             epsrel,
             limit,
             check,
+            lower_tail,
         )
-        out.flat[i] = cdf if lower_tail else 1.0 - cdf
-        errors.flat[i] = cdf_error
+        out.flat[i] = probability
+        errors.flat[i] = probability_error
 
     if np.isnan(out).any():
         warnings.warn("psum_chisq: quadrature produced NaN", stacklevel=2)

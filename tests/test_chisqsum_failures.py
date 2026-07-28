@@ -12,6 +12,7 @@ from test_chisqsum_oracles import (
     sf_teststat,
     sf_teststat_at_q,
     sf_two_chi1,
+    sf_two_chi1_bessel,
     sf_two_chi1_plus_chi2k,
 )
 
@@ -1052,25 +1053,81 @@ def test_fallback_is_cross_checked_even_when_checking_is_off():
     assert calls == [1.0, chisqsum._QAWF_CROSS_CHECK_SPLIT]
 
 
-def test_both_routes_failing_names_both():
+def test_two_chi1_angular_reduction_resolves_the_old_failure(monkeypatch):
     """
-    A band remains where no two independent routes both converge.
+    The exact two-term representation bypasses both oscillatory routes.
 
-    It must raise, and the message must say what was tried.  Returning the one
-    route that happened to converge would be returning an unvalidated number,
-    which is the thing this module exists not to do.
+    This was the saved small-z failure where neither characteristic-function
+    quadrature route converged.  The expected value comes from the independent
+    Bessel-density representation.
     """
-    first, second = _mgcv_fractional_rank_weights(1.5)
+    q = 3.952847075210474e-06
+    weights = [0.125, 0.25]
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
 
-    with pytest.raises(RuntimeError) as excinfo:
-        psum_chisq(1e-5, [first, second], df=[1, 1])
+    expected = float(sf_two_chi1_bessel(np.array(q), *weights))
+    upper = psum_chisq(q, weights, df=[1, 1])
+    lower = psum_chisq(q, weights, df=[1, 1], lower_tail=True)
 
-    message = str(excinfo.value)
-    assert "neither quadrature route" in message
-    assert chisqsum._TANHSINH in message
-    assert chisqsum._QAWF in message
-    assert "weights=" in message
-    assert "report" in message
+    assert upper == pytest.approx(expected, rel=1e-12)
+    assert lower == pytest.approx(1.0 - expected, rel=1e-12)
+    assert upper + lower == pytest.approx(1.0, abs=2e-15)
+
+
+@pytest.mark.parametrize("q", [1e-10, 4.0])
+def test_two_chi1_angular_reduction_handles_imbalanced_weights(monkeypatch, q):
+    """A fractional rank approaching an integer remains numerically stable."""
+    weights = [1.0, 1e-9]
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
+
+    expected = float(sf_two_chi1_bessel(np.array(q), *weights))
+    assert psum_chisq(q, weights, df=1) == pytest.approx(expected, rel=1e-10, abs=2e-14)
+
+
+def test_two_chi1_angular_reduction_covers_fractional_rank_grid(monkeypatch):
+    """Near-integer through near-next-integer ranks resolve across small and bulk z."""
+    nus = [
+        1e-12,
+        1e-9,
+        1e-6,
+        1e-3,
+        0.01,
+        0.05,
+        0.1,
+        0.2,
+        0.5,
+        0.9,
+        0.99,
+        0.999,
+        1.0 - 1e-6,
+    ]
+    standardized_points = [
+        1e-12,
+        1e-10,
+        1e-8,
+        1e-6,
+        1e-4,
+        9e-4,
+        0.0625,
+        0.25,
+        1.0,
+        4.0,
+    ]
+    monkeypatch.setattr(chisqsum, "_cdf_approx", _unreachable)
+
+    for nu in nus:
+        weights = _mgcv_fractional_rank_weights(1.0 + nu)
+        sd = np.sqrt(2.0 * np.sum(np.square(weights)))
+        for z in standardized_points:
+            q = z * sd
+            expected_upper = float(sf_two_chi1_bessel(np.array(q), *weights))
+            upper = psum_chisq(q, weights, df=1)
+            lower = psum_chisq(q, weights, df=1, lower_tail=True)
+
+            message = f"nu={nu!r}, z={z!r}"
+            assert upper == pytest.approx(expected_upper, abs=1e-10), message
+            assert lower == pytest.approx(1.0 - expected_upper, abs=1e-10), message
+            assert upper + lower == pytest.approx(1.0, abs=1e-12), message
 
 
 def test_a_corrupt_result_is_not_laundered_through_the_fallback():
