@@ -30,6 +30,17 @@ where, writing :math:`x_j = 2 w_j u`,
         + \frac{1}{4} \sum_j \nu_j \log\!\big(1 + x_j^2\big)
         + \frac{1}{2} \sum_j \frac{\delta_j^2\, x_j^2}{1 + x_j^2}.
 
+Before any of this is evaluated the problem is nondimensionalised.  Writing
+:math:`\mathrm{sd}` for the standard deviation of :math:`Q`, the substitution
+:math:`t = \mathrm{sd}\, u` maps the integral onto itself, since
+:math:`x_j = 2 w_j u = 2 (w_j/\mathrm{sd})\, t`, :math:`q u = (q/\mathrm{sd})\, t`
+and :math:`\mathrm{d}u / u = \mathrm{d}t / t`.  The quadrature therefore runs on
+normalised weights :math:`w_j/\mathrm{sd}`, normal scale
+:math:`\sigma/\mathrm{sd}` and standardised evaluation point
+:math:`z = q/\mathrm{sd}`, with the split point at 1.  Every threshold and
+frequency the method uses is then unit-free, so the result is invariant under a
+common rescaling of ``q``, the weights and ``sigma``, as it must be.
+
 The integral is evaluated with SciPy's adaptive quadrature: a short
 non-oscillatory head on :math:`[0, a]`, plus the semi-infinite oscillatory tail
 handled by the Fourier integrators (``weight="cos"``/``"sin"``), which converge
@@ -262,6 +273,57 @@ def _broadcast(values: ArrayLike, size: int, name: str) -> FloatArray:
     return arr
 
 
+def _standard_deviation(
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+    sigma: float,
+) -> float:
+    r"""
+    Standard deviation of ``Q``, formed without squaring raw-scale inputs.
+
+    The variance is
+
+    .. math::
+
+        \mathrm{sd}^2 = \sigma^2
+            + \sum_j w_j^2 \big(2 \nu_j + 4 \delta_j^2\big),
+
+    but evaluating that directly squares the raw weights, so it overflows to
+    infinity once the sum passes the largest representable double and underflows
+    to zero for very small weights.  Both are silent: an infinite ``sd`` sends
+    every normalised weight and the standardised frequency to zero, which returns
+    a raw CDF of exactly ``0.5``.
+
+    Factoring out the largest magnitude in the problem avoids both failure modes
+    over the practically relevant float64 range.  Every ratio ``w_j / scale`` is
+    then at most one, so no square can overflow, and the term attaining the
+    maximum contributes at least ``2 nu_j``, so the scaled sum cannot underflow
+    to zero either.
+
+    Parameters
+    ----------
+    weights, df, noncentrality : numpy.ndarray
+        The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
+        non-centrality parameters :math:`\delta_j^2`.
+    sigma : float
+        Standard deviation :math:`\sigma` of the additive normal term.
+
+    Returns
+    -------
+    float
+        The standard deviation of ``Q``.  Strictly positive, since the caller has
+        already checked that at least one weight is non-zero.
+    """
+    scale = max(float(np.max(np.abs(weights))), abs(sigma))
+    # The same variance measured in units of ``scale``, so of order sqrt(sum df).
+    unit = np.sqrt(
+        (sigma / scale) ** 2
+        + np.sum((weights / scale) ** 2 * (2.0 * df + 4.0 * noncentrality))
+    )
+    return scale * float(unit)
+
+
 def psum_chisq(
     q: ArrayLike,
     weights: ArrayLike,
@@ -273,7 +335,8 @@ def psum_chisq(
     epsrel: float = 1e-10,
     limit: int = 200,
 ) -> float | FloatArray:
-    r"""Distribution function of a weighted sum of chi-squared variables.
+    r"""
+    Distribution function of a weighted sum of chi-squared variables.
 
     Evaluates :math:`\Pr(Q \le q)` (or the upper tail) for
     :math:`Q = \sum_j w_j X_j + \sigma Z`, where
@@ -313,10 +376,13 @@ def psum_chisq(
 
     Notes
     -----
-    The integrand is split into a non-oscillatory head on ``[0, 1/sd]`` (where
-    ``sd`` is the standard deviation of ``Q``) and a semi-infinite oscillatory
-    tail integrated with SciPy's Fourier quadrature, which remains accurate for
-    the slowly decaying tails produced by low degrees of freedom.
+    The problem is nondimensionalised before any numerical decision is made:
+    ``q`` becomes ``z = q / sd`` and the weights and ``sigma`` are divided by
+    ``sd``, the standard deviation of ``Q``.  The integrand is then split into a
+    non-oscillatory head on ``[0, 1]`` in those standardised coordinates and a
+    semi-infinite oscillatory tail integrated with SciPy's Fourier quadrature,
+    which remains accurate for the slowly decaying tails produced by low degrees
+    of freedom.
     """
     weight_arr = np.atleast_1d(np.asarray(weights, dtype=float))
     n_terms = int(weight_arr.size)
@@ -335,21 +401,25 @@ def psum_chisq(
         raise ValueError("'sigma' must be finite.")
     if sigma < 0:
         raise ValueError("'sigma' must be non-negative.")
-    sigma_sq = sigma**2
 
-    variance = sigma_sq + np.sum(weight_arr**2 * (2.0 * df_arr + 4.0 * ncp_arr))
-    split = 1.0 / np.sqrt(variance)
+    # Nondimensionalize: substituting t = sd * u maps the inversion integral onto
+    # itself with weights w/sd, normal scale sigma/sd, frequency z = q/sd and a
+    # split point of 1.  Every numerical decision below is then made on unit-free
+    # quantities, so the result cannot depend on the units of q and the weights.
+    sd = _standard_deviation(weight_arr, df_arr, ncp_arr, sigma)
+    std_weights = weight_arr / sd
+    std_sigma_sq = (sigma / sd) ** 2
 
     q_arr = np.atleast_1d(np.asarray(q, dtype=float))
     out = np.empty(q_arr.shape, dtype=float)
     for i in range(q_arr.size):
         cdf, _cdf_error = _cdf_single(
-            float(q_arr.flat[i]),
-            weight_arr,
+            float(q_arr.flat[i]) / sd,
+            std_weights,
             df_arr,
             ncp_arr,
-            sigma_sq,
-            split,
+            std_sigma_sq,
+            1.0,
             epsabs,
             epsrel,
             limit,
