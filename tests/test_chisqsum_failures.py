@@ -4,7 +4,10 @@ Failure-mode regression tests for :mod:`pgam_jax._chisqsum`.
 
 import numpy as np
 import pytest
-from scipy.stats import chi2, ncx2
+from scipy.integrate import quad
+from scipy.stats import chi2
+from scipy.stats import f as f_dist
+from scipy.stats import ncx2
 
 import pgam_jax._chisqsum as chisqsum
 from pgam_jax._chisqsum import psum_chisq
@@ -13,6 +16,38 @@ from pgam_jax._chisqsum import psum_chisq
 def _unreachable(*_args, **_kwargs):
     """Stand-in for :func:`_cdf_single` on paths that must never integrate."""
     raise AssertionError("quadrature must not be reached")
+
+
+def _sf_by_quadrature(q, weights, df=1.0, noncentrality=0.0):
+    """
+    ``Pr(Q > q)`` by nondimensionalisation and quadrature alone.
+
+    Exact reductions answer several of the rows below before the integrator is
+    reached, which would leave those rows testing SciPy rather than this module.
+    This routes the same call through the standardisation and integration
+    ``psum_chisq`` performs, with no reduction and no regime gate, so a test that
+    is about the quadrature stays about the quadrature.
+
+    :func:`test_quadrature_helper_matches_public_path` pins this to the wiring in
+    ``psum_chisq``, which is what keeps it from drifting into testing a
+    convention the module no longer uses.
+    """
+    w = np.atleast_1d(np.asarray(weights, dtype=float))
+    d = chisqsum._broadcast(df, w.size, "df")
+    ncp = chisqsum._broadcast(noncentrality, w.size, "noncentrality")
+    w, d, ncp = chisqsum._collapse_terms(w, d, ncp)
+
+    sd = chisqsum._standard_deviation(w, d, ncp)
+    cdf, _error = chisqsum._cdf_single(q / sd, w / sd, d, ncp, 1.0, 1e-10, 1e-10, 200)
+    return 1.0 - cdf
+
+
+def test_quadrature_helper_matches_public_path():
+    """No reduction applies to this mixture, so both routes are the same code."""
+    q, weights, df = 5.0, [1.0, 0.6, 0.4], [3, 1, 1]
+    assert _sf_by_quadrature(q, weights, df) == pytest.approx(
+        psum_chisq(q, weights, df=df), rel=1e-14
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -28,11 +63,15 @@ def _unreachable(*_args, **_kwargs):
 # Spans a large range. 1e7 to 1e12 is where the old code broke.
 _RESCALINGS = [1e-6, 1e-3, 1.0, 1e3, 1e6, 1e7, 1e8, 1e9, 1e10, 1e12, 1e15]
 
+# The single-term rows go through ``_sf_by_quadrature``.  A single term now has
+# an exact reduction, so calling ``psum_chisq`` would answer them from
+# ``chi2.sf`` and stop testing the standardisation these rows exist to check.
+
 
 @pytest.mark.parametrize("c", _RESCALINGS)
 def test_single_term_scale_invariance(c):
     """``c * chi2_1`` evaluated at ``c`` is ``chi2_1`` evaluated at 1, for any ``c``."""
-    assert psum_chisq(c, [c], df=1) == pytest.approx(chi2.sf(1.0, 1), rel=1e-12)
+    assert _sf_by_quadrature(c, [c], df=1) == pytest.approx(chi2.sf(1.0, 1), rel=1e-12)
 
 
 @pytest.mark.parametrize("c", _RESCALINGS)
@@ -43,11 +82,18 @@ def test_multi_term_scale_invariance(c):
     assert got == pytest.approx(base, rel=1e-12)
 
 
+# A multi-term non-central sum is outside the supported regime, so this row also
+# goes through the quadrature helper.  With the public path gated, that helper is
+# the only thing keeping the integrand's non-centrality terms under test.
+
+
 @pytest.mark.parametrize("c", _RESCALINGS)
 def test_noncentrality_is_dimensionless(c):
     """``noncentrality`` is unit-free, so it stays fixed while ``q`` and weights rescale."""
-    base = psum_chisq(10.0, [1.0, 0.5], df=[3, 1], noncentrality=[2.0, 0.5])
-    got = psum_chisq(10.0 * c, [1.0 * c, 0.5 * c], df=[3, 1], noncentrality=[2.0, 0.5])
+    base = _sf_by_quadrature(10.0, [1.0, 0.5], df=[3, 1], noncentrality=[2.0, 0.5])
+    got = _sf_by_quadrature(
+        10.0 * c, [1.0 * c, 0.5 * c], df=[3, 1], noncentrality=[2.0, 0.5]
+    )
     assert got == pytest.approx(base, rel=1e-12)
 
 
@@ -61,14 +107,14 @@ def test_noncentrality_is_dimensionless(c):
 @pytest.mark.parametrize("c", [1e-300, 1e-200, 1e160, 1e300])
 def test_scale_invariance_beyond_naive_variance_range(c):
     """The rescale still holds where the naive variance over- or underflows."""
-    assert psum_chisq(c, [c], df=1) == pytest.approx(chi2.sf(1.0, 1), rel=1e-12)
+    assert _sf_by_quadrature(c, [c], df=1) == pytest.approx(chi2.sf(1.0, 1), rel=1e-12)
 
 
 def test_many_terms_at_the_overflow_edge():
     """More terms lower the overflow threshold: 20 terms at ``df=5`` break by 1e153."""
     df = np.full(20, 5.0)
-    base = psum_chisq(50.0, np.ones(20), df=df)
-    got = psum_chisq(50.0 * 1e153, np.full(20, 1e153), df=df)
+    base = _sf_by_quadrature(50.0, np.ones(20), df=df)
+    got = _sf_by_quadrature(50.0 * 1e153, np.full(20, 1e153), df=df)
     assert got == pytest.approx(base, rel=1e-12)
 
 
@@ -275,13 +321,233 @@ def test_collapse_terms_leaves_unequal_weights_alone():
     assert w.tolist() == sorted(weights.tolist())
 
 
-# ``q = 0`` is left out below: with signed weights that is F1, which still raises
-# "Probabilities must be in [0, 1]" and is fixed in a later pass.
-@pytest.mark.parametrize("q", [-4.0, -1.0, 1.0, 4.0])
-def test_reflection_identity(q):
-    """``Pr(Q > q) = Pr(-Q <= -q)``, so negating both sides must agree."""
-    weights = [1.0, 0.6, -0.4]
-    df = [3, 1, 2]
-    upper = psum_chisq(q, weights, df=df, lower_tail=False)
-    lower = psum_chisq(-q, [-w for w in weights], df=df, lower_tail=True)
-    assert upper == pytest.approx(lower, abs=1e-10)
+# The reflection identity ``Pr(Q > q) = Pr(-Q <= -q)`` used to be checked here on
+# ``[1, 0.6, -0.4]`` at ``q = +/-1, +/-4``.  Both sides of it are now outside the
+# supported regime, the left as signed weights away from zero and the right as an
+# all-negative list, so it lives in the regime-gate section below as two rejected
+# shapes rather than as a numerical identity.
+
+
+# --------------------------------------------------------------------------- #
+# Exact reductions.  Some shapes have closed forms, and the quadrature is worst
+# on the one that matters most.
+#
+# mgcv's estimated-dispersion smooth-term test is ``P(Q > 0)`` for
+# ``Q = sum_j v_j X_j - (d/k0) S``.  Once equal positive weights are merged that
+# is two terms of opposite sign at exactly ``q = 0``, which is an F survival
+# probability and needs no inversion at all.  The quadrature put the rank-1 case
+# at a raw survival probability of -0.3736, so it raised "Probabilities must be
+# in [0, 1]" where the answer is 0.05563.  F1 is the double-counted head at
+# ``q = 0``, and it is only half closed here: three or more signed terms still
+# reach the integrator.
+# --------------------------------------------------------------------------- #
+
+
+def _sf_two_term_by_conditioning(w_pos, m, w_neg, n):
+    """
+    ``P(w_pos X_m + w_neg Y_n > 0)`` for independent central chi-squares.
+
+    Conditions on ``Y_n`` and integrates the exact conditional probability, so
+    this is an oracle for the F identity itself, independent of
+    :func:`scipy.stats.f.sf` and of any characteristic-function inversion.
+    """
+
+    def integrand(y):
+        return chi2.pdf(y, n) * chi2.sf(-w_neg * y / w_pos, m)
+
+    return quad(integrand, 0.0, np.inf, limit=400, epsabs=1e-14, epsrel=1e-13)[0]
+
+
+# (rank, k0, d): ``rank`` unit weights against ``-d/k0``.
+_TESTSTAT_ROWS = [
+    pytest.param(1, 5, 3.84, id="rank1-k5"),
+    pytest.param(1, 50, 3.84, id="rank1-k50"),
+    pytest.param(1, 50, 1.0, id="rank1-k50-weak"),
+    pytest.param(1, 500, 2.0, id="rank1-k500"),
+    pytest.param(2, 50, 1.0, id="rank2-k50"),
+    pytest.param(3, 5, 12.0, id="rank3-k5"),
+]
+
+
+@pytest.mark.parametrize("rank, k0, d", _TESTSTAT_ROWS)
+def test_teststat_at_zero_is_an_f_probability(rank, k0, d):
+    """The estimated-dispersion p-value is ``f.sf(d/r, r, k0)``, exactly."""
+    weights = [1.0] * rank + [-d / k0]
+    df = [1.0] * rank + [float(k0)]
+    assert psum_chisq(0.0, weights, df=df) == pytest.approx(
+        f_dist.sf(d / rank, rank, k0), rel=1e-12
+    )
+
+
+def test_teststat_headline_row():
+    """Rank 1, ``k0 = 50``, ``d = 3.84``: the row the report opens with."""
+    assert psum_chisq(0.0, [1.0, -3.84 / 50], df=[1, 50]) == pytest.approx(
+        0.05563, abs=1e-5
+    )
+
+
+@pytest.mark.parametrize(
+    "w_pos, m, w_neg, n",
+    [
+        (1.0, 1.0, -3.84 / 50, 50.0),
+        (2.5, 3.0, -0.4, 7.0),
+        (1.0, 2.5, -0.07, 12.5),  # non-integer degrees of freedom on both sides
+        (0.3, 1.0, -1.7, 2.0),  # the negative weight dominates
+    ],
+)
+def test_two_term_reduction_matches_an_independent_integral(w_pos, m, w_neg, n):
+    """The F identity is checked against conditioning on the negative term."""
+    assert psum_chisq(0.0, [w_pos, w_neg], df=[m, n]) == pytest.approx(
+        _sf_two_term_by_conditioning(w_pos, m, w_neg, n), rel=1e-10
+    )
+
+
+def test_two_term_reduction_does_not_integrate(monkeypatch):
+    """The closed form is exact, so no integrand is evaluated."""
+    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+
+    assert psum_chisq(0.0, [1.0, -3.84 / 50], df=[1, 50]) == pytest.approx(
+        f_dist.sf(3.84, 1, 50), rel=1e-12
+    )
+
+
+@pytest.mark.parametrize(
+    "z, weights, df, noncentrality",
+    [
+        pytest.param(1e-12, [-0.0768, 1.0], [50.0, 1.0], [0.0, 0.0], id="q-not-zero"),
+        pytest.param(
+            0.0, [-0.0768, 0.5, 1.0], [50.0, 1.0, 1.0], [0.0] * 3, id="three-terms"
+        ),
+        pytest.param(0.0, [-0.0768, 1.0], [50.0, 1.0], [0.0, 2.0], id="non-central"),
+    ],
+)
+def test_two_term_reduction_declines_outside_its_domain(z, weights, df, noncentrality):
+    """
+    Each boundary condition of the identity, perturbed one at a time.
+
+    The reducer must decline rather than apply the formula where it does not
+    hold.  Declining sends the input to the regime gate, which is where the
+    decision to refuse or integrate belongs.
+    """
+    reduced = chisqsum._reduce(
+        z, np.array(weights), np.array(df), np.array(noncentrality)
+    )
+    assert reduced is None
+
+
+@pytest.mark.parametrize(
+    "q, weight, dof, ncp",
+    [
+        (2.0, 1.0, 1, 0.0),
+        (5.0, 2.0, 3, 0.0),
+        (10.0, 1.0, 3, 2.0),
+        (6.0, 0.5, 2, 1.5),
+    ],
+)
+def test_single_term_is_exact_and_does_not_integrate(monkeypatch, q, weight, dof, ncp):
+    """One term is a scaled (non-central) chi-square, whatever its weight."""
+    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+
+    expected = chi2.sf(q / weight, dof) if ncp == 0.0 else ncx2.sf(q / weight, dof, ncp)
+    got = psum_chisq(q, [weight], df=[dof], noncentrality=[ncp])
+    assert got == pytest.approx(expected, rel=1e-13)
+
+
+@pytest.mark.parametrize("q", [-4.0, -1.0, 0.0, 2.0])
+def test_single_negative_term_is_exact(q):
+    """``Pr(w X > q)`` with ``w < 0`` is ``Pr(X < q/w)``, so the tails swap."""
+    assert psum_chisq(q, [-2.0], df=[3]) == pytest.approx(
+        chi2.cdf(q / -2.0, 3), rel=1e-12
+    )
+
+
+@pytest.mark.parametrize("q", [-1e300, -5.0, -1e-300, 0.0])
+def test_positive_weights_are_certain_at_non_positive_q(monkeypatch, q):
+    """``Q`` is positive almost surely, so ``Pr(Q > q) = 1`` for ``q <= 0``."""
+    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+
+    case = {"weights": [1.0, 0.6, 0.4], "df": [3, 1, 1]}
+    assert psum_chisq(q, lower_tail=False, **case) == 1.0
+    assert psum_chisq(q, lower_tail=True, **case) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# The regime gate.
+#
+# The quadrature has no independent oracle outside the GAM regime, and F4 shows
+# QUADPACK's own diagnostics do not notice when it is wrong.  Everything the
+# reductions do not answer and the GAM path does not need is therefore refused,
+# loudly, rather than integrated and returned.
+# --------------------------------------------------------------------------- #
+
+_UNSUPPORTED = [
+    pytest.param({"q": 2.0, "weights": [1.0, 0.6, -0.4], "df": [3, 1, 2]}, id="signed"),
+    pytest.param(
+        {"q": -2.0, "weights": [1.0, -0.4], "df": [1, 50]}, id="signed-two-term"
+    ),
+    pytest.param(
+        {"q": 2.0, "weights": [-1.0, -0.6, 0.4], "df": [3, 1, 2]},
+        id="signed-mirror",
+    ),
+    pytest.param({"q": 2.0, "weights": [-1.0, -2.0], "df": [1, 1]}, id="all-negative"),
+    pytest.param(
+        {
+            "q": 10.0,
+            "weights": [1.0, 0.5],
+            "df": [3, 1],
+            "noncentrality": [2.0, 0.5],
+        },
+        id="multi-term-non-central",
+    ),
+    pytest.param(
+        {
+            "q": 0.0,
+            "weights": [1.0, -0.4],
+            "df": [1, 50],
+            "noncentrality": [2.0, 0.0],
+        },
+        id="signed-non-central-at-zero",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", _UNSUPPORTED)
+def test_unsupported_regimes_raise(case):
+    """Outside the validated regime the answer is an error, not a number."""
+    with pytest.raises(NotImplementedError, match="validated GAM regime"):
+        psum_chisq(**case)
+
+
+@pytest.mark.parametrize("case", _UNSUPPORTED)
+def test_unsupported_regimes_do_not_integrate(monkeypatch, case):
+    """The refusal comes before the integrator, not from it."""
+    monkeypatch.setattr(chisqsum, "_cdf_single", _unreachable)
+
+    with pytest.raises(NotImplementedError):
+        psum_chisq(**case)
+
+
+def test_gate_message_names_the_standardized_inputs():
+    """
+    The message has to carry enough to decide whether to widen the contract.
+
+    That means the standardised inputs, since the raw ones do not determine what
+    the method sees.
+    """
+    with pytest.raises(NotImplementedError) as excinfo:
+        psum_chisq(2.0, [1.0, 0.6, -0.4], df=[3, 1, 2])
+
+    message = str(excinfo.value)
+    assert "z=" in message
+    assert "weights=" in message
+    assert "df=" in message
+    assert "noncentrality=" in message
+    assert "report" in message
+
+
+@pytest.mark.parametrize("q", [0.5, 5.0, 40.0])
+def test_positive_central_mixtures_stay_supported(q):
+    """The gate must not narrow the mainline: positive central at any finite q."""
+    assert psum_chisq(q, [1.0, 0.6, 0.4], df=[3, 1, 1]) == pytest.approx(
+        _sf_by_quadrature(q, [1.0, 0.6, 0.4], df=[3, 1, 1]), rel=1e-12
+    )

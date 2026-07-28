@@ -61,6 +61,9 @@ from typing import Callable
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy.integrate import quad
+from scipy.stats import chi2
+from scipy.stats import f as f_dist
+from scipy.stats import ncx2
 
 __all__ = ["psum_chisq"]
 
@@ -398,6 +401,134 @@ def _standard_deviation(
     return scale * float(unit)
 
 
+def _reduce(
+    z: float,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+) -> float | None:
+    r"""
+    ``Pr(Q <= q)`` in closed form where one exists, ``None`` otherwise.
+
+    Three shapes are exact, and the last of them is the one the quadrature is
+    worst on, so this runs before any numerical decision is made.
+
+    **One term.**  :math:`w X` is a scaled (non-central) chi-square.  Dividing by
+    a negative weight reverses the inequality, so the tails swap.
+
+    **All weights positive, at a non-positive point.**  :math:`Q` is a positive
+    combination of positive variables, hence positive almost surely, so the
+    lower-tail probability is exactly zero.  Degrees of freedom are validated
+    positive, and a non-centrality only shifts mass further right, so neither
+    matters here.
+
+    **Two terms of opposite sign, both central, at exactly zero.**  Writing
+    :math:`Q = w_+ X_m + w_- Y_n` with :math:`w_+ > 0 > w_-`,
+
+    .. math::
+
+        \Pr(Q > 0) = \Pr(w_+ X_m > -w_- Y_n)
+                   = \Pr\!\left(F_{m,n} > \frac{-w_-\, n}{w_+\, m}\right),
+
+    which holds for any positive real :math:`m` and :math:`n`, not only integer
+    degrees of freedom.  This is mgcv's estimated-dispersion smooth-term test
+    after equal positive weights have been merged: with numerator rank ``r``,
+    denominator degrees of freedom ``k0`` and test statistic ``d``, the weights
+    are ``[1, -d/k0]`` and the p-value is ``f.sf(d/r, r, k0)``.
+
+    Parameters
+    ----------
+    z : float
+        Standardised evaluation point :math:`q / \mathrm{sd}`.
+    weights, df, noncentrality : numpy.ndarray
+        Standardised weights :math:`w_j / \mathrm{sd}`, degrees of freedom
+        :math:`\nu_j` and non-centrality parameters :math:`\delta_j^2`, already
+        collapsed to a canonical term list ordered by increasing weight.
+
+    Returns
+    -------
+    float or None
+        The lower-tail probability, or ``None`` when no closed form applies, in
+        which case the caller consults :func:`_regime_gate`.
+    """
+    central = not np.any(noncentrality)
+
+    if weights.size == 1:
+        x = z / weights[0]
+        if weights[0] > 0.0:
+            if central:
+                return float(chi2.cdf(x, df[0]))
+            return float(ncx2.cdf(x, df[0], noncentrality[0]))
+        if central:
+            return float(chi2.sf(x, df[0]))
+        return float(ncx2.sf(x, df[0], noncentrality[0]))
+
+    if np.all(weights > 0.0) and z <= 0.0:
+        return 0.0
+
+    if z == 0.0 and central and weights.size == 2 and weights[0] < 0.0 < weights[1]:
+        w_neg, w_pos = float(weights[0]), float(weights[1])
+        n, m = float(df[0]), float(df[1])
+        return 1.0 - float(f_dist.sf((-w_neg * n) / (w_pos * m), m, n))
+
+    return None
+
+
+def _regime_gate(
+    z: float,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+) -> None:
+    r"""
+    Refuse anything outside the regime this module is validated on.
+
+    What reaches the quadrature is only what the GAM smooth-term tests produce:
+    positive weights at any finite point (known dispersion, ``q = d``), and
+    mixed-sign weights at exactly zero (estimated dispersion, the random
+    denominator moved to the left-hand side).  Both central.
+
+    Everything else is refused rather than integrated, because outside those two
+    shapes there is no oracle for the answer, and the integrator's own error
+    estimate is not one: it reports success with a tiny absolute error while
+    being wrong in the second decimal place.  A single-term list never arrives
+    here, since :func:`_reduce` answers all of those exactly.
+
+    Parameters
+    ----------
+    z : float
+        Standardised evaluation point :math:`q / \mathrm{sd}`.
+    weights, df, noncentrality : numpy.ndarray
+        Standardised weights, degrees of freedom and non-centrality parameters,
+        as passed to :func:`_reduce`.
+
+    Raises
+    ------
+    NotImplementedError
+        If the standardised inputs fall outside the two supported shapes.  The
+        message carries them, since the raw inputs do not determine what the
+        method sees.
+    """
+    all_positive = bool(np.all(weights > 0.0))
+    mixed_signs = bool(np.any(weights > 0.0) and np.any(weights < 0.0))
+    central = not np.any(noncentrality)
+
+    if all_positive and central:
+        return
+    elif mixed_signs and central and z == 0.0:
+        return
+    else:
+        raise NotImplementedError(
+            "psum_chisq: this input is outside the validated GAM regime, which "
+            "is all-positive weights at any finite q, or mixed-sign weights at "
+            "exactly q = 0, both with zero non-centrality. Got "
+            f"z={z!r}, weights={weights.tolist()}, df={df.tolist()}, "
+            f"noncentrality={noncentrality.tolist()}, where z and the weights "
+            "are divided by the standard deviation of Q. Please report this "
+            "case if you need it."
+        )
+
+
 def psum_chisq(
     q: ArrayLike,
     weights: ArrayLike,
@@ -450,9 +581,22 @@ def psum_chisq(
     ------
     ValueError
         If any argument lies outside the domain described above.
+    NotImplementedError
+        If the sum is outside the supported regime described in the notes.
 
     Notes
     -----
+    The supported regime is the one the GAM smooth-term tests produce: weights
+    that are all positive at any finite ``q``, and weights of mixed sign at
+    exactly ``q = 0``, both with zero non-centrality.  Anything else raises,
+    rather than returning a number no oracle has checked.
+
+    Several shapes never reach the quadrature at all, because they have exact
+    closed forms: a single term of either sign, positive weights at a
+    non-positive ``q``, and two central terms of opposite sign at ``q = 0``,
+    which is an F survival probability.  Non-centrality is therefore honoured
+    only for a single term, where the answer is a non-central chi-square.
+
     Terms are canonicalised before anything is evaluated: zero-weight terms are
     dropped and equal weights are merged, both exactly.
 
@@ -498,16 +642,21 @@ def psum_chisq(
         elif np.isneginf(z):
             cdf = 0.0
         elif np.isfinite(z):
-            cdf, _cdf_error = _cdf_single(
-                z,
-                std_weights,
-                df_arr,
-                ncp_arr,
-                1.0,
-                epsabs,
-                epsrel,
-                limit,
-            )
+            reduced = _reduce(z, std_weights, df_arr, ncp_arr)
+            if reduced is None:
+                _regime_gate(z, std_weights, df_arr, ncp_arr)
+                cdf, _cdf_error = _cdf_single(
+                    z,
+                    std_weights,
+                    df_arr,
+                    ncp_arr,
+                    1.0,
+                    epsabs,
+                    epsrel,
+                    limit,
+                )
+            else:
+                cdf = reduced
         else:
             raise RuntimeError(
                 f"standardized evaluation point is not a number: "
