@@ -116,6 +116,13 @@ _CROSS_CHECK_FLOOR = 1e-11
 # its own error bar.
 _FLOOR_SAFETY_FACTOR = 1.0
 
+# The counterpart of _CROSS_CHECK_FLOOR: an error estimate of exactly zero is
+# not a claim that the answer is exact to the last bit, and the probability is
+# still assembled by two roundings. A rank-4 smooth at a near-zero statistic
+# overshoots 1 by one ulp with an estimate of 0.0. Eight ulp leaves room and
+# still sits fourteen orders below the smallest real violation, F1's 0.17.
+_RANGE_CHECK_FLOOR = 8.0 * float(np.finfo(np.float64).eps)
+
 
 class _QuadratureNotConverged(RuntimeError):
     """
@@ -1030,6 +1037,10 @@ def _finalize(
     that still raises.  The old check had no allowance at all and rejected an
     overshoot of ``-1.3e-15`` on a value whose estimated error was ``3.8e-13``.
 
+    The allowance never falls below :data:`_RANGE_CHECK_FLOOR`, or an estimate
+    of exactly zero would reject a one-ulp overshoot.  A rank-4 smooth at a
+    near-zero statistic does exactly that.
+
     **The floor.** Once the true probability drops below the resolution of the
     quadrature, what comes back is not a small number but noise, and noise is
     not monotone.  For ``[1, 0.6, 0.4]`` with ``df=[3, 1, 1]`` the survival
@@ -1061,7 +1072,7 @@ def _finalize(
         If any probability lies outside ``[0, 1]`` by more than its error
         allowance.
     """
-    allowance = errors * _ERROR_ESTIMATE_SAFETY_FACTOR
+    allowance = np.maximum(errors * _ERROR_ESTIMATE_SAFETY_FACTOR, _RANGE_CHECK_FLOOR)
     overshoot = np.maximum(-probabilities, probabilities - 1.0)
     if np.any(overshoot > allowance):
         worst = int(np.argmax(overshoot - allowance))

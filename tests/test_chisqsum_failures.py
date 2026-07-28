@@ -1176,6 +1176,43 @@ def test_q_129_no_longer_raises():
         assert psum_chisq(129.0, weights, df=df) == 0.0
 
 
+@pytest.mark.parametrize("nu, k0", [(0.2, 15), (0.2, 60), (0.5, 15)])
+def test_rank_four_at_a_near_zero_statistic_does_not_raise(nu, k0):
+    """
+    The same guard one step further: an error estimate of exactly zero.
+
+    An allowance proportional to the estimate covers a small estimate, not a
+    zero one.  This is the estimated-dispersion call for a rank-4 smooth at a
+    near-zero statistic, where the survival probability is exactly ``1``, both
+    quadrature pieces report ``0.0``, and the assembled value lands one ulp
+    above ``1``.  Measured before the floor: ``RuntimeError`` on
+    ``sf - 1 == 2.220e-16``.
+    """
+    val = np.ones(5)
+    rp = 1.0 + nu
+    val[3] = (rp + np.sqrt(rp * (2.0 - rp))) / 2.0
+    val[4] = rp - val[3]
+    d = 1e-7 * np.sqrt(2.0 * np.sum(val**2))
+
+    weights = np.concatenate([val, [-d / k0]])
+    df = np.concatenate([np.ones(val.size), [float(k0)]])
+
+    assert psum_chisq(0.0, weights, df=df) == 1.0
+
+
+def test_range_check_still_rejects_a_real_violation():
+    """
+    The floor is round-off sized, so it cannot mask a genuine failure.
+
+    It sits fourteen orders of magnitude below the smallest real miss on
+    record, the ``1.17`` of F1.
+    """
+    assert chisqsum._RANGE_CHECK_FLOOR < 1e-14
+
+    with pytest.raises(RuntimeError, match=r"outside \[0, 1\]"):
+        chisqsum._finalize(np.array([1.17]), np.array([0.0]))
+
+
 def test_tightening_epsabs_resolves_more_of_the_tail():
     """
     The floor is the requested tolerance, not a fixed property of the module.
