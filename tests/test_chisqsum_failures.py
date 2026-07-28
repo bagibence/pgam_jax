@@ -8,6 +8,11 @@ from scipy.integrate import quad
 from scipy.stats import chi2
 from scipy.stats import f as f_dist
 from scipy.stats import ncx2
+from test_chisqsum_oracles import (
+    sf_teststat,
+    sf_teststat_at_q,
+    sf_two_chi1_plus_chi2k,
+)
 
 import pgam_jax._chisqsum as chisqsum
 from pgam_jax._chisqsum import psum_chisq
@@ -47,6 +52,143 @@ def test_quadrature_helper_matches_public_path():
     q, weights, df = 5.0, [1.0, 0.6, 0.4], [3, 1, 1]
     assert _sf_by_quadrature(q, weights, df) == pytest.approx(
         psum_chisq(q, weights, df=df), rel=1e-14
+    )
+
+
+def _standard_deviation(weights, df):
+    """
+    ``sd(Q)`` for a central mixture, computed here rather than imported.
+
+    The sweeps below place ``q`` at a chosen multiple of the standard
+    deviation, so taking it from the module under test would make the grid
+    depend on the thing being measured.
+    """
+    w = np.asarray(weights, dtype=float)
+    return float(np.sqrt(np.sum(w**2 * 2 * np.asarray(df, dtype=float))))
+
+
+# The five estimated-dispersion structures of the report, as
+# ``(positive weights on 1-df terms, k0, d)``.  The negative weight is
+# ``-d / k0`` on a ``k0``-df term.  Rank is the number of positive weights only
+# when they are equal, so the unequal rows are the fractional-rank tests that
+# ``_reduce`` cannot answer: merging leaves three terms, not two.
+_FRACTIONAL_RANK_STRUCTURES = [
+    pytest.param([1.0], 50, 3.84, id="rank1.0-k50-d3.84"),
+    pytest.param([1.1830127, 0.3169873], 50, 3.84, id="rank1.5-k50-d3.84"),
+    pytest.param([1.1830127, 0.3169873], 50, 1e-4, id="rank1.5-k50-d1e-4"),
+    pytest.param([1.1830127, 0.3169873], 500, 1.0, id="rank1.5-k500-d1.0"),
+    pytest.param([1.9486833, 0.0513167], 5, 2.0, id="rank1.9-k5-d2.0"),
+]
+
+
+def _teststat_call(weights_pos, k0, d):
+    """The weights and degrees of freedom mgcv's ``testStat`` passes."""
+    return list(weights_pos) + [-d / k0], [1.0] * len(weights_pos) + [float(k0)]
+
+
+# --------------------------------------------------------------------------- #
+# F1.  QAWF's ``omega == 0`` branch restarts the cycle grid at 0, so the head of
+# the integrand is counted twice at exactly ``q = 0``.
+#
+# That is the estimated-dispersion mainline.  Step 4 closed the integer-rank
+# half of it with an exact F reduction, which never reaches the integrator.  The
+# fractional-rank half is what remains: two unequal positive weights leave three
+# terms after merging, no closed form applies, and the quadrature answers.  Two
+# of the rows below currently return a confidently wrong number, and two raise.
+#
+# The raw-CDF rows are the direct statement of the bug, with no reduction in the
+# way: a single positive term at ``q = 0`` has survival probability exactly 1,
+# and the integrator returns 1.17 and 1.30.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("weights_pos, k0, d", _FRACTIONAL_RANK_STRUCTURES)
+def test_teststat_at_zero_matches_the_exact_p_value(weights_pos, k0, d):
+    """
+    The mgcv ``testStat`` p-value, against conditioning on the denominator.
+
+    The rank-1.0 row is answered by the step-4 reduction and passes already.
+    The other four are the outstanding failure, and two of them are silent.
+    """
+    weights, df = _teststat_call(weights_pos, k0, d)
+    assert psum_chisq(0.0, weights, df=df) == pytest.approx(
+        sf_teststat(d, weights_pos, k0), rel=1e-12
+    )
+
+
+@pytest.mark.parametrize("dof", [1, 3, 10])
+def test_raw_survival_at_zero_reaches_one_by_computation(dof):
+    """
+    ``P(chi2_k > 0) == 1``, obtained rather than clipped.
+
+    A single term is answered exactly by :func:`_reduce` on the public path, so
+    this goes through the quadrature helper.  The raw survival probabilities
+    are 1.17 and 1.30 today, which is the doubled head showing through
+    undisguised.
+    """
+    assert _sf_by_quadrature(0.0, [1.0], df=dof) == pytest.approx(1.0, abs=1e-10)
+
+
+def test_rank_one_row_is_correct_through_the_quadrature():
+    """
+    The exact reduction must not be the only thing standing between ``q = 0``
+    and a wrong answer.
+
+    Same row as ``test_teststat_headline_row``, routed past the reduction.  It
+    comes back as -0.3736 today, which is what the public path raised on before
+    step 4 gave it a closed form.
+    """
+    assert _sf_by_quadrature(0.0, [1.0, -3.84 / 50], df=[1, 50]) == pytest.approx(
+        f_dist.sf(3.84, 1, 50), rel=1e-12
+    )
+
+
+# --------------------------------------------------------------------------- #
+# F2.  The first QAWF cycle steps over the whole integrand once ``abs(z)`` is
+# small, so every node lands in underflow and the answer is built from nothing.
+#
+# Measured: the signed structure is wrong by 74% at ``z <= 1e-4`` and exact to
+# 7e-15 from ``z = 1e-3`` up.  The positive structure is wrong by 13% at
+# ``z = 1e-9``, raises at ``z = 1e-6``, and is exact from ``z = 1e-4`` up.  So
+# the handover to the tanh-sinh branch has to sit above 1e-3, and both methods
+# are exact there, which is what makes ``_Z_SWITCH`` calibratable rather than
+# guessed.
+#
+# The signed sweep goes through the quadrature helper because signed weights
+# away from ``q = 0`` are outside the public contract.  That is deliberate: the
+# branch on ``abs(z)`` belongs inside ``_cdf_approx``, so that every route into
+# the integrator gets it, including this helper and the F3 rows below.  A branch
+# added above ``_cdf_approx`` instead would leave these rows red.
+# --------------------------------------------------------------------------- #
+
+_Z_SWEEP = [1e-9, 1e-6, 1e-4, 1e-3, 1e-2, 1e-1]
+
+
+@pytest.mark.parametrize("z", _Z_SWEEP)
+def test_signed_structure_is_accurate_at_small_z(z):
+    """A fractional-rank ``testStat`` mixture, swept towards ``q = 0``."""
+    weights_pos, k0, d = [1.1830127, 0.3169873], 50, 3.84
+    weights, df = _teststat_call(weights_pos, k0, d)
+    q = z * _standard_deviation(weights, df)
+
+    assert _sf_by_quadrature(q, weights, df=df) == pytest.approx(
+        sf_teststat_at_q(q, d, weights_pos, k0), rel=1e-10
+    )
+
+
+@pytest.mark.parametrize("z", _Z_SWEEP)
+def test_positive_structure_is_accurate_at_small_z(z):
+    """
+    The same sweep on an in-contract mixture, through the public API.
+
+    Positive weights at a positive ``q`` are supported, so this is a failure a
+    caller can reach today without leaving the documented regime.
+    """
+    weights, df = [1.0, 0.6, 0.4], [3, 1, 1]
+    q = z * _standard_deviation(weights, df)
+
+    assert psum_chisq(q, weights, df=df) == pytest.approx(
+        sf_two_chi1_plus_chi2k(q, 0.6, 0.4, 1.0, 3), rel=1e-10
     )
 
 
