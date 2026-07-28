@@ -173,8 +173,6 @@ def test_scalar_df_broadcasts():
         ({"weights": [1.0], "df": [0]}, "positive"),
         ({"weights": [1.0], "noncentrality": [-1.0]}, "non-negative"),
         ({"weights": [1.0, 1.0], "df": [1, 1, 1]}, "length"),
-        ({"weights": [1.0], "sigma": -1.0}, "non-negative"),
-        ({"weights": [1.0], "sigma": np.inf}, "finite"),
     ],
 )
 def test_invalid_inputs_raise(kwargs, match):

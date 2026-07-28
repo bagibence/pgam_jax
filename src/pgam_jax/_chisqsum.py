@@ -4,12 +4,12 @@ Computes the (survival) probability of
 
 .. math::
 
-    Q = \sum_j w_j X_j + \sigma Z,
+    Q = \sum_j w_j X_j,
 
 where :math:`X_j \sim \chi^2_{\nu_j}(\delta_j^2)` are independent (possibly
-non-central) chi-squared variables and :math:`Z \sim N(0, 1)`.  Weights may be
-of either sign.  This is the null distribution used to obtain covariate-inclusion
-p-values for penalised GAM smooth terms.
+non-central) chi-squared variables.  Weights may be of either sign.  This is the
+null distribution used to obtain covariate-inclusion p-values for penalised GAM
+smooth terms.
 
 The probability is obtained by inverting the characteristic function of ``Q``
 (Gil-Pelaez / Imhof, 1961):
@@ -26,8 +26,7 @@ where, writing :math:`x_j = 2 w_j u`,
 
     \phi(u) &= \frac{1}{2} \sum_j \left[
         \nu_j \arctan x_j + \frac{\delta_j^2\, x_j}{1 + x_j^2} \right], \\
-    \psi(u) &= \frac{1}{2}\sigma^2 u^2
-        + \frac{1}{4} \sum_j \nu_j \log\!\big(1 + x_j^2\big)
+    \psi(u) &= \frac{1}{4} \sum_j \nu_j \log\!\big(1 + x_j^2\big)
         + \frac{1}{2} \sum_j \frac{\delta_j^2\, x_j^2}{1 + x_j^2}.
 
 Before any of this is evaluated the problem is nondimensionalised.  Writing
@@ -35,11 +34,10 @@ Before any of this is evaluated the problem is nondimensionalised.  Writing
 :math:`t = \mathrm{sd}\, u` maps the integral onto itself, since
 :math:`x_j = 2 w_j u = 2 (w_j/\mathrm{sd})\, t`, :math:`q u = (q/\mathrm{sd})\, t`
 and :math:`\mathrm{d}u / u = \mathrm{d}t / t`.  The quadrature therefore runs on
-normalised weights :math:`w_j/\mathrm{sd}`, normal scale
-:math:`\sigma/\mathrm{sd}` and standardised evaluation point
+normalised weights :math:`w_j/\mathrm{sd}` and standardised evaluation point
 :math:`z = q/\mathrm{sd}`, with the split point at 1.  Every threshold and
 frequency the method uses is then unit-free, so the result is invariant under a
-common rescaling of ``q``, the weights and ``sigma``, as it must be.
+common rescaling of ``q`` and the weights, as it must be.
 
 The integral is evaluated with SciPy's adaptive quadrature: a short
 non-oscillatory head on :math:`[0, a]`, plus the semi-infinite oscillatory tail
@@ -126,7 +124,6 @@ def _phase_and_envelope(
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
-    sigma_sq: float,
 ) -> tuple[float, float]:
     r"""Phase and envelope of the inversion integrand at frequency ``u``.
 
@@ -139,8 +136,7 @@ def _phase_and_envelope(
 
         \phi(u) &= \frac{1}{2} \sum_j \left[
             \nu_j \arctan x_j + \frac{\delta_j^2\, x_j}{1 + x_j^2} \right], \\
-        \psi(u) &= \frac{1}{2}\sigma^2 u^2
-            + \frac{1}{4} \sum_j \nu_j \log\!\big(1 + x_j^2\big)
+        \psi(u) &= \frac{1}{4} \sum_j \nu_j \log\!\big(1 + x_j^2\big)
             + \frac{1}{2} \sum_j \frac{\delta_j^2\, x_j^2}{1 + x_j^2}.
 
     The reduction over the terms :math:`j` is vectorised over NumPy arrays.
@@ -152,8 +148,6 @@ def _phase_and_envelope(
     weights, df, noncentrality : numpy.ndarray
         The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
         non-centrality parameters :math:`\delta_j^2`.
-    sigma_sq : float
-        Variance :math:`\sigma^2` of the additive normal term.
 
     Returns
     -------
@@ -166,11 +160,7 @@ def _phase_and_envelope(
     x_sq = x**2
     ncp = noncentrality * x / (1.0 + x_sq)
     phase = 0.5 * np.sum(df * np.arctan(x) + ncp)
-    log_modulus = (
-        -0.5 * sigma_sq * u**2
-        - 0.25 * np.sum(df * np.log1p(x_sq))
-        - 0.5 * np.sum(x * ncp)
-    )
+    log_modulus = -0.25 * np.sum(df * np.log1p(x_sq)) - 0.5 * np.sum(x * ncp)
     return phase, np.exp(log_modulus) / u
 
 
@@ -180,10 +170,9 @@ def _head_integrand(
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
-    sigma_sq: float,
 ) -> float:
     """Full integrand on the non-oscillatory head ``[0, a]``."""
-    phase, envelope = _phase_and_envelope(u, weights, df, noncentrality, sigma_sq)
+    phase, envelope = _phase_and_envelope(u, weights, df, noncentrality)
     return np.sin(phase - q * u) * envelope
 
 
@@ -192,10 +181,9 @@ def _tail_cos_coefficient(
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
-    sigma_sq: float,
 ) -> float:
     """Coefficient of ``cos(q u)`` in the oscillatory tail integrand."""
-    phase, envelope = _phase_and_envelope(u, weights, df, noncentrality, sigma_sq)
+    phase, envelope = _phase_and_envelope(u, weights, df, noncentrality)
     return envelope * np.sin(phase)
 
 
@@ -204,10 +192,9 @@ def _tail_sin_coefficient(
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
-    sigma_sq: float,
 ) -> float:
     """Coefficient of ``sin(q u)`` in the oscillatory tail integrand."""
-    phase, envelope = _phase_and_envelope(u, weights, df, noncentrality, sigma_sq)
+    phase, envelope = _phase_and_envelope(u, weights, df, noncentrality)
     return envelope * np.cos(phase)
 
 
@@ -216,14 +203,13 @@ def _cdf_single(
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
-    sigma_sq: float,
     split: float,
     epsabs: float,
     epsrel: float,
     limit: int,
 ) -> tuple[float, float]:
     """``Pr(Q <= q)`` and its estimated absolute error for a scalar ``q``."""
-    params: tuple[object, ...] = (weights, df, noncentrality, sigma_sq)
+    params: tuple[object, ...] = (weights, df, noncentrality)
     head, head_error = _quad(
         _head_integrand,
         0.0,
@@ -273,11 +259,104 @@ def _broadcast(values: ArrayLike, size: int, name: str) -> FloatArray:
     return arr
 
 
+def _validate_inputs(
+    q: FloatArray,
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+) -> None:
+    r"""
+    Check that the arguments describe a sum this module can evaluate.
+
+    Out-of-domain values used to reach the integrand and come back as a QUADPACK
+    message about roundoff, which names the integrator rather than the argument
+    at fault.  Everything is therefore checked up front, and each message names
+    the argument it is about.
+
+    ``q`` may be infinite, which is a well-posed question answered exactly
+    elsewhere.  Nothing else may be: an infinite weight or degrees of freedom
+    describes no distribution.  NaN is never accepted.
+
+    An all-zero term list leaves ``Q`` degenerate at 0, with no distribution to
+    invert, so at least one weight must be non-zero.
+
+    Parameters
+    ----------
+    q : numpy.ndarray
+        Evaluation points, already coerced to a float array.
+    weights, df, noncentrality : numpy.ndarray
+        The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
+        non-centrality parameters :math:`\delta_j^2`, already broadcast to a
+        common length.
+
+    Raises
+    ------
+    ValueError
+        If any argument is outside the domain described above.
+    """
+    if np.isnan(q).any():
+        raise ValueError("'q' must not be NaN")
+    if not np.isfinite(weights).all():
+        raise ValueError("'weights' must be finite")
+    if not np.isfinite(df).all():
+        raise ValueError("'df' must be finite")
+    if np.any(df <= 0):
+        raise ValueError("'df' must be positive")
+    if not np.isfinite(noncentrality).all():
+        raise ValueError("'noncentrality' must be finite")
+    if np.any(noncentrality < 0):
+        raise ValueError("'noncentrality' must be non-negative")
+    if not np.any(weights != 0.0):
+        raise ValueError("at least one weight must be non-zero")
+
+
+def _collapse_terms(
+    weights: FloatArray,
+    df: FloatArray,
+    noncentrality: FloatArray,
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    r"""
+    Canonical term list: zero weights dropped, equal weights merged.
+
+    Both steps are exact.  A zero weight contributes :math:`0 \cdot X_j`, and
+    independent chi-squares sharing a weight add:
+
+    .. math::
+
+        w X(\nu_1, \delta_1^2) + w X(\nu_2, \delta_2^2)
+            = w X(\nu_1 + \nu_2, \delta_1^2 + \delta_2^2).
+
+    Weights merge on exact equality only.  A tolerance would silently replace a
+    mixture of nearby weights by a different distribution.
+
+    Parameters
+    ----------
+    weights, df, noncentrality : numpy.ndarray
+        The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
+        non-centrality parameters :math:`\delta_j^2`.
+
+    Returns
+    -------
+    weights, df, noncentrality : numpy.ndarray
+        The surviving terms, ordered by increasing weight.  Empty when every
+        weight was zero; public input validation rejects that degenerate case.
+    """
+    keep = weights != 0.0
+    weights, df, noncentrality = weights[keep], df[keep], noncentrality[keep]
+
+    unique_weights, index = np.unique(weights, return_inverse=True)
+    n_unique = unique_weights.size
+    return (
+        unique_weights,
+        np.bincount(index, weights=df, minlength=n_unique),
+        np.bincount(index, weights=noncentrality, minlength=n_unique),
+    )
+
+
 def _standard_deviation(
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
-    sigma: float,
 ) -> float:
     r"""
     Standard deviation of ``Q``, formed without squaring raw-scale inputs.
@@ -286,8 +365,8 @@ def _standard_deviation(
 
     .. math::
 
-        \mathrm{sd}^2 = \sigma^2
-            + \sum_j w_j^2 \big(2 \nu_j + 4 \delta_j^2\big),
+        \mathrm{sd}^2 =
+            \sum_j w_j^2 \big(2 \nu_j + 4 \delta_j^2\big),
 
     but evaluating that directly squares the raw weights, so it overflows to
     infinity once the sum passes the largest representable double and underflows
@@ -306,8 +385,6 @@ def _standard_deviation(
     weights, df, noncentrality : numpy.ndarray
         The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
         non-centrality parameters :math:`\delta_j^2`.
-    sigma : float
-        Standard deviation :math:`\sigma` of the additive normal term.
 
     Returns
     -------
@@ -315,12 +392,9 @@ def _standard_deviation(
         The standard deviation of ``Q``.  Strictly positive, since the caller has
         already checked that at least one weight is non-zero.
     """
-    scale = max(float(np.max(np.abs(weights))), abs(sigma))
+    scale = float(np.max(np.abs(weights)))
     # The same variance measured in units of ``scale``, so of order sqrt(sum df).
-    unit = np.sqrt(
-        (sigma / scale) ** 2
-        + np.sum((weights / scale) ** 2 * (2.0 * df + 4.0 * noncentrality))
-    )
+    unit = np.sqrt(np.sum((weights / scale) ** 2 * (2.0 * df + 4.0 * noncentrality)))
     return scale * float(unit)
 
 
@@ -329,7 +403,6 @@ def psum_chisq(
     weights: ArrayLike,
     df: ArrayLike = 1.0,
     noncentrality: ArrayLike = 0.0,
-    sigma: float = 0.0,
     lower_tail: bool = False,
     epsabs: float = 1e-10,
     epsrel: float = 1e-10,
@@ -339,26 +412,25 @@ def psum_chisq(
     Distribution function of a weighted sum of chi-squared variables.
 
     Evaluates :math:`\Pr(Q \le q)` (or the upper tail) for
-    :math:`Q = \sum_j w_j X_j + \sigma Z`, where
-    :math:`X_j \sim \chi^2_{\nu_j}(\delta_j^2)` and :math:`Z \sim N(0, 1)`, by
-    numerically inverting the characteristic function of ``Q``.
+    :math:`Q = \sum_j w_j X_j`, where
+    :math:`X_j \sim \chi^2_{\nu_j}(\delta_j^2)`, by numerically inverting the
+    characteristic function of ``Q``.
 
     Parameters
     ----------
     q : array_like
-        Point(s) at which to evaluate the distribution.
+        Point(s) at which to evaluate the distribution.  May be infinite, which
+        is answered exactly.  Must not be NaN.
     weights : array_like
-        The weights :math:`w_j`; may be positive or negative.  At least one must
-        be non-zero.
+        The weights :math:`w_j`; may be positive or negative, and must be finite.
+        At least one must be non-zero.
     df : array_like, optional
-        Degrees of freedom :math:`\nu_j` (must be positive).  A scalar is applied
-        to every term.  Defaults to ``1``.
+        Degrees of freedom :math:`\nu_j` (must be positive and finite).  A scalar
+        is applied to every term.  Defaults to ``1``.
     noncentrality : array_like, optional
-        Non-centrality parameters :math:`\delta_j^2` (must be non-negative).  A
-        scalar is applied to every term.  Defaults to ``0`` (central).
-    sigma : float, optional
-        Standard deviation of the additive normal term. Must be finite and
-        non-negative. Defaults to ``0``.
+        Non-centrality parameters :math:`\delta_j^2` (must be non-negative and
+        finite).  A scalar is applied to every term.  Defaults to ``0``
+        (central).
     lower_tail : bool, optional
         If ``True`` return :math:`\Pr(Q \le q)`; otherwise return the survival
         function :math:`\Pr(Q > q)`.  Defaults to ``False`` (upper tail), the
@@ -374,11 +446,26 @@ def psum_chisq(
         The (survival) probability.  A Python ``float`` is
         returned for scalar ``q``; otherwise an array matching ``q``.
 
+    Raises
+    ------
+    ValueError
+        If any argument lies outside the domain described above.
+
     Notes
     -----
+    Terms are canonicalised before anything is evaluated: zero-weight terms are
+    dropped and equal weights are merged, both exactly.
+
+    There is no additive normal term.  Davies' general form carries one,
+    :math:`Q = \sum_j w_j X_j + \sigma Z`, and mgcv's ``psum.chisq`` exposes it
+    as ``sigz``. A GAM test statistic is a pure quadratic form in the coefficients,
+    so it never produces one, and no mgcv call site passes a non-zero ``sigz``.
+    The argument was therefore removed rather than kept as a value that must always
+    be zero.
+
     The problem is nondimensionalised before any numerical decision is made:
-    ``q`` becomes ``z = q / sd`` and the weights and ``sigma`` are divided by
-    ``sd``, the standard deviation of ``Q``.  The integrand is then split into a
+    ``q`` becomes ``z = q / sd`` and the weights are divided by ``sd``, the
+    standard deviation of ``Q``.  The integrand is then split into a
     non-oscillatory head on ``[0, 1]`` in those standardised coordinates and a
     semi-infinite oscillatory tail integrated with SciPy's Fourier quadrature,
     which remains accurate for the slowly decaying tails produced by low degrees
@@ -388,42 +475,44 @@ def psum_chisq(
     n_terms = int(weight_arr.size)
     df_arr = _broadcast(df, n_terms, "df")
     ncp_arr = _broadcast(noncentrality, n_terms, "noncentrality")
-
-    if np.any(df_arr <= 0):
-        raise ValueError("'df' must be positive")
-    if np.any(ncp_arr < 0):
-        raise ValueError("'noncentrality' must be non-negative")
-    if not np.any(weight_arr != 0.0):
-        raise ValueError("at least one weight must be non-zero")
-
-    sigma = float(sigma)
-    if not np.isfinite(sigma):
-        raise ValueError("'sigma' must be finite.")
-    if sigma < 0:
-        raise ValueError("'sigma' must be non-negative.")
-
-    # Nondimensionalize: substituting t = sd * u maps the inversion integral onto
-    # itself with weights w/sd, normal scale sigma/sd, frequency z = q/sd and a
-    # split point of 1.  Every numerical decision below is then made on unit-free
-    # quantities, so the result cannot depend on the units of q and the weights.
-    sd = _standard_deviation(weight_arr, df_arr, ncp_arr, sigma)
-    std_weights = weight_arr / sd
-    std_sigma_sq = (sigma / sd) ** 2
-
     q_arr = np.atleast_1d(np.asarray(q, dtype=float))
+
+    _validate_inputs(q_arr, weight_arr, df_arr, ncp_arr)
+    weight_arr, df_arr, ncp_arr = _collapse_terms(weight_arr, df_arr, ncp_arr)
+
+    # Nondimensionalize: substituting t = sd * u maps the inversion integral
+    # onto itself with weights w/sd, frequency z = q/sd and a split point of 1.
+    # Every numerical decision below is then made on unit-free quantities, so
+    # the result cannot depend on the units of q and the weights.
+    sd = _standard_deviation(weight_arr, df_arr, ncp_arr)
+    std_weights = weight_arr / sd
+
     out = np.empty(q_arr.shape, dtype=float)
     for i in range(q_arr.size):
-        cdf, _cdf_error = _cdf_single(
-            float(q_arr.flat[i]) / sd,
-            std_weights,
-            df_arr,
-            ncp_arr,
-            std_sigma_sq,
-            1.0,
-            epsabs,
-            epsrel,
-            limit,
-        )
+        z = float(q_arr.flat[i]) / sd
+        # An infinite z is q at infinitely many standard deviations, which is
+        # the same statement as an infinite q.  Both are exact, and neither is
+        # a question the quadrature can be asked.
+        if np.isposinf(z):
+            cdf = 1.0
+        elif np.isneginf(z):
+            cdf = 0.0
+        elif np.isfinite(z):
+            cdf, _cdf_error = _cdf_single(
+                z,
+                std_weights,
+                df_arr,
+                ncp_arr,
+                1.0,
+                epsabs,
+                epsrel,
+                limit,
+            )
+        else:
+            raise RuntimeError(
+                f"standardized evaluation point is not a number: "
+                f"q={q_arr.flat[i]}, sd={sd}"
+            )
         out.flat[i] = cdf if lower_tail else 1.0 - cdf
 
     if np.isnan(out).any():
