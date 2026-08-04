@@ -206,6 +206,37 @@ def sf_teststat_at_q(q, d, weights_pos, k0):
     return quad(inner, lo, hi, points=points, limit=500, epsabs=1e-15, epsrel=1e-13)[0]
 
 
+def sf_chi2_2_plus_weighted_chi1(t, weight):
+    """
+    Exact ``P(R + weight * X > t)`` for ``R ~ chi2_2`` and ``X ~ chi2_1``.
+
+    Conditioning on ``X = x``, the survival probability of ``R`` is
+    ``exp(-(t - weight * x) / 2)`` until ``x = t / weight`` and one above it.
+    The first part is a truncated moment-generating function of ``chi2_1``.
+    Rescaling it by ``1 - weight`` gives the closed form below, valid for
+    positive ``t`` and ``0 < weight < 1``.
+
+    Parameters
+    ----------
+    t : float
+        Positive evaluation point.
+    weight : float
+        Weight on the 1-df term, strictly between zero and one.
+
+    Returns
+    -------
+    float
+        The survival probability.
+    """
+    cutoff = t / weight
+    return float(
+        chi2.sf(cutoff, 1)
+        + np.exp(-t / 2.0)
+        / np.sqrt(1.0 - weight)
+        * chi2.cdf((1.0 - weight) * cutoff, 1)
+    )
+
+
 def sf_two_chi1_plus_chi2k(t, a, b, c, k):
     """
     Exact ``P(a X1 + b X2 + c S > t)`` with ``X ~ chi2_1`` and ``S ~ chi2_k``.
@@ -213,6 +244,15 @@ def sf_two_chi1_plus_chi2k(t, a, b, c, k):
     Conditions on ``S`` and uses the exact two-term formula inside, so this is a
     single smooth 1-D quadrature with an integrable kink at ``s = t / c``, which
     is handed to QUADPACK as a break point.
+
+    The conditioning runs on ``s = y**2``, the same substitution
+    :func:`sf_two_chi1_bessel` uses. Below ``k = 2`` the chi-square density has
+    an integrable singularity at the origin, and for ``k = 1`` the substitution
+    cancels it exactly: ``2 y f(y**2) = 2 exp(-y**2 / 2) / sqrt(2 pi)``.
+    Integrating in ``s`` instead, QUADPACK cannot resolve that end of the range
+    once ``t`` is small, and returns a survival probability above 1: measured
+    1.00107 at ``k = 1`` and ``t`` around ``1e-6`` times the standard deviation,
+    which is 1.1e-3 too large.
 
     Parameters
     ----------
@@ -230,11 +270,13 @@ def sf_two_chi1_plus_chi2k(t, a, b, c, k):
         The survival probability.
     """
 
-    def inner(s):
-        return chi2.pdf(s, k) * float(sf_two_chi1(np.array(t - c * s), a, b))
+    def inner(y):
+        s = y * y
+        return 2.0 * y * chi2.pdf(s, k) * float(sf_two_chi1(np.array(t - c * s), a, b))
 
-    lo, hi = chi2.ppf([1e-15, 1 - 1e-15], k)
-    brk = [t / c] if lo < t / c < hi else []
+    lo, hi = np.sqrt(chi2.ppf([1e-15, 1 - 1e-15], k))
+    root_kink = np.sqrt(t / c)
+    brk = [root_kink] if lo < root_kink < hi else []
     return quad(
         inner, lo, hi, points=brk or None, limit=500, epsabs=1e-15, epsrel=1e-13
     )[0]
@@ -334,6 +376,44 @@ def test_three_equal_weights_are_a_chi_square(t, k):
     """``X1 + X2 + S ~ chi2_(k+2)`` when every weight is 1."""
     assert sf_two_chi1_plus_chi2k(t, 1.0, 1.0, 1.0, k) == pytest.approx(
         chi2.sf(t, k + 2), rel=_CONDITIONED
+    )
+
+
+@pytest.mark.parametrize("t", [1e-9, 1e-6, 1e-3])
+def test_three_equal_weights_stay_a_chi_square_near_zero(t):
+    """
+    The same identity where the conditioning integral used to fail.
+
+    At ``k = 1`` the conditioning density has an integrable singularity at the
+    origin.  Integrating in ``s`` rather than in ``sqrt(s)``, QUADPACK could not
+    resolve it once ``t`` was small and returned survival probabilities above 1,
+    measured at 1.00107. A reference that reports a probability of 1.001 cannot
+    referee anything, so the range is asserted alongside the value.
+    """
+    got = sf_two_chi1_plus_chi2k(t, 1.0, 1.0, 1.0, 1)
+
+    assert 0.0 <= got <= 1.0
+    assert got == pytest.approx(chi2.sf(t, 3), rel=_CONDITIONED)
+
+
+@pytest.mark.parametrize("weight", [1e-9, 1e-6])
+@pytest.mark.parametrize("t", [1e-5, 1.0, 6.0])
+def test_conditioning_oracle_resolves_a_tiny_weight(t, weight):
+    """
+    Compare the imbalanced conditioning integral with an exact closed form.
+
+    The first and third unit-weight 1-df terms sum to ``chi2_2``, leaving the
+    second term as ``weight * chi2_1``. The reference retains that term exactly,
+    and the tolerance is small enough that dropping it would fail. The band
+    this oracle referees in ``test_chisqsum_failures.py`` has this shape: two
+    weights many orders of magnitude apart.
+    """
+    expected = sf_chi2_2_plus_weighted_chi1(t, weight)
+    without_tiny_term = chi2.sf(t, 2)
+
+    assert expected - without_tiny_term > max(_CONDITIONED * expected, 2e-15)
+    assert sf_two_chi1_plus_chi2k(t, 1.0, weight, 1.0, 1) == pytest.approx(
+        expected, rel=_CONDITIONED, abs=2e-15
     )
 
 

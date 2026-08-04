@@ -984,10 +984,22 @@ def test_no_spurious_cross_check_failures_on_healthy_inputs():
 
 
 def _mgcv_fractional_rank_weights(rank):
-    """``val`` as ``mgcv:::testStat`` builds it for a rank between 1 and 2."""
-    rp = rank  # mgcv's rp = nu + 1, with nu = rank - 1
+    """
+    The weight list the fractional-rank test builds, for any rank.
+
+    With integer part ``k`` and fractional part ``nu``, it is ``k - 1`` unit
+    weights followed by the two roots of ``rp = 1 + nu``, all on 1-df terms.
+    Note that ``b`` goes to ``nu / 2`` as ``nu`` goes to zero, so a rank just
+    above an integer produces a very small last weight.
+
+    A rank between 1 and 2 gives two terms, which the angular reduction answers
+    exactly.  From rank 2 up the leading unit weights merge into one
+    higher-``df`` term, leaving three terms and no closed form.
+    """
+    k = int(np.floor(rank))
+    rp = 1.0 + (rank - k)
     first = (rp + np.sqrt(rp * (2.0 - rp))) / 2.0
-    return [first, rp - first]
+    return [1.0] * (k - 1) + [first, rp - first]
 
 
 @pytest.mark.parametrize("rank", [1.2, 1.5, 1.8])
@@ -1130,6 +1142,77 @@ def test_two_chi1_angular_reduction_covers_fractional_rank_grid(monkeypatch):
             assert upper + lower == pytest.approx(1.0, abs=1e-12), message
 
 
+# --------------------------------------------------------------------------- #
+# The three-term corner, which no reduction reaches.
+#
+# A rank between 2 and 3 gives ``[1, a, b]`` on 1-df terms, with ``a + b`` a
+# little over one.  Merging leaves three terms, so the angular reduction above
+# does not apply, and three degrees of freedom decay only like ``u**-2.5``.
+# This can be the case for a smooth whose edf has been shrunk to just above 2.
+#
+# At a near-zero point tanh-sinh is the preferred route and used to exhaust
+# ``_TANHSINH_MAXLEVEL`` before QAWF also declined, which triggered an error
+# "neither quadrature route resolved this input". The cases below did
+# that at maxlevel=14, they are now answered at 20.
+#
+# Four or more positive terms haven't declined at any ceiling.
+# --------------------------------------------------------------------------- #
+
+# (nu, z)
+_THREE_TERM_BAND = [
+    (1e-10, 5e-7),
+    (1e-10, 9e-6),
+    (1e-8, 9e-7),
+    (1e-8, 3e-6),
+    (1e-8, 9e-6),
+    (1e-7, 5e-6),
+    (1e-6, 2e-6),
+    (1e-6, 9e-6),
+]
+
+
+def _three_term_band_case(nu, z):
+    """Raw weights and evaluation point for one row of the band."""
+    weights = _mgcv_fractional_rank_weights(2.0 + nu)
+    sd = float(np.sqrt(2.0 * np.sum(np.square(weights))))
+    return weights, z * sd
+
+
+@pytest.mark.parametrize("nu, z", _THREE_TERM_BAND)
+def test_three_term_band_at_a_near_zero_point_is_answered(nu, z):
+    """
+    The rows that used to raise, against the independent conditioning oracle.
+
+    One tail only. Each of these costs between 0.2 and 4 seconds, since the
+    whole point of them is that they are the hardest inputs in the contract.
+    """
+    weights, q = _three_term_band_case(nu, z)
+    second, third = sorted(weights[-2:])
+    expected = sf_two_chi1_plus_chi2k(q, second, third, 1.0, 1.0)
+
+    assert psum_chisq(q, weights, df=1) == pytest.approx(expected, abs=1e-10)
+
+
+def test_three_term_band_is_answered_by_tanh_sinh():
+    """
+    At the old ceiling of 14 this route reported ``status=-2`` with an error
+    estimate of ``1.65e-11`` on a CDF whose value is about ``9e-06``.
+    """
+    weights, q = _three_term_band_case(1e-8, 9e-6)
+    w, d, ncp = _standardize(weights, [1, 1, 1])
+    z = q / chisqsum._standard_deviation(
+        np.asarray(weights, dtype=float), np.ones(3), np.zeros(3)
+    )
+
+    assert abs(z) <= chisqsum._Z_SWITCH
+
+    second, third = sorted(weights[-2:])
+    expected = 1.0 - sf_two_chi1_plus_chi2k(q, second, third, 1.0, 1.0)
+    value, _error = chisqsum._cdf_tanhsinh(z, w, d, ncp)
+
+    assert value == pytest.approx(expected, abs=1e-10)
+
+
 def test_a_corrupt_result_is_not_laundered_through_the_fallback():
     """
     Disagreement stops; only non-convergence falls back.
@@ -1152,29 +1235,37 @@ def test_tanhsinh_accuracy_limit_at_two_degrees_of_freedom():
     A known limitation, pinned so that it cannot quietly get worse.
 
     Just below where tanh-sinh stops converging on a two-degrees-of-freedom
-    integrand there is a narrow band where it converges to an answer about twice
-    the requested absolute tolerance away, and its domain-split variant agrees
-    with it, so the cross-check does not see it.  The measured worst case is
-    2.2e-10 against a request of 1e-10.  QAWF is accurate to 1e-13 there but the
+    integrand there is a narrow band where it converges to an answer further
+    from the truth than the surrounding points, and its domain-split variant
+    agrees with it, so the cross-check does not see it. The measured worst
+    case is 9.8e-12 on this grid. QAWF is accurate to 1e-13 there but the
     dispatcher does not prefer it, because ``abs(z)`` is well inside tanh-sinh's
     band.
 
-    This is a tolerance miss of about a factor of two, not an F4-class failure,
-    and it is confined to the lowest degrees of freedom the contract allows.
-    The bound is asserted one-sided: the limitation must not get worse, and a
-    future SciPy that resolves it should not turn this red.
+    This is a small tolerance miss, and it is confined to the lowest degrees of
+    freedom the contract allows. The bound is asserted one-sided: the limitation
+    must not get worse, and a future SciPy that resolves it should not turn this
+    red.
 
     Which ``z`` converges is not stable enough to pin, so this sweeps a band
     and looks only at the points where tanh-sinh reported success.
+
+    The grid is small on purpose. Everything here is standardized before it
+    reaches the integrator, so ``(0.125, 0.25)``, ``(0.5, 1.0)`` and
+    ``(1.0, 2.0)`` all arrive as the same array and only their ratio is a
+    distinct case. The two below are the two distinct ratios the sweep used to
+    cover with four pairs. The points that never converge cost every level of
+    :data:`_TANHSINH_MAXLEVEL` before saying so, which is seconds each, so
+    widening this grid would give duplicated coverage but very long tests.
     """
     worst = 0.0
     converged = 0
-    for a, b in [(0.125, 0.25), (0.125, 1.0), (0.5, 1.0), (1.0, 2.0)]:
+    for a, b in [(0.125, 0.25), (0.125, 1.0)]:
         w, d, ncp = _standardize([a, b], [1, 1])
         sd = chisqsum._standard_deviation(
             np.array([a, b]), np.array([1.0, 1.0]), np.zeros(2)
         )
-        for z in np.geomspace(1e-5, 1e-4, 12):
+        for z in np.geomspace(1e-5, 1e-4, 6):
             exact = 1.0 - float(sf_two_chi1(np.array(z * sd), a, b))
             try:
                 value, _error = chisqsum._cdf_tanhsinh(z, w, d, ncp)

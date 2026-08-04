@@ -76,7 +76,8 @@ _TANHSINH_RTOL = 1e-13
 # mixture near the handover even with ``success=True``.  Level 9 is the first
 # forced refinement that meets the independent-oracle calibration.
 _TANHSINH_MINLEVEL = 9
-_TANHSINH_MAXLEVEL = 14
+
+_TANHSINH_MAXLEVEL = 20
 
 # QUADPACK's QAWF stops after this many oscillation cycles. SciPy's own default
 # is 50 and is not part of its documented signature, so it is set here to keep
