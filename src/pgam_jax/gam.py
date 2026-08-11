@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxopt import LBFGS, ScipyMinimize
+from jaxtyping import Array, Float
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.glm.initialize_parameters import (
     INVERSE_FUNCS,
@@ -52,6 +53,8 @@ from .penalty_utils import (
     compute_penalty_blocks,
     prepend_zeros_for_intercept,
 )
+
+type JaxFloatScalar = Float[Array, ""]
 
 
 # TODO: Should any other observation model be supported?
@@ -578,9 +581,9 @@ class GAM:
         regularizer_strength: list[jnp.ndarray],
         compute_sqrt,
         rtol: float = 1e-8,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """
-        Compute posterior covariance, EDF, and dispersion scale after fitting.
+        Compute posterior covariance and dispersion scale after fitting.
 
         This mirrors legacy PGAM's final refresh: recompute final IRLS weights
         from the returned coefficients, form QR(sqrt(W) X), then invert
@@ -590,8 +593,6 @@ class GAM:
         -------
         cov_beta :
             Posterior covariance ``φ · (X'WX + S_λ)⁻¹``, shape ``(p+1, p+1)``.
-        edf :
-            Effective degrees of freedom — Wood's ``edf1 = 2·tr(F) − tr(F²)``.
         scale :
             Estimated dispersion φ̂ from ``observation_model.estimate_scale``.
         """
@@ -647,11 +648,19 @@ class GAM:
         edf1 = jnp.sum(self._edf1_by_coef)
 
         # dispersion: Poisson → 1.0; Gaussian/Gamma → Pearson χ²/dof
-        scale = self.observation_model.estimate_scale(y, mu, dof_resid=n_obs - edf1)
+        scale = self.observation_model.estimate_scale(y, mu, dof_resid=n_obs - edf)
 
         cov_beta = scale * unscaled_cov_beta
 
-        return cov_beta, edf1, scale
+        return cov_beta, scale
+
+    @property
+    def edf_(self) -> JaxFloatScalar:
+        return jnp.sum(self._edf_by_coef)
+
+    @property
+    def edf1_(self) -> JaxFloatScalar:
+        return jnp.sum(self._edf1_by_coef)
 
     def _resolve_basis_component(
         self,
@@ -772,7 +781,7 @@ class GAM:
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
         self.n_iter_ = n_iter
-        self.cov_beta_, self.edf_, self.scale_ = self._compute_cov_beta_from_fit_state(
+        self.cov_beta_, self.scale_ = self._compute_cov_beta_from_fit_state(
             X,
             y,
             opt_coef,

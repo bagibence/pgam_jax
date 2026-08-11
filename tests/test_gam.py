@@ -96,13 +96,14 @@ def test_compute_cov_beta_edf_matches_u1_calculation():
         ]
     )
 
-    _, edf1_from_F, _ = gam._compute_cov_beta_from_fit_state(
+    _, _ = gam._compute_cov_beta_from_fit_state(
         X,
         y,
         params,
         [jnp.array([0.0])],
         lambda _: sqrt_penalty,
     )
+    edf1_from_F = jnp.sum(gam._edf1_by_coef)
     edf_from_F = jnp.sum(gam._edf_by_coef)
 
     X_full = jnp.column_stack((jnp.ones(X.shape[0]), X))
