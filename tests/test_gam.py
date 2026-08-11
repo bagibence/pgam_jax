@@ -1,4 +1,5 @@
 import jax
+import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
@@ -71,6 +72,59 @@ def _poisson_data(seed=0, n=500):
     eta = np.sin(3.0 * x)
     y = rng.poisson(np.exp(eta - eta.mean()))
     return x, y, eta
+
+
+def test_compute_cov_beta_edf_matches_u1_calculation():
+    gam = GAM(_basis())
+    X = jnp.array(
+        [
+            [-1.0, 0.2, 0.5],
+            [-0.6, -0.3, 0.8],
+            [-0.2, 0.7, -0.4],
+            [0.2, -0.5, -0.7],
+            [0.6, 0.4, 0.1],
+            [1.0, -0.1, -0.6],
+        ]
+    )
+    y = jnp.ones(X.shape[0])
+    params = (jnp.zeros(X.shape[1]), jnp.array([0.0]))
+    sqrt_penalty = jnp.array(
+        [
+            [0.8, -0.2, 0.1],
+            [0.0, 0.6, 0.3],
+            [0.0, 0.0, 1.1],
+        ]
+    )
+
+    _, edf1_from_F, _ = gam._compute_cov_beta_from_fit_state(
+        X,
+        y,
+        params,
+        [jnp.array([0.0])],
+        lambda _: sqrt_penalty,
+    )
+    edf_from_F = jnp.sum(gam._edf_by_coef)
+
+    X_full = jnp.column_stack((jnp.ones(X.shape[0]), X))
+    R = jnp.linalg.qr(X_full, mode="r")
+    sqrt_penalty_full = jnp.column_stack(
+        (jnp.zeros(sqrt_penalty.shape[0]), sqrt_penalty)
+    )
+    U, _, _ = jnp.linalg.svd(
+        jnp.vstack((R, sqrt_penalty_full)),
+        full_matrices=False,
+    )
+
+    # U1 = U[:k] (first k=R.shape[0] rows) encodes the hat matrix via A = Q_xw U1 U1' Q_xw'
+    U1 = U[: R.shape[0]]
+
+    # EDF: edf1 = 2·tr(F) − tr(F²) where F = (X'WX + S_λ)⁻¹ X'WX
+    # Expressed via U1: tr(F) = ‖U1‖²_F, tr(F²) = ‖U1'U1‖²_F (Wood 2017 eq. 6.13)
+    edf_from_U1 = jnp.sum(U1**2)
+    edf1_from_U1 = 2 * edf_from_U1 - jnp.sum((U1.T @ U1) ** 2)
+
+    np.testing.assert_allclose(edf_from_F, edf_from_U1, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(edf1_from_F, edf1_from_U1, rtol=1e-12, atol=1e-12)
 
 
 @pytest.mark.parametrize("method", ["pql_gcv", "pql_reml"])

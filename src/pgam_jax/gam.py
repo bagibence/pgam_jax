@@ -623,25 +623,34 @@ class GAM:
         sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
         # SVD of A = [R; B],  A^T A = X^T W X + S_lambda
-        # U1 = U[:k] (first k=R.shape[0] rows) encodes the hat matrix via A = Q_xw U1 U1' Q_xw'
         U_svd, singular_values, Vt = jnp.linalg.svd(
             jnp.vstack((R, sqrt_penalty)),
             full_matrices=False,
         )
-        U1 = U_svd[: R.shape[0], :]  # (k, k) where k = p + 1
 
-        # EDF: edf1 = 2·tr(F) − tr(F²) where F = (X'WX + S_λ)⁻¹ X'WX
-        # Expressed via U1: tr(F) = ‖U1‖²_F,  tr(F²) = ‖U1'U1‖²_F  (Wood 2017 eq. 6.13)
-        edf = jnp.sum(U1**2)
-        edf1 = 2.0 * edf - jnp.sum((U1.T @ U1) ** 2)
+        # tiny singular values would blow up 1 / s^2, so discard them
+        keep = singular_values >= rtol * singular_values.max()
+        singular_values_sq_inv = jnp.where(keep, singular_values ** (-2), 0.0)
+
+        information_matrix = R.T @ R
+        unscaled_cov_beta = (Vt.T * singular_values_sq_inv) @ Vt
+        F = unscaled_cov_beta @ information_matrix
+
+        diag_F = jnp.diag(F)
+        diag_F_sq = jnp.sum(F * F.T, axis=1)
+
+        # they have an extra term for the intercept
+        self._edf_by_coef = diag_F
+        self._edf1_by_coef = 2 * diag_F - diag_F_sq
+
+        edf = jnp.sum(self._edf_by_coef)
+        edf1 = jnp.sum(self._edf1_by_coef)
 
         # dispersion: Poisson → 1.0; Gaussian/Gamma → Pearson χ²/dof
         scale = self.observation_model.estimate_scale(y, mu, dof_resid=n_obs - edf1)
 
-        # tiny singular values would blow up 1 / s^2, so discard them
-        keep = singular_values >= rtol * singular_values.max()
-        singular_values_inv = jnp.where(keep, 1.0 / singular_values, 0.0)
-        cov_beta = scale * (Vt.T * singular_values_inv**2) @ Vt
+        cov_beta = scale * unscaled_cov_beta
+
         return cov_beta, edf1, scale
 
     def _resolve_basis_component(
