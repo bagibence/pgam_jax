@@ -17,6 +17,7 @@ from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
 
+from ._chisqsum import psum_chisq
 from ._identifiable_features import (
     BasisComponentInfo,
     _compute_features_identifiable,
@@ -36,7 +37,8 @@ from ._nan_policy import (
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
-from ._utils import prepend_ones_for_intercept
+from ._typing import JaxFloatScalar
+from ._utils import prepend_ones_for_intercept, scale_estimated, stack_block_diag
 from .concurvity import concurvity as _concurvity
 from .concurvity import term_blocks_for_gam
 from .iterative_optim import (
@@ -53,8 +55,6 @@ from .penalty_utils import (
     compute_penalty_blocks,
     prepend_zeros_for_intercept,
 )
-
-type JaxFloatScalar = Float[Array, ""]
 
 
 # TODO: Should any other observation model be supported?
@@ -620,6 +620,10 @@ class GAM:
         Xw = X_full * jnp.sqrt(weights)[:, None]
         R = jnp.linalg.qr(Xw, mode="r")
 
+        # TODO: Return it instead?
+        # save for p-values
+        self._R = R
+
         sqrt_penalty = compute_sqrt(regularizer_strength)
         sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
@@ -987,6 +991,7 @@ class GAM:
                 f"{info.input_slice.stop - info.input_slice.start} input array(s), "
                 f"got {len(xi)}."
             )
+        # TODO: Why is this called fX? isn't it X_i?
         fX = _compute_features_identifiable(
             info.basis,
             *xi,
@@ -1034,6 +1039,108 @@ class GAM:
         delta = se_y * sts.norm().ppf(1 - (1 - perc) * 0.5)
         return mean_y, mean_y - delta, mean_y + delta
 
+    def smooth_pval(self, component_index: int | str):
+
+        def _get_pval(t_r, weights, dof):
+            weights = jnp.asarray(weights)
+            dof = jnp.asarray(dof)
+
+            if scale_estimated(self.observation_model):
+                kappa = self.dof_resid_
+                weights = jnp.concatenate([weights, jnp.asarray([-t_r / kappa])])
+                dof = jnp.concatenate([dof, jnp.asarray([kappa])])
+                q = 0.0
+            else:
+                q = t_r
+
+            return psum_chisq(
+                q,
+                weights=jnp.asarray(weights),
+                df=jnp.asarray(dof),
+                lower_tail=False,
+            )
+
+        component_info = self._resolve_basis_component(component_index)
+        smooth_slice = slice(
+            component_info.identifiable_feature_slice.start + 1,
+            component_info.identifiable_feature_slice.stop + 1,
+        )
+
+        # TODO: Have a helper (property?) for this beta construction
+        # TODO: Is the indexing correct?
+        beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
+        beta_j = beta[smooth_slice]
+        edf1_j = jnp.sum(self._edf1_by_coef[smooth_slice])
+        V_beta_j = self.cov_beta_[smooth_slice, smooth_slice]
+
+        R_columns_j = self._R[:, smooth_slice]
+        R_j = jnp.linalg.qr(R_columns_j, mode="r")
+        z_j = R_j @ beta_j
+        C_j = R_j @ V_beta_j @ R_j.T
+
+        # This would be more like the book
+        # C_j_inv_plus, C_j_inv_minus = _wood_rank_r_inverse_pair(C_j, r)
+        # t_plus = z_j.T @ C_j_inv_plus @ z_j
+        # t_minus = z_j.T @ C_j_inv_minus @ z_j
+
+        # This avoids forming the Wood-style inverse
+        evals, U = jnp.linalg.eigh((C_j + C_j.T) / 2)
+        tol = jnp.max(evals) * jnp.finfo(evals.dtype).eps ** 0.9
+        keep = evals > tol
+        evals = evals[keep][::-1]
+        U = U[:, keep][:, ::-1]
+
+        # under the null hypothesis: z_j ~ N(0, C_j)
+        # cov(z_j) = C_j
+        # a_j are coordinates of z_j along the eigenvectors of C_j
+        # cov(a_j) = U.T @ C_j @ U -> diagonal, so a_j_i are independent and var(a_j_i) = evals_i
+        a_j = U.T @ z_j
+        # normalize by the std, so var(d_j_i) = 1, so d_j ~ N(0, I)
+        d_j = a_j / jnp.sqrt(evals)
+
+        r = min(float(edf1_j), beta_j.size, evals.size)
+        if r < 1:
+            raise NotImplementedError(
+                "EDF < 1 requires a different p-value estimation. Coming soon."
+            )
+
+        k = int(jnp.floor(r))
+        nu = r - k
+
+        # psum_chisq reductions should handle this, but we can do it here already
+        # nu_1 = 1 and nu_2 = 0, so the nu_1 * chisq_1 is absorbed into the first term
+        # T_r ~ chisq_r because we're summing r terms
+        if nu == 0:
+            t_r = jnp.sum(d_j[:k] ** 2)
+            return _get_pval(t_r, [1.0], [k])
+
+        nu_1 = (nu + 1 + jnp.sqrt(1 - nu**2)) / 2
+        nu_2 = nu + 1 - nu_1
+
+        rho = jnp.sqrt(nu * (1 - nu) / 2)
+
+        # The book has an error, the first dof is k-1 if k=floor(r), not k-2
+        # The expectation is a good check. With k-1:
+        # E[T_r] = (k - 1) + nu_1 + nu_2 = (k - 1) + (1 + nu) = k + nu = r
+        chisq_weights = [nu_1, nu_2]
+        chisq_df = [1, 1]
+        # for k = 1 the first term's df would be 0, so just don't add it
+        if k > 1:
+            chisq_weights = [1.0, *chisq_weights]
+            chisq_df = [k - 1, *chisq_df]
+
+        base = jnp.sum(d_j[: k - 1] ** 2)
+        d_k_minus_1 = d_j[k - 1]
+        d_k = d_j[k]
+
+        t_plus = base + d_k_minus_1**2 + nu * d_k**2 + 2 * rho * d_k_minus_1 * d_k
+        t_minus = base + d_k_minus_1**2 + nu * d_k**2 - 2 * rho * d_k_minus_1 * d_k
+
+        p_plus = _get_pval(t_plus, chisq_weights, chisq_df)
+        p_minus = _get_pval(t_minus, chisq_weights, chisq_df)
+
+        return (p_plus + p_minus) / 2
+
     def score(
         self,
         xi: tuple[ArrayLike, ...],
@@ -1076,3 +1183,72 @@ class GAM:
             scale=self.scale_,
             aggregate_sample_scores=aggregate_sample_scores,
         )
+
+
+def _wood_rank_r_inverse_pair(M, r):
+
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        raise ValueError("`M` must be a square matrix.")
+
+    evals, U = jnp.linalg.eigh((M + M.T) / 2)
+    tol = jnp.max(evals) * jnp.finfo(evals.dtype).eps ** 0.9
+    keep = evals > tol
+    evals = evals[keep][::-1]
+    U = U[:, keep][:, ::-1]
+
+    numerical_rank = evals.shape[0]
+    r = float(r)
+    if not 1 <= r <= numerical_rank:
+        raise ValueError(
+            f"`r` must be between 1 and the numerical rank {numerical_rank}, got {r}."
+        )
+
+    k = int(jnp.floor(r))
+    nu = r - k
+
+    # r is integer, no need for the fractional formula
+    if nu == 0:
+        A = jnp.zeros((numerical_rank, numerical_rank))
+        A = A.at[:k, :k].set(jnp.diag(1 / evals[:k]))
+
+        C_r_inv = U @ A @ U.T
+        C_r_inv = (C_r_inv + C_r_inv.T) / 2
+
+        return C_r_inv, C_r_inv
+
+    rho = jnp.sqrt(nu * (1 - nu) / 2)
+
+    d_k_minus_1 = evals[k - 1]
+    d_k = evals[k]
+
+    Lambda_hat = jnp.array(
+        [
+            [1 / jnp.sqrt(d_k_minus_1), 0],
+            [0, 1 / jnp.sqrt(d_k)],
+        ]
+    )
+
+    B_hat_plus = jnp.array(
+        [
+            [1.0, rho],
+            [rho, nu],
+        ]
+    )
+    B_hat_minus = jnp.array(
+        [
+            [1.0, -rho],
+            [-rho, nu],
+        ]
+    )
+
+    def _C_r_inv(B_hat):
+
+        B = Lambda_hat @ B_hat @ Lambda_hat.T
+
+        A = stack_block_diag([jnp.diag(1 / evals[: k - 1]), B], numerical_rank)
+
+        C_r_inv = U @ A @ U.T
+
+        return (C_r_inv + C_r_inv.T) / 2
+
+    return _C_r_inv(B_hat_plus), _C_r_inv(B_hat_minus)
