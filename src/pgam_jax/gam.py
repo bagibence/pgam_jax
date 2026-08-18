@@ -1101,6 +1101,11 @@ class GAM:
         d_j = a_j / jnp.sqrt(evals)
 
         r = min(float(edf1_j), beta_j.size, evals.size)
+        if not bool(jnp.isfinite(r)):
+            raise ValueError(
+                "The effective test rank is not finite, so the fit did not "
+                f"produce a usable smooth. Got r={r} from edf1={float(edf1_j)}."
+            )
         if r < 1:
             raise RuntimeError(
                 "Wood (2017) section 6.12.1 this test implements requires "
@@ -1203,6 +1208,11 @@ class GAM:
 
         # W = 2 * (l_1 - l_0) = beta_j.T @ R_m.T @ R_m @ beta_j
         statistic = jnp.sum((R_m @ beta_j) ** 2) / scale
+        if not bool(jnp.isfinite(statistic)):
+            raise ValueError(
+                "The smooth test statistic is not finite, so the fit did not "
+                f"produce a usable smooth. Got {float(statistic)}."
+            )
 
         # The statistic is T = beta_hat_j.T R_hat.T R_hat beta_hat_j / phi
         #
