@@ -1070,7 +1070,6 @@ class GAM:
         )
 
         # TODO: Have a helper (property?) for this beta construction
-        # TODO: Is the indexing correct?
         beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
         beta_j = beta[smooth_slice]
         edf1_j = jnp.sum(self._edf1_by_coef[smooth_slice])
