@@ -1058,7 +1058,11 @@ class GAM:
 
         Implements the test from Wood 2017, section 6.12.1.
 
-        See ``_smooth_pval_penalized`` for section 6.12.2.
+        Smooths built by this package penalize the null space, so their
+        combined penalty is full rank and this test does not apply to them.
+        It raises when the effective test rank falls below one, which is the
+        usual outcome here.
+        Use ``_smooth_pval_penalized``, which implements section 6.12.2, instead.
         """
 
         kappa = self.dof_resid_ if scale_estimated(self.observation_model) else None
@@ -1155,6 +1159,25 @@ class GAM:
         Compute a p-value for a smooth with a full-rank combined penalty.
 
         Implements the test from Wood 2017, section 6.12.2.
+
+        The test conditions on the smoothing parameters. It does not account
+        for the fact that they were estimated from the same data, and for a
+        fully penalized smooth the null hypothesis sits on the boundary of the
+        parameter space at infinite lambda. The result is a loss of calibration
+        once the smoothing parameters are fitted rather than fixed.
+
+        Treat p-values from a fitted model as a rough guide, and interpret a
+        value near a threshold as inconclusive rather than significant.
+
+        Parameters
+        ----------
+        component_index :
+            Index or label of the basis component to test.
+
+        Returns
+        -------
+        :
+            The p-value for the null hypothesis that the smooth is zero.
         """
         required_attributes = (
             "_R",
