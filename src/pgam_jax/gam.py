@@ -38,7 +38,6 @@ from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
 from ._typing import JaxFloatScalar
 from ._utils import (
-    positive_semidefinite_evals,
     prepend_ones_for_intercept,
     scale_estimated,
     stack_block_diag,
@@ -663,9 +662,12 @@ class GAM:
         # Bayesian covariance of the coefficients
         cov_beta = scale * unscaled_cov_beta
 
+        # used as C.T in _smooth_pval_penalized
+        self._unscaled_freq_cov_root = unscaled_cov_beta @ R.T
         # frequentist covariance
-        cov_beta_freq = F @ cov_beta
-        self.cov_beta_freq_ = (cov_beta_freq + cov_beta_freq.T) / 2
+        self.cov_beta_freq_ = (
+            scale * self._unscaled_freq_cov_root @ self._unscaled_freq_cov_root.T
+        )
 
         return cov_beta, scale
 
@@ -1219,14 +1221,14 @@ class GAM:
         # T = sum_i evals_i * q_i**2
         # so T is a weighted sum of chisq_1 variables.
 
-        # We don't have to form C because
-        # (C R_hat.T R_hat C.T) and (R_hat C.T C R_hat.T) have the same nonzero eigenvalues
-        # because in general L @ L.T and L.T @ L have the same nonzero eigenvalues.
-        # We have the second one because C.T C = V_freq_j,
-        # so we just have to get the eigenvalues of (R_hat V_freq_j R_hat.T)
-
-        V_freq_j = self.cov_beta_freq_[smooth_slice, smooth_slice]
-        evals = positive_semidefinite_evals(R_m @ V_freq_j @ R_m.T / scale)
+        C_T = self._unscaled_freq_cov_root[smooth_idx, :]
+        L_j = R_m @ C_T
+        singular_values = jnp.linalg.svd(L_j, compute_uv=False)
+        tol = max(L_j.shape) * jnp.finfo(singular_values.dtype).eps * singular_values[0]
+        keep = singular_values > tol
+        evals = singular_values[keep] ** 2
+        if evals.size == 0:
+            raise ValueError("The smooth test covariance has numerical rank zero.")
 
         kappa = self.dof_resid_ if scale_estimated(self.observation_model) else None
 
