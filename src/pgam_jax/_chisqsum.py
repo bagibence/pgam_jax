@@ -1,55 +1,60 @@
-r"""Distribution of a linear combination of chi-squared random variables.
+"""
+Distribution of a weighted sum of chi-squared variables.
 
-Computes the (survival) probability of
+This module computes the probability that
 
-.. math::
+    Q = sum_j w_j X_j
 
-    Q = \sum_j w_j X_j,
+is above or below a given value q. The X_j are independent chi-squared
+variables with nu_j degrees of freedom and non-centrality delta_j^2. The
+weights w_j can be positive or negative. This is the null distribution behind
+covariate-inclusion p-values for penalized GAM smooth terms.
 
-where :math:`X_j \sim \chi^2_{\nu_j}(\delta_j^2)` are independent (possibly
-non-central) chi-squared variables.  Weights may be of either sign.  This is the
-null distribution used to obtain covariate-inclusion p-values for penalised GAM
-smooth terms.
+The general case has no closed form. The probability comes from the
+characteristic function of Q instead (Gil-Pelaez / Imhof, 1961):
 
-The general case is obtained by inverting the characteristic function of ``Q``
-(Gil-Pelaez / Imhof, 1961):
+    Pr(Q <= q) = 1/2 - (1/pi) * integral_0^inf sin(phi(u) - q u) exp(-psi(u))/u du
 
-.. math::
+where, with x_j = 2 w_j u,
 
-    \Pr(Q \le q) = \frac{1}{2}
-        - \frac{1}{\pi} \int_0^\infty
-        \frac{\sin\!\big(\phi(u) - q u\big)}{u}\, e^{-\psi(u)}\, \mathrm{d}u,
+    phi(u) = (1/2) sum_j [ nu_j arctan(x_j) + delta_j^2 x_j / (1 + x_j^2) ]
+    psi(u) = (1/4) sum_j nu_j log(1 + x_j^2)
+             + (1/2) sum_j delta_j^2 x_j^2 / (1 + x_j^2)
 
-where, writing :math:`x_j = 2 w_j u`,
+phi is the phase of the integrand. exp(-psi(u))/u is its envelope, the positive
+factor that makes the oscillation die out as u grows.
 
-.. math::
+Before numerical integration, divide Q and q by s = sd(Q), so
+Q/s = sum_j (w_j/s) X_j has variance one and z = q/s. With the t = s * u change
+of variables, we have x_j = 2 (w_j/s) t, q u = z t, and du/u = dt/t. The integral
+keeps the same form in dimensionless quantities, and P(Q <= q) = P(Q/s <= z).
+A common positive rescaling of q and the weights leaves these quantities, and so
+the result, unchanged. Without this normalization, a large common rescaling could
+change the result returned by the numerical integration.
 
-    \phi(u) &= \frac{1}{2} \sum_j \left[
-        \nu_j \arctan x_j + \frac{\delta_j^2\, x_j}{1 + x_j^2} \right], \\
-    \psi(u) &= \frac{1}{4} \sum_j \nu_j \log\!\big(1 + x_j^2\big)
-        + \frac{1}{2} \sum_j \frac{\delta_j^2\, x_j^2}{1 + x_j^2}.
+Two quadrature routes share the range of z:
 
-Before any of this is evaluated the problem is nondimensionalised.  Writing
-:math:`\mathrm{sd}` for the standard deviation of :math:`Q`, the substitution
-:math:`t = \mathrm{sd}\, u` maps the integral onto itself, since
-:math:`x_j = 2 w_j u = 2 (w_j/\mathrm{sd})\, t`, :math:`q u = (q/\mathrm{sd})\, t`
-and :math:`\mathrm{d}u / u = \mathrm{d}t / t`.  The quadrature therefore runs on
-normalised weights :math:`w_j/\mathrm{sd}` and standardised evaluation point
-:math:`z = q/\mathrm{sd}`, with the split point at 1.  Every threshold and
-frequency the method uses is then unit-free, so the result is invariant under a
-common rescaling of ``q`` and the weights, as it must be.
+- tanh-sinh integrates the whole normalized integrand over [0, inf) in one piece,
+  with sin(phi(u) - z u) kept intact. It is used for small abs(z), where one
+  oscillation cycle is longer than the region that carries the integrand.
+- QAWF cuts the integral at u = 1. The head on [0, 1] does not oscillate and
+  goes to ordinary adaptive quadrature. The tail on [1, inf) is written as a
+  cosine part plus a sine part, and each part goes to QUADPACK's Fourier
+  integrator with angular frequency z. It is used for every larger abs(z).
 
-The integral is evaluated with SciPy's adaptive quadrature: a short
-non-oscillatory head on :math:`[0, a]`, plus the semi-infinite oscillatory tail
-handled by the Fourier integrators (``weight="cos"``/``"sin"``), which converge
-even for the slowly decaying tails produced by low degrees of freedom.
+Which route runs first is a prediction from abs(z), and the prediction is
+sometimes wrong. A route that cannot resolve the integrand says so, and the
+other route is tried. See :func:`_cdf_approx`.
+
+This is an alternative to Davies AS 155 algorithm for calculating the same
+probability. Later versions may include that as an alternative.
 
 References
 ----------
 Imhof, J.P. (1961) "Computing the distribution of quadratic forms in normal
 variables." *Biometrika* 48, 419-426.
 
-Davies, R.B. (1980) "The distribution of a linear combination of :math:`\chi^2`
+Davies, R.B. (1980) "The distribution of a linear combination of chi-squared
 random variables." *J. R. Statist. Soc. C* 29, 323-333.
 """
 
@@ -59,24 +64,32 @@ import warnings
 from typing import Callable
 
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import ArrayLike
 from scipy.integrate import quad, tanhsinh
 from scipy.stats import chi2
 from scipy.stats import f as f_dist
 from scipy.stats import ncx2
 
-__all__ = ["psum_chisq"]
+from ._numpy_utils import FloatArray, _broadcast, _divide_with_fallback
 
-FloatArray = NDArray[np.float64]
-
+# The standardized point z = q / sd(Q) where the module changes route. At or below
+# it tanh-sinh runs first, above it QAWF runs first. Near z = 0 one QAWF
+# oscillation cycle is longer than the whole integrand, so QAWF steps over the
+# integrand and reports success on a wrong answer.
 _Z_SWITCH = 5e-3
+
+# Absolute and relative accuracy asked of tanh-sinh, set by calibration.
 _TANHSINH_ATOL = 1e-13
 _TANHSINH_RTOL = 1e-13
-# Levels 6 through 8 can stop on an aliased node set for a positive three-term
-# mixture near the handover even with ``success=True``.  Level 9 is the first
-# forced refinement that meets the independent-oracle calibration.
-_TANHSINH_MINLEVEL = 9
 
+# Refinement levels tanh-sinh must and can use. Each level halves the node
+# spacing, so the node count roughly doubles.
+# Levels 6 through 8 can stop on an aliased node set for a positive three-term
+# mixture near the handover point, even while reporting ``success=True``. Level
+# 9 is the first forced refinement that meets the independent-oracle calibration.
+_TANHSINH_MINLEVEL = 9
+# On the 144 hardest measured cases, a ceiling of 14 leaves 23 of them raising,
+# 18 leaves 2, 20 leaves none, and 22 buys nothing more.
 _TANHSINH_MAXLEVEL = 20
 
 # QUADPACK's QAWF stops after this many oscillation cycles. SciPy's own default
@@ -89,39 +102,42 @@ _LIMLST = 200
 _TANHSINH = "tanh-sinh"
 _QAWF = "QAWF"
 
-# Where each route is recomputed for its cross-check. Neither value changes the
-# integral; both change the nodes used to find it.
+# Where each route is cut when the cross-check recomputes it. Neither value
+# changes the integral itself. Both change the nodes used to find it.
 _QAWF_CROSS_CHECK_SPLIT = 2.5
 _TANHSINH_CROSS_CHECK_SPLIT = 1.0
 
-# How far two independent computations of the same integral may sit apart before
-# the disagreement is treated as evidence that one of them is wrong, as a
-# multiple of their combined error estimates. Calibrated, not assumed: over 335
-# healthy in-contract cases the worst ratio of disagreement to allowance was
-# 0.018 for QAWF, and for tanh-sinh the ratio is meaningless because its
-# estimates go to zero, which is what the floor below is for.
+# The cross-check computes one integral twice with different nodes, then
+# compares. The two answers are allowed to differ by the sum of their two error
+# estimates, times this factor. A larger difference counts as evidence that one
+# of the two runs is wrong.
+# Calibrated: over 335 healthy in-contract cases the worst ratio of disagreement
+# to allowance was 0.018 for QAWF. For tanh-sinh that ratio says nothing, because
+# its error estimates go to zero. The floor below covers that.
 _ERROR_ESTIMATE_SAFETY_FACTOR = 8.0
 
-# Both routes can report an error of exactly zero and still differ in the last
-# bits, so the allowance never falls below this. It is the noise level of the
-# comparison rather than an accuracy target: the worst disagreement measured
-# over those same healthy cases was 2.5e-12, and this sits above it with room.
-# The resulting trip point of 8e-11 is eight orders of magnitude below the
-# smallest genuine failure this catches, which is 1.4e-2. A caller who requests
-# an epsabs far below 1e-11 gets a cross-check no finer than this, because two
-# routes that disagree by 2.5e-12 on healthy input cannot testify about less.
+# The smallest allowance the cross-check ever uses. Both routes can report an
+# error of exactly zero and still differ in the last bits, so an allowance built
+# from the error estimates alone would fire on healthy input.
+# This is the noise level of the comparison, not an accuracy target. The worst
+# disagreement over those same healthy cases was 2.5e-12, and this sits above it
+# with room. The resulting trip point of 8e-11 is eight orders of magnitude
+# below the smallest genuine failure it catches, which is 1.4e-2. A caller who
+# requests an epsabs far below 1e-11 still gets this floor, because two routes
+# that disagree by 2.5e-12 on healthy input cannot testify about less.
 _CROSS_CHECK_FLOOR = 1e-11
 
-# A probability this many times its own estimated error, or less, is reported as
-# zero rather than as noise. One means a value is kept as soon as it exceeds
-# its own error bar.
+# A probability that does not exceed its own estimated error times this factor
+# is reported as 0.0. Below that size the quadrature returns noise rather than a
+# small number. One means a value is kept as soon as it exceeds its error bar.
 _FLOOR_SAFETY_FACTOR = 1.0
 
-# The counterpart of _CROSS_CHECK_FLOOR: an error estimate of exactly zero is
-# not a claim that the answer is exact to the last bit, and the probability is
+# The smallest allowance used when checking that a probability lies in [0, 1].
+# It is the counterpart of _CROSS_CHECK_FLOOR. An error estimate of exactly zero
+# is not a claim that the answer is exact to the last bit, and the probability is
 # still assembled by two roundings. A rank-4 smooth at a near-zero statistic
 # overshoots 1 by one ulp with an estimate of 0.0. Eight ulp leaves room and
-# still sits fourteen orders below the smallest real violation, F1's 0.17.
+# still sits fourteen orders of magnitude below the smallest real violation (0.17).
 _RANGE_CHECK_FLOOR = 8.0 * float(np.finfo(np.float64).eps)
 
 
@@ -129,15 +145,15 @@ class _QuadratureNotConverged(RuntimeError):
     """
     One quadrature route declined to answer.
 
-    This is separate from a plain :class:`RuntimeError` because the two mean
-    different things to the caller. A non-finite value or a negative error
-    estimate is corruption, and nothing may be built on it. Non-convergence is
-    a route reporting that it could not resolve this integrand to the requested
-    accuracy, which leaves the other route free to try. Only the latter is
-    caught by :func:`_cdf_approx`.
+    This is a separate exception from a plain :class:`RuntimeError` because the
+    two mean different things. A non-finite value or a negative error estimate
+    is corruption, and nothing can be built on it. Non-convergence only means
+    that this route could not resolve this integrand to the requested accuracy,
+    which leaves the other route free to try. :func:`_cdf_approx` catches this
+    exception and not :class:`RuntimeError`.
 
-    It subclasses :class:`RuntimeError` so that callers who only care that the
-    computation failed need not know about the distinction.
+    It is a subclass of :class:`RuntimeError`, so a caller that only cares that
+    the computation failed does not need to know about the difference.
     """
 
 
@@ -153,25 +169,36 @@ def _quad(
     limit: int,
     limlst: int | None = None,
 ) -> tuple[float, float]:
-    """Thin typed wrapper around :func:`scipy.integrate.quad`.
+    """
+    Thin typed wrapper around :func:`scipy.integrate.quad`.
 
-    SciPy ships no type stubs, so its return value is untyped; isolating the call
-    here keeps that "unknown" type from propagating through the module. When
-    ``weight`` is ``None`` this is ordinary adaptive quadrature; when it is
-    ``"cos"``/``"sin"`` SciPy uses its oscillatory Fourier integrator with angular
-    frequency ``wvar``.
+    SciPy ships no type stubs, so the return value of ``quad`` is untyped. The
+    call is isolated here to keep that unknown type out of the rest of the
+    module.
 
-    ``limlst`` caps the number of oscillation cycles and applies only to the
-    Fourier integrator, so it is passed only when one is requested. Leaving it
-    unset would inherit SciPy's undocumented default.
+    With ``weight=None`` this is ordinary adaptive quadrature. With
+    ``weight="cos"`` or ``weight="sin"`` SciPy uses QAWF, its Fourier
+    integrator, which handles an oscillation of angular frequency ``wvar`` over
+    a semi-infinite interval.
+
+    ``limlst`` caps the number of oscillation cycles, and only the Fourier
+    integrator reads it. It is passed only when a Fourier integrator is
+    requested, because leaving it unset would take SciPy's undocumented
+    default.
 
     ``epsrel`` reaches QUADPACK only on the non-oscillatory branch. QAWF takes
-    an absolute request alone, so on the tails the relative target is ignored.
+    an absolute target alone, so the relative target is ignored on the tails.
 
-    Returns the integral and its estimated absolute error. Raises
-    :class:`_QuadratureNotConverged` if QUADPACK reports non-convergence, and
-    :class:`RuntimeError` if it returns a non-finite value or an invalid error
-    estimate.
+    Returns
+    -------
+    The integral and its estimated absolute error.
+
+    Raises
+    ------
+    _QuadratureNotConverged
+        If QUADPACK reports that it did not converge.
+    RuntimeError
+        If QUADPACK returns a non-finite value or an invalid error estimate.
     """
     extra: dict[str, int] = {} if limlst is None else {"limlst": limlst}
     result = quad(  # type: ignore
@@ -210,36 +237,35 @@ def _phase_and_envelope(
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> tuple[float, float]:
-    r"""Phase and envelope of the inversion integrand at frequency ``u``.
+    """
+    Phase and envelope of the inversion integrand at frequency ``u``.
 
-    The integrand of the characteristic-function inversion is
-    :math:`\sin\!\big(\phi(u) - q u\big)\, e^{-\psi(u)} / u`. This returns the
-    tuple :math:`(\phi(u),\, e^{-\psi(u)} / u)`, with (writing
-    :math:`x_j = 2 w_j u`)
+    The normalized integrand is
+    ``sin(phi(u) - z u) * exp(-psi(u)) / u``. This function returns the pair
+    ``(phi(u), exp(-psi(u)) / u)``, where, with ``x_j = 2 w_j u``,
 
-    .. math::
+        phi(u) = (1/2) sum_j [ nu_j arctan(x_j) + delta_j^2 x_j / (1 + x_j^2) ]
+        psi(u) = (1/4) sum_j nu_j log(1 + x_j^2)
+                 + (1/2) sum_j delta_j^2 x_j^2 / (1 + x_j^2)
 
-        \phi(u) &= \frac{1}{2} \sum_j \left[
-            \nu_j \arctan x_j + \frac{\delta_j^2\, x_j}{1 + x_j^2} \right], \\
-        \psi(u) &= \frac{1}{4} \sum_j \nu_j \log\!\big(1 + x_j^2\big)
-            + \frac{1}{2} \sum_j \frac{\delta_j^2\, x_j^2}{1 + x_j^2}.
-
-    The reduction over the terms :math:`j` is vectorised over NumPy arrays.
+    The sum over the terms ``j`` is a NumPy reduction. This is the only place
+    where the two formulas appear. Every other function assembles the same pair
+    differently.
 
     Parameters
     ----------
     u : float
         Frequency at which the characteristic function is evaluated.
     weights, df, noncentrality : numpy.ndarray
-        The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
-        non-centrality parameters :math:`\delta_j^2`.
+        The per-term weights ``w_j``, degrees of freedom ``nu_j``, and
+        non-centrality parameters ``delta_j^2``.
 
     Returns
     -------
     phase : float
-        The phase :math:`\phi(u)`.
+        The phase ``phi(u)``.
     envelope : float
-        The positive envelope :math:`e^{-\psi(u)} / u`.
+        The envelope ``exp(-psi(u)) / u``, which is positive.
     """
     x = 2.0 * weights * u
     x_sq = x**2
@@ -251,14 +277,16 @@ def _phase_and_envelope(
 
 def _head_integrand(
     u: float,
-    q: float,
+    z: float,
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> float:
-    """Full integrand on the non-oscillatory head ``[0, a]``."""
+    """
+    The whole integrand on the head ``[0, a]``, where it does not oscillate.
+    """
     phase, envelope = _phase_and_envelope(u, weights, df, noncentrality)
-    return np.sin(phase - q * u) * envelope
+    return np.sin(phase - z * u) * envelope
 
 
 def _tail_cos_coefficient(
@@ -267,7 +295,16 @@ def _tail_cos_coefficient(
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> float:
-    """Coefficient of ``cos(q u)`` in the oscillatory tail integrand."""
+    """
+    Coefficient of ``cos(z u)`` in the oscillatory tail integrand.
+
+    The angle addition formula splits the tail into two Fourier integrals:
+
+        sin(phi - z u) = sin(phi) cos(z u) - cos(phi) sin(z u)
+
+    QAWF integrates one of them against ``cos(z u)`` and the other against
+    ``sin(z u)``, so it needs the two coefficients separately.
+    """
     phase, envelope = _phase_and_envelope(u, weights, df, noncentrality)
     return envelope * np.sin(phase)
 
@@ -278,61 +315,56 @@ def _tail_sin_coefficient(
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> float:
-    """Coefficient of ``sin(q u)`` in the oscillatory tail integrand."""
+    """
+    Coefficient of ``sin(z u)`` in the oscillatory tail integrand.
+
+    See :func:`_tail_cos_coefficient` for the split. The minus sign in front of
+    this piece is applied by :func:`_cdf_qawf`, not here.
+    """
     phase, envelope = _phase_and_envelope(u, weights, df, noncentrality)
     return envelope * np.cos(phase)
 
 
-def _divide_with_fallback(
-    numerator: FloatArray,
-    denominator: FloatArray,
-    fallback: float,
-) -> FloatArray:
-    """
-    Divide elementwise, using ``fallback`` where the denominator is zero.
-
-    ``numerator`` and ``denominator`` are arrays of tanh-sinh nodes, so this is
-    the vectorized equivalent of an ``if denominator != 0`` at every node.
-    NumPy does not evaluate the division where the mask is false. Those entries
-    retain the fallback with which ``result`` was initialized.
-    """
-    result = np.full_like(numerator, fallback)
-    np.divide(
-        numerator,
-        denominator,
-        out=result,
-        where=denominator != 0.0,
-    )
-    return result
-
-
 def _combined_integrand(
     u: FloatArray,
-    q: float,
+    z: float,
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> FloatArray:
-    r"""
-    Combined Imhof integrand, vectorised for tanh-sinh quadrature.
+    """
+    The whole Imhof integrand in one piece, vectorized for tanh-sinh.
 
-    Unlike the QAWF path, this keeps :math:`\sin(\phi(u) - q u)` intact and
-    integrates it over :math:`[0, \infty)` without a head/tail split.  SciPy's
-    infinite-interval transform evaluates the function at both zero and values
-    near the largest representable float, so both ends require explicit care.
+    The QAWF route splits ``sin(phi(u) - z u)`` into a cosine part and a sine
+    part. This route keeps it intact and integrates over ``[0, inf)`` with no
+    split. SciPy's transform for an infinite interval puts nodes at zero and at
+    values close to the largest float, so both ends need care.
 
-    At zero, the apparent :math:`1/u` singularity is removable:
+    **The node at u = 0.** The integrand carries a ``1 / u`` factor, and the
+    numerator also goes to zero there, so the formula reads 0 / 0 and NumPy
+    returns NaN. The ratio still has a finite limit. That is what a removable
+    singularity is: the formula is undefined at one point, and filling in the
+    limit makes the function smooth there. Use ``arctan(x) -> x`` and
+    ``x / (1 + x^2) -> x`` for small ``x``, which give
 
-    .. math::
+        phi(u) -> u * sum_j w_j (nu_j + delta_j^2)   and   psi(u) -> 0.
 
-        \lim_{u \to 0}
-        \frac{\sin(\phi(u) - q u)e^{-\psi(u)}}{u}
-        = \sum_j w_j(\nu_j + \delta_j^2) - q.
+    So the whole integrand tends to ``sum_j w_j (nu_j + delta_j^2) - z``. The
+    code computes that number and puts it at every node that sits at zero. One
+    NaN node would otherwise make the whole integral NaN.
 
-    At the other end, the ratios involving :math:`x_j = 2w_ju` are expressed
-    through :math:`h_j = \operatorname{hypot}(1, x_j) = \sqrt{1+x_j^2}`.
-    Unlike forming :math:`x_j^2` directly, ``hypot`` remains finite whenever
-    ``x_j`` does.
+    **The largest nodes.** There ``x_j = 2 w_j u`` overflows to ``+/-inf``, and
+    ``x_j^2 / (1 + x_j^2)`` then reads inf / inf, which is NaN again. Every
+    ratio is therefore written through ``h_j = hypot(1, x_j)``, which is
+    ``sqrt(1 + x_j^2)`` computed without overflow, and through
+    ``s_j = x_j / h_j``, which tends to ``+/-1``:
+
+        x / (1 + x^2)   = s / h
+        x^2 / (1 + x^2) = s^2
+        log(1 + x^2)    = 2 log(h)
+
+    An infinite ``x_j`` then gives ``s / h = 0``, ``s^2 = 1`` and an infinite
+    ``log(h)``, so the envelope is zero there, which is the correct limit.
     """
     u_arr = np.asarray(u, dtype=float)
 
@@ -342,20 +374,17 @@ def _combined_integrand(
     with np.errstate(over="ignore"):
         x = 2.0 * u_arr[..., np.newaxis] * weights
 
-    # h = sqrt(1 + x**2) and s = x/h. np.hypot forms h without
-    # overflowing when x is a large finite number.
+    # h = sqrt(1 + x**2), formed by np.hypot so that it does not overflow while
+    # x is still finite.
     hypot_x = np.hypot(1.0, x)
 
-    # This is an elementwise if: finite x uses x/h, while an x that overflowed
-    # to +/-inf uses its analytic limit, +/-1
+    # s = x / h. This is an elementwise if: finite x uses x / h, and an x that
+    # overflowed to +/-inf uses the limit, +/-1.
     with np.errstate(invalid="ignore"):
         unit_x = np.where(np.isfinite(x), x / hypot_x, np.sign(x))
 
-    # The three potentially troublesome expressions now share the same stable
-    # h and s:
-    #   x / (1 + x**2) = s / h
-    #   x**2 / (1 + x**2) = s**2
-    #   log(1 + x**2) = 2 log(h)
+    # The three ratios that would otherwise overflow, all written through the
+    # stable h and s. See the docstring.
     x_over_one_plus_x_sq = unit_x / hypot_x
     x_sq_over_one_plus_x_sq = unit_x**2
     log_one_plus_x_sq = 2.0 * np.log(hypot_x)
@@ -369,11 +398,11 @@ def _combined_integrand(
         noncentrality * x_sq_over_one_plus_x_sq,
         axis=-1,
     )
-    numerator = np.sin(phase - q * u_arr) * np.exp(log_modulus)
+    numerator = np.sin(phase - z * u_arr) * np.exp(log_modulus)
 
-    # The apparent 0/0 at u=0 has this analytic limit. The helper performs the
-    # division only at nonzero nodes and inserts the limit at zero.
-    limit_at_zero = float(np.sum(weights * (df + noncentrality)) - q)
+    # The 0/0 at u = 0 has this limit. The helper divides at the nonzero nodes
+    # only and puts the limit at the zero ones.
+    limit_at_zero = float(np.sum(weights * (df + noncentrality)) - z)
     return _divide_with_fallback(numerator, u_arr, limit_at_zero)
 
 
@@ -382,7 +411,13 @@ def _tanhsinh_piece(
     a: float,
     b: float,
 ) -> tuple[float, float]:
-    """One tanh-sinh integration, with its convergence report turned into a raise."""
+    """
+    One tanh-sinh integration, with its convergence report turned into a raise.
+
+    SciPy reports a tanh-sinh failure in a field of the result object instead of
+    raising. This turns that field into the same exception QUADPACK failures
+    produce, so the dispatcher can treat the two routes alike.
+    """
     result = tanhsinh(
         integrand,
         a,
@@ -416,23 +451,40 @@ def _tanhsinh_piece(
 
 
 def _cdf_tanhsinh(
-    q: float,
+    z: float,
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
     domain_split: float | None = None,
 ) -> tuple[float, float]:
     """
-    ``Pr(Q <= q)`` from the unsplit Imhof integrand via tanh-sinh.
+    The CDF at standardized point ``z``, by tanh-sinh quadrature.
 
-    ``domain_split`` exists for the cross-check.  The integral over
-    ``[0, inf)`` does not depend on where it is cut, but cutting it puts a
-    different set of tanh-sinh nodes under the same integrand, so a run that
-    resolved the mass badly moves.
+    ``domain_split`` exists for the cross-check. The integral over ``[0, inf)``
+    has the same value however the interval is cut, but tanh-sinh places its
+    nodes to suit the interval it is given. A run over ``[0, s]`` plus a run
+    over ``[s, inf)`` therefore samples the integrand in different places than
+    one run over ``[0, inf)``. A first run that missed part of the mass then
+    gives a visibly different answer.
+
+    Parameters
+    ----------
+    z : float
+        Standardized evaluation point.
+    weights, df, noncentrality : numpy.ndarray
+        Standardized weights, degrees of freedom, and non-centrality
+        parameters.
+    domain_split : float or None, optional
+        ``None`` integrates ``[0, inf)`` in one run. A float cuts the domain
+        there and adds the two runs. Only the cross-check passes a value.
+
+    Returns
+    -------
+    The CDF at ``z`` and its estimated absolute error.
     """
 
     def integrand(u: FloatArray) -> FloatArray:
-        return _combined_integrand(u, q, weights, df, noncentrality)
+        return _combined_integrand(u, z, weights, df, noncentrality)
 
     if domain_split is None:
         integral, abs_error = _tanhsinh_piece(integrand, 0.0, np.inf)
@@ -445,7 +497,7 @@ def _cdf_tanhsinh(
 
 
 def _cdf_qawf(
-    q: float,
+    z: float,
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
@@ -455,24 +507,26 @@ def _cdf_qawf(
     limit: int,
 ) -> tuple[float, float]:
     """
-    ``Pr(Q <= q)`` and its estimated absolute error for a scalar ``q``.
+    The CDF at standardized point ``z``, by the head plus QAWF route.
 
-    The value is assembled from three integrations, so ``epsabs`` is divided
-    between them rather than handed to each in full.  Requesting the whole
-    budget three times makes the public tolerance a per-piece figure that the
-    end-to-end result can exceed, which is the accounting half of F6.  The
-    tails also cancel against each other, so their errors are added, not
-    combined in quadrature.
+    The answer is assembled from three integrations: the head on
+    ``[0, split]``, which does not oscillate, plus the cosine part and the sine
+    part of the tail on ``[split, inf)``. ``epsabs`` is an end-to-end budget,
+    so each piece gets a third of it rather than the whole.
 
-    ``epsrel`` reaches only the head.  QAWF accepts an absolute request alone.
+    ``epsrel`` reaches only the head. QAWF accepts an absolute target alone.
+
+    Returns
+    -------
+    The CDF at ``z`` and its estimated absolute error.
     """
-    params: tuple[object, ...] = (weights, df, noncentrality)
+    params = (weights, df, noncentrality)
     piece_epsabs = epsabs / 3.0
     head, head_error = _quad(
         _head_integrand,
         0.0,
         split,
-        (q, *params),
+        (z, *params),
         None,
         None,
         piece_epsabs,
@@ -485,7 +539,7 @@ def _cdf_qawf(
         np.inf,
         params,
         "cos",
-        q,
+        z,
         piece_epsabs,
         epsrel,
         limit,
@@ -497,7 +551,7 @@ def _cdf_qawf(
         np.inf,
         params,
         "sin",
-        q,
+        z,
         piece_epsabs,
         epsrel,
         limit,
@@ -509,9 +563,9 @@ def _cdf_qawf(
     return cdf, quadrature_error
 
 
-def _route(
-    name: str,
-    q: float,
+def _cdf_by_route(
+    route: str,
+    z: float,
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
@@ -519,45 +573,69 @@ def _route(
     epsabs: float,
     epsrel: float,
     limit: int,
-    independent: bool,
+    use_other_nodes: bool,
 ) -> tuple[float, float]:
     """
-    ``Pr(Q <= q)`` by the named quadrature route.
+    The CDF at standardized point ``z``, by the named quadrature route.
 
-    With ``independent`` set, the same integral is computed a second way: the
-    value is mathematically identical, but the nodes are not.  QAWF moves its
-    split point, which is where its cycle grid starts, so a run that missed
-    mass lands somewhere else. tanh-sinh cuts the domain in two, which
-    replaces its node set entirely.
+    With ``use_other_nodes`` set, the route computes the same integral in a
+    second way. The value is the same mathematically, but the nodes are not.
+    QAWF moves its split point, which is where its cycle grid starts, so a run
+    that missed mass lands somewhere else. tanh-sinh cuts the domain in two,
+    which replaces its node set.
+    :func:`_cross_check` sets this to True.
+
+    Parameters
+    ----------
+    route : str
+        Either :data:`_TANHSINH` or :data:`_QAWF`.
+    z : float
+        Standardized evaluation point.
+    weights, df, noncentrality : numpy.ndarray
+        Standardized weights, degrees of freedom, and non-centrality
+        parameters.
+    split, epsabs, epsrel, limit
+        Quadrature settings. Only the QAWF route reads them.
+    use_other_nodes : bool
+        Recompute with a different node placement, for the cross-check.
+
+    Returns
+    -------
+    The CDF at ``z`` and its estimated absolute error.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``route`` names no known route.
     """
-    if name == _TANHSINH:
+    if route == _TANHSINH:
         return _cdf_tanhsinh(
-            q,
+            z,
             weights,
             df,
             noncentrality,
-            _TANHSINH_CROSS_CHECK_SPLIT if independent else None,
+            _TANHSINH_CROSS_CHECK_SPLIT if use_other_nodes else None,
         )
-    elif name == _QAWF:
+    elif route == _QAWF:
         return _cdf_qawf(
-            q,
+            z,
             weights,
             df,
             noncentrality,
-            _QAWF_CROSS_CHECK_SPLIT if independent else split,
+            _QAWF_CROSS_CHECK_SPLIT if use_other_nodes else split,
             epsabs,
             epsrel,
             limit,
         )
     else:
-        raise NotImplementedError(f"unknown quadrature route: {name!r}")
+        raise NotImplementedError(f"unknown quadrature route: {route!r}")
 
 
 def _cross_check(
-    name: str,
+    route: str,
     value: float,
     error: float,
-    q: float,
+    z: float,
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
@@ -567,34 +645,34 @@ def _cross_check(
     limit: int,
 ) -> None:
     """
-    Confirm a quadrature result against a numerically independent recomputation.
+    Check a quadrature result against a second, independent computation.
 
-    This is the only guard here that can catch a failure mode nobody has
-    catalogued.  It exists because F4 established that QUADPACK's own
-    diagnostics are blind in this problem: it reports ``ier=0`` and an absolute
-    error of ``4e-15`` on a value that is wrong in the second decimal place.
-    An error estimate produced by the same nodes that missed the mass cannot
-    detect that the mass was missed.  A different set of nodes can.
+    This is the only guard here that can catch a failure nobody has catalogued.
+    It exists because QUADPACK's own diagnostics are blind in the way that
+    matters. QUADPACK has reported ``ier=0`` and an absolute error of ``4e-15``
+    on a value that was wrong in the second decimal place. An error estimate
+    built from the nodes that missed the mass cannot report that the mass was
+    missed. A different set of nodes can.
 
-    The two outcomes are deliberately different exceptions. A recomputation
-    that will not converge leaves this route unvalidated, which is the same
-    thing to the caller as this route not converging, so
-    :class:`_QuadratureNotConverged` is raised and the dispatcher may try the
-    other route. A recomputation that converges to a *different* answer means
-    one of the two is confidently wrong, which is not a reason to quietly
-    change method, so that raises :class:`RuntimeError` and stops.
+    The two ways this can end are different exceptions on purpose. A second
+    computation that does not converge leaves this route unchecked, which means
+    the same thing to the caller as this route not converging, so
+    :class:`_QuadratureNotConverged` is raised and the dispatcher can try the
+    other route. A second computation that converges to a *different* answer
+    means that one of the two is confidently wrong. That is not a reason to
+    change method quietly, so it raises :class:`RuntimeError` and stops.
 
     Raises
     ------
     _QuadratureNotConverged
-        If the independent recomputation does not converge.
+        If the second computation does not converge.
     RuntimeError
-        If the two routes converge to answers further apart than their combined
-        error estimates allow.
+        If the two answers are further apart than their combined error
+        estimates allow.
     """
-    other, other_error = _route(
-        name,
-        q,
+    other, other_error = _cdf_by_route(
+        route,
+        z,
         weights,
         df,
         noncentrality,
@@ -602,31 +680,32 @@ def _cross_check(
         epsabs,
         epsrel,
         limit,
-        independent=True,
+        use_other_nodes=True,
     )
 
     difference = abs(value - other)
-    # The estimates are what is on trial here, so they cannot be the whole
-    # allowance.  The floor covers the case where both routes report an error
-    # of exactly zero and still differ in the last bits.
+    # _CROSS_CHECK_FLOOR covers the case where both runs report an error of
+    # exactly zero and still differ in the last bits.
     allowance = max(error + other_error, _CROSS_CHECK_FLOOR)
     if difference > allowance * _ERROR_ESTIMATE_SAFETY_FACTOR:
         raise RuntimeError(
-            f"psum_chisq: the {name} quadrature did not survive its "
+            f"psum_chisq: the {route} quadrature did not survive its "
             f"independent cross-check. It returned {value!r} with an estimated "
             f"error of {error!r}, while recomputing the same integral with a "
             f"different node set returned {other!r} with an estimated error of "
             f"{other_error!r}. The difference is {difference!r}, which exceeds "
             f"the combined estimate by more than the safety factor of "
             f"{_ERROR_ESTIMATE_SAFETY_FACTOR}. At least one of the two is "
-            f"wrong. Standardized inputs: z={q!r}, "
+            f"wrong. Standardized inputs: z={z!r}, "
             f"weights={weights.tolist()}, df={df.tolist()}, "
-            f"noncentrality={noncentrality.tolist()}. Please report this case."
+            f"noncentrality={noncentrality.tolist()}.\n\n"
+            "PLEASE REPORT THIS CASE ON GITHUB:\n"
+            "https://github.com/bagibence/pgam_jax/issues/new"
         )
 
 
 def _cdf_approx(
-    q: float,
+    z: float,
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
@@ -637,70 +716,62 @@ def _cdf_approx(
     check: bool = True,
 ) -> tuple[float, float]:
     """
-    ``Pr(Q <= q)`` using whichever quadrature can actually resolve this input.
+    The CDF at standardized point ``z``, by whichever quadrature can resolve this input.
 
-    ``abs(q)`` picks the route that should work: tanh-sinh handles the small
-    frequencies where QAWF's first cycle steps over the whole integrand, and
-    QAWF handles everything above, where tanh-sinh needs impractically many
-    nodes.  That choice is a prediction, not a fact, and it is wrong for slowly
-    decaying integrands.  The envelope falls off like
-    ``u**-(1 + sum(df)/2)``, so a total of two degrees of freedom, which is what
-    mgcv's fractional-rank test produces at known dispersion, decays only like
-    ``u**-2`` and tanh-sinh will not converge on it anywhere in its own band.
+    ``abs(z)`` picks the route that is expected to work. tanh-sinh takes the
+    small frequencies, where QAWF's first oscillation cycle steps over the whole
+    integrand. QAWF takes everything above, where tanh-sinh needs impractically
+    many nodes.
 
-    A route that declines is therefore not fatal: the other one is tried.  What
-    makes that safe rather than a guess is the cross-check, which the fallback
-    result must pass even when the caller asked to skip checking.  QAWF is
-    silently wrong at small ``abs(q)`` on some structures, and falling back onto
-    an unvalidated wrong answer would reintroduce exactly the failure this
-    module exists to prevent.
+    That choice is a prediction, not a fact, and it is wrong when the integrand
+    decays slowly. The envelope falls off like ``u ** -(1 + sum(df) / 2)``, so
+    the smaller the total degrees of freedom, the longer the tail. At a total of
+    2, it decays only like ``u ** -2``, and tanh-sinh does not converge on that
+    anywhere in its own band.
+
+    A route that declines is not fatal. The other one is tried as a fallback.
+    When the fallback is tried, `check` is ignored, the cross-check always runs.
+    At small ``abs(z)``, QAWF can miss the region carrying the integral while
+    reporting success and a tiny error estimate. A fallback result is
+    therefore accepted only if the independent cross-check agrees.
 
     Raises
     ------
     RuntimeError
-        If neither route produces a validated value.  The message names both.
+        If neither route produces a checked value.
     """
-    if abs(q) <= _Z_SWITCH:
+    if abs(z) <= _Z_SWITCH:
         preferred, fallback = _TANHSINH, _QAWF
     else:
         preferred, fallback = _QAWF, _TANHSINH
 
-    arguments = (q, weights, df, noncentrality, split, epsabs, epsrel, limit)
+    arguments = (z, weights, df, noncentrality, split, epsabs, epsrel, limit)
 
     try:
-        value, error = _route(preferred, *arguments, independent=False)
+        value, error = _cdf_by_route(preferred, *arguments, use_other_nodes=False)
         if check:
             _cross_check(preferred, value, error, *arguments)
         return value, error
     except _QuadratureNotConverged as preferred_failure:
         try:
-            value, error = _route(fallback, *arguments, independent=False)
-            # Not conditional on ``check``.  The dispatcher predicted this route
-            # would be the wrong one, so its result is only admissible with
-            # independent evidence behind it.
+            value, error = _cdf_by_route(fallback, *arguments, use_other_nodes=False)
+            # Always cross-checking. This is the route the dispatcher
+            # predicted would be the wrong one, so its answer is allowed
+            # only with cross-check evidence behind it.
             _cross_check(fallback, value, error, *arguments)
             return value, error
         except _QuadratureNotConverged as fallback_failure:
             raise RuntimeError(
                 f"psum_chisq: neither quadrature route resolved this input. "
-                f"The {preferred} route was chosen for z={q!r} and reported: "
+                f"The {preferred} route was chosen for z={z!r} and reported: "
                 f"{preferred_failure}. Falling back to the {fallback} route "
                 f"reported: {fallback_failure}. Standardized inputs: "
                 f"weights={weights.tolist()}, df={df.tolist()}, "
                 f"noncentrality={noncentrality.tolist()}, where z and the "
-                f"weights are divided by the standard deviation of Q. Please "
-                f"report this case."
+                f"weights are divided by the standard deviation of Q.\n\n"
+                "PLEASE REPORT THIS CASE ON GITHUB:\n"
+                "https://github.com/bagibence/pgam_jax/issues/new"
             ) from fallback_failure
-
-
-def _broadcast(values: ArrayLike, size: int, name: str) -> FloatArray:
-    """Return ``values`` as a 1-D float array of length ``size``."""
-    arr = np.atleast_1d(np.asarray(values, dtype=float))
-    if arr.size == 1:
-        arr = np.repeat(arr, size)
-    if arr.size != size:
-        raise ValueError(f"'{name}' must have length 1 or {size}, got {arr.size}")
-    return arr
 
 
 def _validate_inputs(
@@ -709,29 +780,22 @@ def _validate_inputs(
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> None:
-    r"""
+    """
     Check that the arguments describe a sum this module can evaluate.
 
-    Out-of-domain values used to reach the integrand and come back as a QUADPACK
-    message about roundoff, which names the integrator rather than the argument
-    at fault.  Everything is therefore checked up front, and each message names
-    the argument it is about.
-
-    ``q`` may be infinite, which is a well-posed question answered exactly
-    elsewhere.  Nothing else may be: an infinite weight or degrees of freedom
-    describes no distribution.  NaN is never accepted.
-
-    An all-zero term list leaves ``Q`` degenerate at 0, with no distribution to
-    invert, so at least one weight must be non-zero.
+    - ``q`` must not be NaN.
+    - Weights must be finite, with at least one non-zero value.
+    - Degrees of freedom must be positive and finite.
+    - Non-centrality parameters must be non-negative and finite.
 
     Parameters
     ----------
     q : numpy.ndarray
-        Evaluation points, already coerced to a float array.
+        Evaluation points, already turned into a float array.
     weights, df, noncentrality : numpy.ndarray
-        The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
-        non-centrality parameters :math:`\delta_j^2`, already broadcast to a
-        common length.
+        The per-term weights ``w_j``, degrees of freedom ``nu_j``, and
+        non-centrality parameters ``delta_j^2``, already broadcast to a common
+        length.
 
     Raises
     ------
@@ -759,42 +823,43 @@ def _collapse_terms(
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> tuple[FloatArray, FloatArray, FloatArray]:
-    r"""
+    """
     Canonical term list: zero weights dropped, equal weights merged.
 
-    Both steps are exact.  A zero weight contributes :math:`0 \cdot X_j`, and
-    independent chi-squares sharing a weight add:
+    Both steps are exact. A term with a zero weight contributes ``0 * X_j``,
+    which is nothing. Independent chi-squares that share a weight add up:
 
-    .. math::
+        w X(nu_1, delta_1^2) + w X(nu_2, delta_2^2)
+            = w X(nu_1 + nu_2, delta_1^2 + delta_2^2)
 
-        w X(\nu_1, \delta_1^2) + w X(\nu_2, \delta_2^2)
-            = w X(\nu_1 + \nu_2, \delta_1^2 + \delta_2^2).
-
-    Weights merge on exact equality only.  A tolerance would silently replace a
+    Weights merge on exact equality only. A tolerance would quietly replace a
     mixture of nearby weights by a different distribution.
 
     Parameters
     ----------
     weights, df, noncentrality : numpy.ndarray
-        The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
-        non-centrality parameters :math:`\delta_j^2`.
+        The per-term weights ``w_j``, degrees of freedom ``nu_j``, and
+        non-centrality parameters ``delta_j^2``.
 
     Returns
     -------
     weights, df, noncentrality : numpy.ndarray
-        The surviving terms, ordered by increasing weight.  Empty when every
-        weight was zero; public input validation rejects that degenerate case.
+        The surviving terms, ordered by increasing weight. The result is empty
+        when every weight was zero, and :func:`_validate_inputs` has already
+        rejected that case.
     """
     keep = weights != 0.0
     weights, df, noncentrality = weights[keep], df[keep], noncentrality[keep]
 
     unique_weights, index = np.unique(weights, return_inverse=True)
-    n_unique = unique_weights.size
-    return (
-        unique_weights,
-        np.bincount(index, weights=df, minlength=n_unique),
-        np.bincount(index, weights=noncentrality, minlength=n_unique),
-    )
+
+    combined_df = np.zeros(unique_weights.size, dtype=float)
+    combined_noncentrality = np.zeros(unique_weights.size, dtype=float)
+
+    np.add.at(combined_df, index, df)
+    np.add.at(combined_noncentrality, index, noncentrality)
+
+    return unique_weights, combined_df, combined_noncentrality
 
 
 def _standard_deviation(
@@ -802,42 +867,35 @@ def _standard_deviation(
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> float:
-    r"""
-    Standard deviation of ``Q``, formed without squaring raw-scale inputs.
+    """
+    Standard deviation of ``Q``, formed without squaring the raw weights.
 
     The variance is
 
-    .. math::
+        sd^2 = sum_j w_j^2 (2 nu_j + 4 delta_j^2)
 
-        \mathrm{sd}^2 =
-            \sum_j w_j^2 \big(2 \nu_j + 4 \delta_j^2\big),
+    Evaluating this directly can make ``sd`` infinite for very large weights or zero
+    for very small weights.
+    An infinite ``sd`` sends every normalized weight and the standardized point to zero,
+    and the module then returns a CDF of exactly ``0.5`` for every input.
+    A zero ``sd`` make standardization infinite or undefined.
 
-    but evaluating that directly squares the raw weights, so it overflows to
-    infinity once the sum passes the largest representable double and underflows
-    to zero for very small weights.  Both are silent: an infinite ``sd`` sends
-    every normalised weight and the standardised frequency to zero, which returns
-    a raw CDF of exactly ``0.5``.
-
-    Factoring out the largest magnitude in the problem avoids both failure modes
-    over the practically relevant float64 range.  Every ratio ``w_j / scale`` is
-    then at most one, so no square can overflow, and the term attaining the
-    maximum contributes at least ``2 nu_j``, so the scaled sum cannot underflow
-    to zero either.
+    Dividing by the largest absolute weight before squaring avoids both failures.
 
     Parameters
     ----------
     weights, df, noncentrality : numpy.ndarray
-        The per-term weights :math:`w_j`, degrees of freedom :math:`\nu_j`, and
-        non-centrality parameters :math:`\delta_j^2`.
+        The per-term weights ``w_j``, degrees of freedom ``nu_j``, and
+        non-centrality parameters ``delta_j^2``.
 
     Returns
     -------
     float
-        The standard deviation of ``Q``.  Strictly positive, since the caller has
-        already checked that at least one weight is non-zero.
+        The standard deviation of ``Q``. It is strictly positive, because the
+        caller has already checked that at least one weight is non-zero.
     """
     scale = float(np.max(np.abs(weights)))
-    # The same variance measured in units of ``scale``, so of order sqrt(sum df).
+    # The same variance, measured in units of ``scale``, so of order sqrt(sum df).
     unit = np.sqrt(np.sum((weights / scale) ** 2 * (2.0 * df + 4.0 * noncentrality)))
     return scale * float(unit)
 
@@ -850,11 +908,22 @@ def _two_chi1_angular_integrand(
     lower_tail: bool,
 ) -> float:
     """
-    Angular CDF or survival integrand for two positive central chi-squares.
+    Return the requested tail probability conditional on one polar angle.
 
-    If ``X1`` and ``X2`` are independent ``chi2_1`` variables, write their
-    underlying normals in polar coordinates.  The squared radius is ``chi2_2``
-    and the angle is uniform, which leaves a smooth integral over one quadrant.
+    For ``Q = a X1 + b X2``, the polar reduction described in
+    :func:`_two_chi1_probability` gives
+
+        Q = R^2 g(theta)
+        g(theta) = a cos^2(theta) + b sin^2(theta),
+
+    where ``R^2`` is ``chi2_2``. Therefore, at a fixed angle,
+
+        Pr(Q > z | theta) = exp(-z / [2 g(theta)])
+        Pr(Q <= z | theta) = 1 - exp(-z / [2 g(theta)]).
+
+    Here ``a`` and ``b`` are ``first_weight`` and ``second_weight``. The lower
+    tail uses ``-expm1`` to remain accurate when its probability is close to
+    zero. The caller averages this conditional probability over the angle.
     """
     cosine = np.cos(theta)
     cosine_squared = cosine * cosine
@@ -875,14 +944,69 @@ def _two_chi1_probability(
     limit: int,
 ) -> tuple[float, float]:
     """
-    Evaluate one tail of two positive central ``chi2_1`` terms.
+    Compute one tail of two positive central ``chi2_1`` terms.
 
-    The requested tail is integrated directly.  In particular, the lower-tail
-    integrand uses ``-expm1`` rather than subtracting a survival probability
-    close to one.  The quadrant is split where the two weighted angular
-    contributions are equal and, when it lies inside the range of angular
-    scales, where that scale equals ``z``.  These points expose the narrow
-    endpoint layer that appears when one weight is almost zero.
+    Let
+
+        Q = a X1 + b X2,
+
+    where ``X1`` and ``X2`` are independent ``chi2_1`` variables. Write
+    ``X1 = Z1^2`` and ``X2 = Z2^2`` for independent standard normals, then
+    express the random point ``(Z1, Z2)`` in polar coordinates:
+
+        Z1 = R cos(theta)
+        Z2 = R sin(theta)
+        Q = R^2 [a cos^2(theta) + b sin^2(theta)].
+
+    The standard bivariate normal is rotationally symmetric. Its angle is
+    uniform and independent of ``R``, while ``R^2`` is ``chi2_2``. Conditioning
+    on the angle therefore gives
+
+        Pr(Q > z | theta)
+            = exp(-z / [2 (a cos^2(theta) + b sin^2(theta))]).
+
+    All four quadrants are equivalent after squaring, so the upper-tail
+    probability is
+
+        Pr(Q > z)
+            = (2 / pi) integral_0^(pi/2) Pr(Q > z | theta) dtheta.
+
+    The lower tail replaces the conditional survival probability by its
+    complement. The requested tail is integrated directly to avoid subtracting
+    probabilities close to one.
+
+    The weights are sorted so that ``a <= b``. The quadrant is split at angles
+    that expose features adaptive quadrature could otherwise miss:
+
+    - ``atan(sqrt(a / b))``, where the two weighted contributions are equal,
+    - ``pi / 4``, a fixed interior landmark,
+    - the angle where the angular scale equals ``z``, when ``a < z < b``,
+    - an additional geometric-mean angle when these features lie near zero.
+
+    These breakpoints do not change the integral. They isolate the narrow
+    endpoint layer that appears when one weight is much smaller than the other.
+    The absolute error budget is divided between the resulting intervals, and
+    both the summed integral and its error are normalized by ``2 / pi``.
+
+    Parameters
+    ----------
+    z : float
+        Positive standardized evaluation point.
+    weights : numpy.ndarray
+        Two positive standardized weights.
+    lower_tail : bool
+        Whether to compute ``Pr(Q <= z)`` instead of ``Pr(Q > z)``.
+    epsabs, epsrel : float
+        Absolute and relative quadrature targets.
+    limit : int
+        Maximum number of quadrature subintervals for each angular piece.
+
+    Returns
+    -------
+    probability : float
+        Probability in the requested tail.
+    error : float
+        Estimated absolute error of that probability.
     """
     first_weight, second_weight = sorted(map(float, weights))
     arguments: tuple[object, ...] = (
@@ -892,9 +1016,6 @@ def _two_chi1_probability(
         lower_tail,
     )
 
-    # Multiplication by 2 / pi turns the angular integral into a probability.
-    # Dividing epsabs between every interval keeps their combined probability
-    # error within the caller's end-to-end absolute budget.
     equal_contributions = np.arctan(np.sqrt(first_weight / second_weight))
     breakpoints = [0.0, float(equal_contributions), np.pi / 4.0, np.pi / 2.0]
     endpoint_layer = float(equal_contributions)
@@ -907,6 +1028,10 @@ def _two_chi1_probability(
         breakpoints.append(float(np.sqrt(endpoint_layer * np.pi / 4.0)))
     breakpoints = sorted(set(breakpoints))
 
+    # The angular integral becomes a probability after multiplication by 2 / pi,
+    # so an angular error of epsabs * pi / 2 is a probability error of epsabs.
+    # Splitting that between the pieces keeps their total inside the caller's
+    # end-to-end absolute budget.
     n_intervals = len(breakpoints) - 1
     piece_epsabs = epsabs * np.pi / (2.0 * n_intervals)
     pieces = [
@@ -936,65 +1061,78 @@ def _reduce(
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> float | None:
-    r"""
-    ``Pr(Q <= q)`` in closed form where one exists, ``None`` otherwise.
+    """
+    The CDF at standardized point ``z`` in closed form where one exists,
+    ``None`` otherwise.
 
-    Three shapes are exact, and the last of them is the one the quadrature is
-    worst on, so this runs before any numerical decision is made.
+    Three shapes are exact. The quadrature is at its worst on the last of them,
+    so this function runs before any numerical decision is made.
 
-    **One term.**  :math:`w X` is a scaled (non-central) chi-square.  Dividing by
-    a negative weight reverses the inequality, so the tails swap.
+    **One term.** ``w X`` is a scaled chi-square, central or non-central.
+    Dividing by a negative weight reverses the inequality, so the tails swap.
 
-    **All weights positive, at a non-positive point.**  :math:`Q` is a positive
-    combination of positive variables, hence positive almost surely, so the
-    lower-tail probability is exactly zero.  Degrees of freedom are validated
-    positive, and a non-centrality only shifts mass further right, so neither
-    matters here.
+    **All weights positive, at a non-positive point.** ``Q`` is then a positive
+    combination of positive variables, so it is positive with probability one
+    and the lower tail is exactly zero. The degrees of freedom are already
+    checked positive, and a non-centrality only moves mass further right, so
+    neither changes this.
 
-    **Two terms of opposite sign, both central, at exactly zero.**  Writing
-    :math:`Q = w_+ X_m + w_- Y_n` with :math:`w_+ > 0 > w_-`,
+    **Two terms of opposite sign, both central, at exactly zero.** Write
+    ``Q = w_pos X_m + w_neg Y_n`` with ``w_pos > 0 > w_neg``. Then
 
-    .. math::
+        Pr(Q > 0) = Pr(w_pos X_m > -w_neg Y_n)
+                  = Pr(F_{m,n} > -w_neg n / (w_pos m))
 
-        \Pr(Q > 0) = \Pr(w_+ X_m > -w_- Y_n)
-                   = \Pr\!\left(F_{m,n} > \frac{-w_-\, n}{w_+\, m}\right),
-
-    which holds for any positive real :math:`m` and :math:`n`, not only integer
-    degrees of freedom.  This is mgcv's estimated-dispersion smooth-term test
-    after equal positive weights have been merged: with numerator rank ``r``,
-    denominator degrees of freedom ``k0`` and test statistic ``d``, the weights
-    are ``[1, -d/k0]`` and the p-value is ``f.sf(d/r, r, k0)``.
+    because the ratio of two independent chi-squares, each divided by its
+    degrees of freedom, is an F variable. This holds for any positive real ``m``
+    and ``n``, not only integers.
 
     Parameters
     ----------
     z : float
-        Standardised evaluation point :math:`q / \mathrm{sd}`.
+        Standardized evaluation point ``q / sd``.
     weights, df, noncentrality : numpy.ndarray
-        Standardised weights :math:`w_j / \mathrm{sd}`, degrees of freedom
-        :math:`\nu_j` and non-centrality parameters :math:`\delta_j^2`, already
-        collapsed to a canonical term list ordered by increasing weight.
+        Standardized weights ``w_j / sd``, degrees of freedom ``nu_j``, and
+        non-centrality parameters ``delta_j^2``, already collapsed to a
+        canonical term list ordered by increasing weight.
 
     Returns
     -------
     float or None
-        The lower-tail probability, or ``None`` when no closed form applies, in
-        which case the caller consults :func:`_regime_gate`.
+        The lower-tail probability, or ``None`` when no closed form applies. The
+        caller then goes on to :func:`_regime_gate`.
     """
+    if np.any(df <= 0.0):
+        raise ValueError("`df` must be positive")
+
     central = not np.any(noncentrality)
 
+    # one term: w X
     if weights.size == 1:
-        x = z / weights[0]
-        if weights[0] > 0.0:
-            if central:
-                return float(chi2.cdf(x, df[0]))
-            return float(ncx2.cdf(x, df[0], noncentrality[0]))
-        if central:
-            return float(chi2.sf(x, df[0]))
-        return float(ncx2.sf(x, df[0], noncentrality[0]))
+        weight = weights[0]
+        x = z / weight
 
+        if central:
+            distribution = chi2(df[0])
+        else:
+            distribution = ncx2(df[0], noncentrality[0])
+
+        # if w > 0: Pr(Q <= z) = Pr(wX <= z) = Pr(X <= z/w) -> use cdf
+        # if w < 0: Pr(Q <= z) = Pr(wX <= z) = Pr(X >= z/w) -> use sf = 1 - cdf
+        if weight > 0.0:
+            probability = distribution.cdf(x)
+        elif weight < 0.0:
+            probability = distribution.sf(x)
+        else:
+            raise RuntimeError("Single chi2 weight must be non-zero.")
+
+        return probability
+
+    # all weights positive evaluated at a non-positive point
     if np.all(weights > 0.0) and z <= 0.0:
         return 0.0
 
+    # rewrite as an F distribution
     if z == 0.0 and central and weights.size == 2 and weights[0] < 0.0 < weights[1]:
         w_neg, w_pos = float(weights[0]), float(weights[1])
         n, m = float(df[0]), float(df[1])
@@ -1009,41 +1147,49 @@ def _regime_gate(
     df: FloatArray,
     noncentrality: FloatArray,
 ) -> None:
-    r"""
-    Refuse anything outside the regime this module is validated on.
+    """
+    Refuse anything outside the regime this module is checked on.
 
-    What reaches the quadrature is only what the GAM smooth-term tests produce:
-    positive weights at any finite point (known dispersion, ``q = d``), and
-    mixed-sign weights at exactly zero (estimated dispersion, the random
-    denominator moved to the left-hand side).  Both central.
+    Only what the GAM smooth-term tests produce is allowed through to the
+    quadrature. There are two such shapes, and both are central:
 
-    Everything else is refused rather than integrated, because outside those two
-    shapes there is no oracle for the answer, and the integrator's own error
-    estimate is not one: it reports success with a tiny absolute error while
-    being wrong in the second decimal place.  A single-term list never arrives
-    here, since :func:`_reduce` answers all of those exactly.
+    - positive weights at any finite point, which is the test at known
+      dispersion, where ``q`` is the test statistic and ``z = q / sd``
+    - weights of mixed sign at exactly zero, which is the test at estimated
+      dispersion, where the random denominator has been moved to the left-hand
+      side of the comparison.
+
+    Anything else is refused because it is outside the validated GAM contract.
+    An integrator's own error estimate is not always trustworthy: QAWF has
+    reported an error below 5e-15 for a result wrong by 1.5e-2.
+    A single-term list never arrives here, because :func:`_reduce` answers
+    all of those exactly.
 
     Parameters
     ----------
     z : float
-        Standardised evaluation point :math:`q / \mathrm{sd}`.
+        Standardized evaluation point ``q / sd``.
     weights, df, noncentrality : numpy.ndarray
-        Standardised weights, degrees of freedom and non-centrality parameters,
-        as passed to :func:`_reduce`.
+        Standardized weights, degrees of freedom, and non-centrality
+        parameters, as passed to :func:`_reduce`.
+
+    Returns
+    -------
+    None if the parameter combination is allowed. Raises otherwise.
 
     Raises
     ------
     NotImplementedError
-        If the standardised inputs fall outside the two supported shapes.  The
-        message carries them, since the raw inputs do not determine what the
-        method sees.
+        If the standardized inputs fall outside the two supported shapes.
     """
     all_positive = bool(np.all(weights > 0.0))
     mixed_signs = bool(np.any(weights > 0.0) and np.any(weights < 0.0))
     central = not np.any(noncentrality)
 
+    # known scale / dispersion
     if all_positive and central:
         return
+    # estimated dispersion
     elif mixed_signs and central and z == 0.0:
         return
     else:
@@ -1059,8 +1205,7 @@ def _regime_gate(
 
 
 def _cdf_single(
-    q: float,
-    sd: float,
+    z: float,
     std_weights: FloatArray,
     df_arr: FloatArray,
     ncp_arr: FloatArray,
@@ -1073,32 +1218,32 @@ def _cdf_single(
     """
     The requested tail and its absolute error at one point.
 
-    Takes the raw ``q`` and the standard deviation of ``Q``, and standardises
-    them here.  The weights arrive already standardised, which is what the
-    ``std_`` prefix marks.  Closed-form answers return a zero error, since
-    nothing was integrated to obtain them.  The specialized two-``chi2_1``
-    reduction integrates the requested tail directly.
+    The evaluation point ``z = q / sd`` and the weights arrive standardized.
+    The ``std_`` prefix distinguishes the weights from their unscaled values.
+
+    The order of the branches is the whole control flow of the module. An
+    infinite point, then the closed forms, then the two-``chi2_1`` angular
+    reduction, then the regime gate and the characteristic-function quadrature.
+    A closed form returns an error of exactly zero, because nothing was
+    integrated to get it.
     """
-    z = float(q) / sd
-    # An infinite z is q at infinitely many standard deviations, which is
-    # the same statement as an infinite q.  Both are exact, and neither is
-    # a question the quadrature can be asked.
+    # An infinite z is an evaluation point infinitely many standard deviations
+    # from zero. Its probability is exact.
     if np.isposinf(z):
         return (1.0 if lower_tail else 0.0), 0.0
     if np.isneginf(z):
         return (0.0 if lower_tail else 1.0), 0.0
     if not np.isfinite(z):
-        raise RuntimeError(
-            f"standardized evaluation point is not a number: q={q}, sd={sd}"
-        )
+        raise RuntimeError(f"standardized evaluation point is not a number: z={z}")
 
+    # cases we can analytically reduce and don't need numerical integration
     reduced = _reduce(z, std_weights, df_arr, ncp_arr)
     if reduced is not None:
         return (reduced if lower_tail else 1.0 - reduced), 0.0
 
-    central = not np.any(ncp_arr)
+    # sum of two central chi2_1 variables with positive weights is better evaluated using a bounded angular integral
     two_positive_chi1 = (
-        central
+        not np.any(ncp_arr)  # central
         and std_weights.size == 2
         and bool(np.all(std_weights > 0.0))
         and bool(np.all(df_arr == 1.0))
@@ -1113,7 +1258,10 @@ def _cdf_single(
             limit,
         )
 
+    # raise if we're trying to integrate something that's not supported
     _regime_gate(z, std_weights, df_arr, ncp_arr)
+
+    # numerical integral
     cdf, cdf_error = _cdf_approx(
         z,
         std_weights,
@@ -1133,53 +1281,51 @@ def _finalize(
     errors: FloatArray,
 ) -> FloatArray:
     """
-    Bring computed probabilities into ``[0, 1]``, or refuse to.
+    Validate and clean up computed probabilities.
 
-    Two things happen here, and both are about the same fact: a quadrature
-    result is a number plus an uncertainty, and reading it as though it were
-    exact produces nonsense at the ends of the range.
+    A quadrature result is a number plus an uncertainty. Two safeguards are applied:
 
-    **The range check.**  A survival probability computed as ``0.5`` minus an
-    integral can land just outside ``[0, 1]`` by less than its own error
-    estimate.  That is arithmetic, not a bug, and clipping it is the correct
-    reading.  Landing outside by more than the error allowance is a bug, and
-    that still raises.  The old check had no allowance at all and rejected an
-    overshoot of ``-1.3e-15`` on a value whose estimated error was ``3.8e-13``.
+    1) For a probability with estimated absolute error ``e``, an excursion outside
+    ``[0, 1]`` is allowed up to
 
-    The allowance never falls below :data:`_RANGE_CHECK_FLOOR`, or an estimate
-    of exactly zero would reject a one-ulp overshoot.  A rank-4 smooth at a
-    near-zero statistic does exactly that.
+        max(_ERROR_ESTIMATE_SAFETY_FACTOR * e, _RANGE_CHECK_FLOOR)
 
-    **The floor.** Once the true probability drops below the resolution of the
-    quadrature, what comes back is not a small number but noise, and noise is
-    not monotone.  For ``[1, 0.6, 0.4]`` with ``df=[3, 1, 1]`` the survival
-    function is genuine at ``q = 60`` (``1.2e-12``, against an estimated error
-    of ``4.4e-13``) and pure noise by ``q = 80`` (``-1.3e-15``, against
-    ``3.7e-13``).  Anything that does not exceed its own error estimate is
-    reported as ``0.0`` with a warning, which is both honest and monotone.
+    Larger excursions raise because they indicate a numerical failure.
+    Smaller ones are consistent with the reported numerical uncertainty and are
+    clipped to the nearest endpoint.
+    Without :data:`_RANGE_CHECK_FLOOR` an error estimate of exactly zero could
+    reject an overshoot of one ULP.
 
-    The floor is driven by the error estimate rather than by a fixed constant so
-    that it cannot touch the exact closed forms.  Those return an error of
-    exactly zero, having integrated nothing, and their deep-tail values are good
-    to full relative precision.
+    2) If ``e > 0`` and the probability ``p`` satisfies
+
+         p < _FLOOR_SAFETY_FACTOR * e
+
+    the value is replaced with ``0.0`` and a warning is emitted.
+    With the current safety factor of one, this means the estimated error is
+    larger than the probability itself, so the quadrature cannot distinguish it
+    from zero.
 
     Parameters
     ----------
     probabilities : numpy.ndarray
         The probabilities in the tail the caller asked for.
     errors : numpy.ndarray
-        Estimated absolute error of each, zero where the answer is exact.
+        Corresponding estimated absolute errors. Exact reductions report zero.
 
     Returns
     -------
     numpy.ndarray
-        The probabilities, clipped and floored.
+        Probabilities clipped to ``[0, 1]``, with unresolved values replaced by zero.
+
+    Warns
+    -----
+    UserWarning
+        If any probability is replaced by zero because it is unresolved.
 
     Raises
     ------
     RuntimeError
-        If any probability lies outside ``[0, 1]`` by more than its error
-        allowance.
+        If any probability lies outside ``[0, 1]`` by more than its allowance.
     """
     allowance = np.maximum(errors * _ERROR_ESTIMATE_SAFETY_FACTOR, _RANGE_CHECK_FLOOR)
     overshoot = np.maximum(-probabilities, probabilities - 1.0)
@@ -1198,7 +1344,8 @@ def _finalize(
         warnings.warn(
             "psum_chisq: the probability is smaller than the quadrature can "
             "resolve at this tolerance and has been returned as 0.0. Tighten "
-            "epsabs to resolve it, or read the result as an upper bound.",
+            "epsabs to try to resolve it. Otherwise, treat 0.0 as an unresolved "
+            "small value rather than an exact zero.",
             stacklevel=3,
         )
         probabilities = np.where(unresolved, 0.0, probabilities)
@@ -1217,61 +1364,66 @@ def psum_chisq(
     limit: int = 200,
     check: bool = True,
 ) -> float | FloatArray:
-    r"""
+    """
     Distribution function of a weighted sum of chi-squared variables.
 
-    Evaluates :math:`\Pr(Q \le q)` (or the upper tail) for
-    :math:`Q = \sum_j w_j X_j`, where
-    :math:`X_j \sim \chi^2_{\nu_j}(\delta_j^2)`, by numerically inverting the
-    characteristic function of ``Q``.
+    By default, computes ``Pr(Q > q)`` for ``Q = sum_j w_j X_j``, where
+    ``X_j`` are independent chi-square variables with ``nu_j`` degrees of
+    freedom and non-centrality ``delta_j^2``.
+    Where no specialized reduction applies, the probability is computed by
+    numerical inversion of the characteristic function of ``Q`` using the
+    Gil-Pelaez/Imhof formula.
 
     Parameters
     ----------
     q : array_like
-        Point(s) at which to evaluate the distribution.  May be infinite, which
-        is answered exactly.  Must not be NaN.
+        The point or points at which to evaluate the distribution. An infinite
+        value is allowed and is answered exactly. NaN is not allowed.
     weights : array_like
-        The weights :math:`w_j`; may be positive or negative, and must be finite.
-        At least one must be non-zero.
+        The weights ``w_j``. They can be positive or negative, and must be
+        finite. At least one must be non-zero.
     df : array_like, optional
-        Degrees of freedom :math:`\nu_j` (must be positive and finite).  A scalar
-        is applied to every term.  Defaults to ``1``.
+        Degrees of freedom ``nu_j``, positive and finite. A scalar is applied to
+        every term. Defaults to ``1``.
     noncentrality : array_like, optional
-        Non-centrality parameters :math:`\delta_j^2` (must be non-negative and
-        finite).  A scalar is applied to every term.  Defaults to ``0``
-        (central).
+        Non-centrality parameters ``delta_j^2``, non-negative and finite. A
+        scalar is applied to every term. Defaults to ``0``, which is central.
     lower_tail : bool, optional
-        If ``True`` return :math:`\Pr(Q \le q)`; otherwise return the survival
-        function :math:`\Pr(Q > q)`.  Defaults to ``False`` (upper tail), the
-        convention used for p-values.
+        If ``True``, return ``Pr(Q <= q)``. Otherwise return the survival
+        function ``Pr(Q > q)``. Defaults to ``False``, returning the upper tail
+        used for smooth-term p-values in the GAMs supported here.
     epsabs, epsrel : float, optional
-        Absolute and relative accuracy targets.  ``epsabs`` is an end-to-end
-        budget: the oscillatory route assembles its answer from three
-        integrations and divides it between them.  For that route, ``epsrel``
-        reaches only the non-oscillatory head, since QUADPACK's Fourier
-        integrator accepts an absolute request alone.  The two-term angular
-        reduction applies both tolerances to its two finite pieces.
-        ``epsabs`` also sets the resolution floor described below.
+        Absolute and relative accuracy targets for QAWF and the two-term angular
+        routes. ``epsabs`` is an end-to-end budget. The oscillatory route assembles
+        its answer from three integrations and divides the budget between them.
+        On that route ``epsrel`` reaches only the head, because QUADPACK's Fourier
+        integrator accepts an absolute target alone. The two-term angular reduction
+        applies both targets to each of its pieces. ``epsabs`` also sets the resolution
+        floor described under Warns.
+        The tanh-sinh route does not use these. It uses fixed, calibrated absolute
+        and relative tolerances.
     limit : int, optional
-        Maximum number of quadrature subintervals.
+        Maximum number of quadrature subintervals for the QAWF and two-term angular
+        routes. The tanh-sinh route does not use this argument. It has a fixed maximum
+        refinement level.
     check : bool, optional
-        Recompute every characteristic-function quadrature result by a
-        numerically independent route and raise if the two disagree by more
-        than their combined error estimates allow.  Defaults to ``True``, and
-        roughly doubles the cost.  It is worth that: the integrator's own
-        diagnostics report success with an absolute error of ``4e-15`` on
-        values that are wrong in the second decimal place, so nothing else
-        here can catch a failure mode that has not already been catalogued.  A
-        result obtained from the route that ``q`` did *not* select is
-        cross-checked even when this is ``False``.  The positive,
-        two-``chi2_1`` angular reduction is a bounded non-oscillatory integral
-        and uses its direct quadrature error instead.
+        Recompute every characteristic-function result by a second, independent
+        route, and raise if the two disagree by more than their combined error
+        estimates allow. Defaults to ``True``, and roughly doubles the cost.
+        That cost is worth paying, because the diagnostics of the integrator
+        report success with an absolute error of ``4e-15`` on values that are
+        wrong in the second decimal place. Nothing else here can catch a failure
+        that is not already catalogued. A result from the route that ``z`` did
+        *not* select is cross-checked even when this is ``False``.
+        The angular reduction for two positive ``chi2_1`` terms does not use this
+        cross-check. It integrates a bounded non-oscillatory function over a finite
+        interval and uses the quadrature routine’s error estimate directly.
 
     Returns
     -------
     float or numpy.ndarray
-        The (survival) probability.  A Python ``float`` is
-        returned for scalar ``q``; otherwise an array matching ``q``.
+        The probability, in the lower or the upper tail. A scalar ``q`` gives a
+        Python ``float``. Anything else gives an array with the shape of ``q``.
 
     Raises
     ------
@@ -1281,59 +1433,44 @@ def psum_chisq(
         If the sum is outside the supported regime described in the notes.
     RuntimeError
         If no quadrature route resolves the input, or if a result fails its
-        independent cross-check.  Both messages name what was tried.
+        independent cross-check. Both messages name what was tried.
 
     Warns
     -----
     UserWarning
         If the probability is smaller than the quadrature can resolve at the
-        requested ``epsabs``, in which case ``0.0`` is returned.  Below that
-        resolution what comes back is not a small number but noise, which is
-        not even monotone, so it is reported as zero instead.  Tightening
-        ``epsabs`` resolves more of the tail.  The exact closed forms below
-        integrate nothing and are never subject to this.
+        requested ``epsabs``. ``0.0`` is returned in that case. Below that
+        resolution what comes back is not a small number but noise, so it is
+        reported as zero instead. Setting ``epsabs`` may resolve smaller
+        probabilities, but require more computation.
+        The exact closed forms integrate nothing and never trigger this warning.
 
     Notes
     -----
     The supported regime is the one the GAM smooth-term tests produce: weights
     that are all positive at any finite ``q``, and weights of mixed sign at
-    exactly ``q = 0``, both with zero non-centrality.  Anything else raises,
-    rather than returning a number no oracle has checked.
+    exactly ``q = 0``, both with zero non-centrality. Anything else raises,
+    instead of returning a number that no oracle has checked.
 
-    Several shapes never reach characteristic-function quadrature.  A single
+    Several shapes never reach the characteristic-function quadrature. A single
     term of either sign, positive weights at a non-positive ``q``, and two
-    central terms of opposite sign at ``q = 0`` have closed forms.  Two
-    positive central terms with one degree of freedom each use a bounded
-    angular integral, with the requested tail evaluated directly.
-    Non-centrality is therefore honoured only for a single term, where the
-    answer is a non-central chi-square.
+    central terms of opposite sign at ``q = 0`` all have closed forms. Two
+    positive central terms with one degree of freedom each use a bounded angular
+    integral, which evaluates the requested tail directly. A non-centrality is
+    therefore honored only for a single term, where the answer is a non-central
+    chi-square.
 
-    Terms are canonicalised before anything is evaluated: zero-weight terms are
-    dropped and equal weights are merged, both exactly.
+    Terms are put in canonical form before anything is evaluated. Zero-weight
+    terms are dropped and equal weights are merged, both exactly.
 
-    There is no additive normal term.  Davies' general form carries one,
-    :math:`Q = \sum_j w_j X_j + \sigma Z`, and mgcv's ``psum.chisq`` exposes it
-    as ``sigz``. A GAM test statistic is a pure quadratic form in the coefficients,
-    so it never produces one, and no mgcv call site passes a non-zero ``sigz``.
-    The argument was therefore removed rather than kept as a value that must always
-    be zero.
+    There is no additive normal term. The general form of Davies AS 155 carries
+    one, ``Q = sum_j w_j X_j + sigma Z``. A GAM test statistic is a pure quadratic
+    form in the coefficients, so it never produces such a term.
+    The argument was therefore removed rather than kept as a value that must
+    always be zero.
 
-    The problem is nondimensionalised before any numerical decision is made:
-    ``q`` becomes ``z = q / sd`` and the weights are divided by ``sd``, the
-    standard deviation of ``Q``.  Two quadrature routes then share the range of
-    ``z``: a tanh-sinh rule on the unsplit integrand where ``z`` is small enough
-    that an oscillatory cycle would step over the whole integrand, and a
-    non-oscillatory head on ``[0, 1]`` plus two semi-infinite Fourier tails
-    everywhere else.
-
-    Which of the two is tried first is a prediction from ``z``, and it is wrong
-    for slowly decaying integrands: the envelope falls off like
-    ``u**-(1 + sum(df)/2)``, so a total of two degrees of freedom decays only
-    like ``u**-2`` and tanh-sinh will not converge on it.  A route that reports
-    it cannot resolve the integrand is therefore not fatal; the other one is
-    tried, and its answer is admitted only if it survives the cross-check.  A
-    narrow band can remain for other slowly decaying mixtures where no two
-    independent routes both converge.  That raises.
+    Before integration, q and the weights are divided by the standard deviation
+    of Q. Tanh-sinh is tried near the resulting z = q / sd = 0, and QAWF elsewhere.
     """
     weight_arr = np.atleast_1d(np.asarray(weights, dtype=float))
     n_terms = int(weight_arr.size)
@@ -1344,9 +1481,9 @@ def psum_chisq(
     _validate_inputs(q_arr, weight_arr, df_arr, ncp_arr)
     weight_arr, df_arr, ncp_arr = _collapse_terms(weight_arr, df_arr, ncp_arr)
 
-    # Nondimensionalize: substituting t = sd * u maps the inversion integral
-    # onto itself with weights w/sd, frequency z = q/sd and a split point of 1.
-    # Every numerical decision below is then made on unit-free quantities, so
+    # Remove the units: substituting t = sd * u rewrites the inversion integral
+    # in the same form using weights w/sd and frequency z = q/sd, with a split
+    # point of 1. Every numerical decision below is then made on pure numbers, so
     # the result cannot depend on the units of q and the weights.
     sd = _standard_deviation(weight_arr, df_arr, ncp_arr)
     std_weights = weight_arr / sd
@@ -1354,9 +1491,9 @@ def psum_chisq(
     out = np.empty(q_arr.shape, dtype=float)
     errors = np.empty(q_arr.shape, dtype=float)
     for i in range(q_arr.size):
+        z = float(q_arr.flat[i]) / sd
         probability, probability_error = _cdf_single(
-            float(q_arr.flat[i]),
-            sd,
+            z,
             std_weights,
             df_arr,
             ncp_arr,

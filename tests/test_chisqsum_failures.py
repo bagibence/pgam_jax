@@ -931,9 +931,9 @@ def test_cross_check_counts_a_second_computation(monkeypatch):
     calls = []
     truthful = chisqsum._cdf_qawf
 
-    def counting(q, weights, df, ncp, split, *args):
+    def counting(z, weights, df, ncp, split, *args):
         calls.append(split)
-        return truthful(q, weights, df, ncp, split, *args)
+        return truthful(z, weights, df, ncp, split, *args)
 
     monkeypatch.setattr(chisqsum, "_cdf_qawf", counting)
     psum_chisq(5.0, [1.0, 0.6, 0.4], df=[3, 1, 1])
@@ -1054,9 +1054,9 @@ def test_fallback_is_cross_checked_even_when_checking_is_off():
     calls = []
     truthful = chisqsum._cdf_qawf
 
-    def counting(q, weights, dof, ncp_, split, *args):
+    def counting(z, weights, dof, ncp_, split, *args):
         calls.append(split)
-        return truthful(q, weights, dof, ncp_, split, *args)
+        return truthful(z, weights, dof, ncp_, split, *args)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(chisqsum, "_cdf_qawf", counting)
