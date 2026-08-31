@@ -974,6 +974,10 @@ class GAM:
         blocks = term_blocks_for_gam(self)
         return _concurvity(X, blocks, beta=beta, full=full, as_dataframe=as_dataframe)
 
+    def _raise_if_not_fitted(self):
+        if not hasattr(self, "cov_beta_"):
+            raise AttributeError("GAM instance is not fitted yet. Call fit first.")
+
     # TODO: Test against original implementation
     def smooth_compute(
         self,
@@ -991,8 +995,8 @@ class GAM:
         It is intentionally separate from ``predict``, which uses training
         centering.
         """
-        if not hasattr(self, "cov_beta_"):
-            raise AttributeError("GAM instance is not fitted yet. Call fit first.")
+        self._raise_if_not_fitted()
+
         if not isinstance(xi, tuple):
             xi = (xi,)
 
@@ -1058,14 +1062,11 @@ class GAM:
 
         Implements the test from Wood 2017, section 6.12.1.
 
-        Despite the theory suggesting that 6.12.2 should be used, Wood 2017 p. 311 notes that "although the Wood, 2013b, simulations still suggest that the section 6.12.1 test is better for smooths".
-        This is reaffirmed by our simulations finding that for a truly null (i.e. non-contributing)
-        smooth 6.12.1 produced closer to nominal rejection rates.
-        6.12.2 over-rejects, meaning for alpha=0.05 it reports a null smooth being significant with
-        a probability of ~0.13.
-
         In theory, smooths built by this package penalize the null space, so their combined penalty
         is full rank and 6.12.2 should be used.
+        In practice, this method seems to work better for smooths.
+
+        See ``GAM.test_smooth_significance``.
         """
 
         kappa = self.dof_resid_ if scale_estimated(self.observation_model) else None
@@ -1281,6 +1282,61 @@ class GAM:
             df=jnp.ones_like(evals),
             kappa=kappa,
         )
+
+    def test_smooth_significance(self, component_index: int | str) -> float:
+        """
+        Test whether a smooth term contributes to the model.
+
+        Tests the null hypothesis that the selected smooth is zero over its domain.
+        The p-value is computed using the approximate test from Wood (2017), section
+        6.12.1.
+
+        Parameters
+        ----------
+        component_index :
+            Label or index of the smooth term to test.
+
+        Returns
+        -------
+        Approximate p-value for the null hypothesis that the smooth is zero.
+
+        Notes
+        -----
+        The test treats the fitted smoothing parameters as fixed. Consequently,
+        its p-values do not include uncertainty from smoothing-parameter
+        estimation and are approximate.
+        High concurvity can also make inference about individual smooths unreliable.
+        Treat values close to a decision threshold with caution.
+
+        Although the smooths constructed by this package have full-rank combined
+        penalties, for which section 6.12.2 is theoretically more appropriate,
+        in our simulations 6.12.1 was better calibrated when the smoothing parameters
+        were estimated during fitting.
+        Wood (2017, p. 311) also notes 6.12.1 performing better for smooths in simulations.
+        In our experience, 6.12.2 over-rejects, meaning for alpha=0.05 it reports a null
+        smooth being significant with a higher probability than the requested level (alpha).
+        In contrast, 6.12.1 slightly under-rejects.
+
+        When testing several smooths, consider whether a multiple-testing
+        correction is appropriate.
+
+        References
+        ----------
+        Wood, S. N. (2017). *Generalized Additive Models: An Introduction with R*,
+        2nd ed., section 6.12.1. CRC Press.
+
+        """
+        self._raise_if_not_fitted()
+
+        warnings.warn(
+            "Smooth significance p-values are approximate. "
+            "Treat p-values close to a decision threshold with caution. "
+            "High concurvity can make inference about individual smooths unreliable.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+        return self._smooth_pval_unpenalized(component_index)
 
     def score(
         self,
