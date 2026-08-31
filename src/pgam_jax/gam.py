@@ -8,7 +8,10 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxopt import LBFGS, ScipyMinimize
 from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
-from nemos.glm.initialize_parameters import INVERSE_FUNCS
+from nemos.glm.initialize_parameters import (
+    INVERSE_FUNCS,
+    initialize_intercept_matching_mean_rate,
+)
 from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
@@ -308,11 +311,17 @@ class GAM:
         :
             Zero-initialized (coefficients, intercept).
         """
-        in_ndim = X.shape[1]
-        out_ndim = 1 if y.ndim == 1 else y.shape[1]
+        coef = jnp.zeros(X.shape[1])
 
-        coef = jnp.zeros(in_ndim)
-        intercept = jnp.zeros(out_ndim)
+        # Warm-start the intercept at the link of the mean response (e.g.
+        # log(mean y) for Poisson). Starting at 0 sets the initial mean to
+        # inv_link(0), far above the true mean for sparse data; the first solver
+        # step then overshoots into the flat, rate-floored tail of the NLL and
+        # can stall at a garbage intercept (-> exp(eta) = 0 -> NaNs downstream).
+        # link(mean) starts at the intercept-only optimum.
+        intercept = initialize_intercept_matching_mean_rate(
+            self.observation_model.default_inverse_link_function, y
+        )
 
         return (coef, intercept)
 
