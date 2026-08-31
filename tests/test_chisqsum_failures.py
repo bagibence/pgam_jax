@@ -271,7 +271,7 @@ def test_quadrature_methods_agree_across_the_handover_band(z, weights, df):
     sd = chisqsum._standard_deviation(w, d, ncp)
     w = w / sd
 
-    tanhsinh_cdf, _ = chisqsum._cdf_tanhsinh(z, w, d, ncp)
+    tanhsinh_cdf, _ = chisqsum._cdf_tanhsinh(z, w, d, ncp, 1e-10, 1e-10)
     qawf_cdf, _ = chisqsum._cdf_qawf(
         z,
         w,
@@ -1030,7 +1030,7 @@ def test_fallback_is_reached_by_the_low_degree_of_freedom_rows():
     # The dispatcher prefers tanh-sinh here, and tanh-sinh cannot do it.
     assert abs(z) <= chisqsum._Z_SWITCH
     with pytest.raises(chisqsum._QuadratureNotConverged):
-        chisqsum._cdf_tanhsinh(z, w, d, ncp)
+        chisqsum._cdf_tanhsinh(z, w, d, ncp, 1e-10, 1e-10)
 
     # The fallback route can, and the dispatcher returns its answer.
     value, _error = chisqsum._cdf_approx(z, w, d, ncp, 1.0, 1e-10, 1e-10, 200)
@@ -1208,7 +1208,7 @@ def test_three_term_band_is_answered_by_tanh_sinh():
 
     second, third = sorted(weights[-2:])
     expected = 1.0 - sf_two_chi1_plus_chi2k(q, second, third, 1.0, 1.0)
-    value, _error = chisqsum._cdf_tanhsinh(z, w, d, ncp)
+    value, _error = chisqsum._cdf_tanhsinh(z, w, d, ncp, 1e-10, 1e-10)
 
     assert value == pytest.approx(expected, abs=1e-10)
 
@@ -1268,7 +1268,7 @@ def test_tanhsinh_accuracy_limit_at_two_degrees_of_freedom():
         for z in np.geomspace(1e-5, 1e-4, 6):
             exact = 1.0 - float(sf_two_chi1(np.array(z * sd), a, b))
             try:
-                value, _error = chisqsum._cdf_tanhsinh(z, w, d, ncp)
+                value, _error = chisqsum._cdf_tanhsinh(z, w, d, ncp, 1e-10, 1e-10)
             except chisqsum._QuadratureNotConverged:
                 continue
             converged += 1
@@ -1459,6 +1459,42 @@ def test_each_quadrature_piece_gets_a_third_of_the_budget():
         )
 
     assert [call[1] for call in requested] == pytest.approx([1e-10, 1e-10, 1e-10])
+
+
+@pytest.mark.parametrize(
+    "epsabs, epsrel, expected_atol, expected_rtol",
+    [
+        (1e-10, 1e-9, chisqsum._TANHSINH_ATOL, chisqsum._TANHSINH_RTOL),
+        (2e-14, 3e-14, 2e-14, 3e-14),
+    ],
+)
+def test_tanhsinh_tolerances_reach_scipy(epsabs, epsrel, expected_atol, expected_rtol):
+    """Public targets reach SciPy, capped by the calibrated tolerances."""
+    seen = {}
+
+    class MockScipyResult:
+        integral = 0.0
+        error = 0.0
+        success = True
+
+    def fake_tanhsinh(*args, **kwargs):
+        seen.update(kwargs)
+        return MockScipyResult()
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(chisqsum, "tanhsinh", fake_tanhsinh)
+        value = psum_chisq(
+            1e-3,
+            [1.0, 0.6, 0.4],
+            df=[3.0, 1.0, 1.0],
+            epsabs=epsabs,
+            epsrel=epsrel,
+            check=False,
+        )
+
+    assert value == pytest.approx(0.5)
+    assert seen["atol"] == expected_atol
+    assert seen["rtol"] == expected_rtol
 
 
 def test_limlst_is_set_explicitly_on_both_fourier_tails():

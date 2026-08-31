@@ -78,7 +78,8 @@ from ._numpy_utils import FloatArray, _broadcast, _divide_with_fallback
 # integrand and reports success on a wrong answer.
 _Z_SWITCH = 5e-3
 
-# Absolute and relative accuracy asked of tanh-sinh, set by calibration.
+# Calibrated ceilings for the absolute and relative tolerances passed to
+# tanh-sinh. A tighter caller request takes precedence.
 _TANHSINH_ATOL = 1e-13
 _TANHSINH_RTOL = 1e-13
 
@@ -410,6 +411,8 @@ def _tanhsinh_piece(
     integrand: Callable[[FloatArray], FloatArray],
     a: float,
     b: float,
+    epsabs: float,
+    epsrel: float,
 ) -> tuple[float, float]:
     """
     One tanh-sinh integration, with its convergence report turned into a raise.
@@ -422,8 +425,8 @@ def _tanhsinh_piece(
         integrand,
         a,
         b,
-        atol=_TANHSINH_ATOL,
-        rtol=_TANHSINH_RTOL,
+        atol=min(epsabs, _TANHSINH_ATOL),
+        rtol=min(epsrel, _TANHSINH_RTOL),
         minlevel=_TANHSINH_MINLEVEL,
         maxlevel=_TANHSINH_MAXLEVEL,
     )
@@ -455,6 +458,8 @@ def _cdf_tanhsinh(
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
+    epsabs: float,
+    epsrel: float,
     domain_split: float | None = None,
 ) -> tuple[float, float]:
     """
@@ -474,6 +479,9 @@ def _cdf_tanhsinh(
     weights, df, noncentrality : numpy.ndarray
         Standardized weights, degrees of freedom, and non-centrality
         parameters.
+    epsabs, epsrel : float
+        Absolute and relative accuracy targets. Each is capped at its calibrated
+        tanh-sinh tolerance, so tighter caller requests pass through unchanged.
     domain_split : float or None, optional
         ``None`` integrates ``[0, inf)`` in one run. A float cuts the domain
         there and adds the two runs. Only the cross-check passes a value.
@@ -487,10 +495,12 @@ def _cdf_tanhsinh(
         return _combined_integrand(u, z, weights, df, noncentrality)
 
     if domain_split is None:
-        integral, abs_error = _tanhsinh_piece(integrand, 0.0, np.inf)
+        integral, abs_error = _tanhsinh_piece(integrand, 0.0, np.inf, epsabs, epsrel)
     else:
-        head, head_error = _tanhsinh_piece(integrand, 0.0, domain_split)
-        tail, tail_error = _tanhsinh_piece(integrand, domain_split, np.inf)
+        head, head_error = _tanhsinh_piece(integrand, 0.0, domain_split, epsabs, epsrel)
+        tail, tail_error = _tanhsinh_piece(
+            integrand, domain_split, np.inf, epsabs, epsrel
+        )
         integral, abs_error = head + tail, head_error + tail_error
 
     return 0.5 - integral / np.pi, abs_error / np.pi
@@ -595,7 +605,8 @@ def _cdf_by_route(
         Standardized weights, degrees of freedom, and non-centrality
         parameters.
     split, epsabs, epsrel, limit
-        Quadrature settings. Only the QAWF route reads them.
+        Quadrature settings. Both routes read the accuracy targets. Only QAWF
+        reads ``split`` and ``limit``.
     use_other_nodes : bool
         Recompute with a different node placement, for the cross-check.
 
@@ -614,6 +625,8 @@ def _cdf_by_route(
             weights,
             df,
             noncentrality,
+            epsabs,
+            epsrel,
             _TANHSINH_CROSS_CHECK_SPLIT if use_other_nodes else None,
         )
     elif route == _QAWF:
@@ -1393,15 +1406,14 @@ def psum_chisq(
         function ``Pr(Q > q)``. Defaults to ``False``, returning the upper tail
         used for smooth-term p-values in the GAMs supported here.
     epsabs, epsrel : float, optional
-        Absolute and relative accuracy targets for QAWF and the two-term angular
-        routes. ``epsabs`` is an end-to-end budget. The oscillatory route assembles
-        its answer from three integrations and divides the budget between them.
-        On that route ``epsrel`` reaches only the head, because QUADPACK's Fourier
-        integrator accepts an absolute target alone. The two-term angular reduction
-        applies both targets to each of its pieces. ``epsabs`` also sets the resolution
-        floor described under Warns.
-        The tanh-sinh route does not use these. It uses fixed, calibrated absolute
-        and relative tolerances.
+        Absolute and relative accuracy targets for all quadrature routes.
+        ``epsabs`` is an end-to-end budget. The oscillatory route assembles its
+        answer from three integrations and divides the budget between them. On
+        that route ``epsrel`` reaches only the head, because QUADPACK's Fourier
+        integrator accepts an absolute target alone. The two-term angular
+        reduction applies both targets to each of its pieces. Tanh-sinh uses the
+        tighter of each requested target and its calibrated ``1e-13`` ceiling.
+        ``epsabs`` also sets the resolution floor described under Warns.
     limit : int, optional
         Maximum number of quadrature subintervals for the QAWF and two-term angular
         routes. The tanh-sinh route does not use this argument. It has a fixed maximum
