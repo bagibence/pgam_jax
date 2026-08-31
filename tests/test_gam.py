@@ -128,6 +128,68 @@ def test_compute_cov_beta_edf_matches_u1_calculation():
     np.testing.assert_allclose(edf1_from_F, edf1_from_U1, rtol=1e-12, atol=1e-12)
 
 
+def test_smooth_significance_requires_fitted_model():
+    gam = GAM(_basis())
+
+    with pytest.raises(AttributeError, match="not fitted"):
+        gam.test_smooth_significance(0)
+
+
+def test_smooth_significance_delegates_and_warns(monkeypatch):
+    gam = GAM(_basis())
+    gam.cov_beta_ = jnp.eye(1)
+    selected_components = []
+
+    def compute_p_value(component_index):
+        selected_components.append(component_index)
+        return 0.25
+
+    monkeypatch.setattr(
+        gam,
+        "_smooth_pval_unpenalized",
+        compute_p_value,
+    )
+
+    with pytest.warns(
+        UserWarning,
+        match="approximate.*High concurvity",
+    ):
+        p_value = gam.test_smooth_significance("BSplineEval")
+
+    assert p_value == 0.25
+    assert selected_components == ["BSplineEval"]
+
+
+def test_null_smooth_is_not_significant():
+    """Regression test based on the smooth p-value simulation."""
+    rng = np.random.default_rng(np.random.SeedSequence([20260817, 0, 504]))
+    n_samples = 300
+    x = rng.uniform(-1.0, 1.0, n_samples)
+    eta = np.full(n_samples, 0.2)
+    y = rng.poisson(np.exp(eta)).astype(float)
+
+    basis = nmo.basis.BSplineEval(
+        n_basis_funcs=8,
+        order=4,
+        bounds=(-1.0, 1.0),
+    )
+    gam = GAM(
+        basis,
+        method="pql_reml",
+        maxiter=50,
+    )
+    gam.fit((x,), y)
+
+    with pytest.warns(UserWarning, match="approximate"):
+        p_value_by_index = gam.test_smooth_significance(0)
+
+    with pytest.warns(UserWarning, match="approximate"):
+        p_value_by_label = gam.test_smooth_significance("BSplineEval")
+
+    assert p_value_by_index == pytest.approx(p_value_by_label)
+    assert 0.1 < p_value_by_index <= 1.0
+
+
 @pytest.mark.parametrize("method", ["pql_gcv", "pql_reml"])
 def test_fit_runs_end_to_end(method):
     """End-to-end fit for each smoothing-parameter method, including REML."""
