@@ -32,10 +32,17 @@ from ._nan_policy import (
     get_valid_y_rows,
     validate_nan_handling,
 )
+from ._p_values import weighted_chisq_pval
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
-from ._utils import prepend_ones_for_intercept
+from ._typing import JaxFloatScalar
+from ._utils import (
+    prepend_ones_for_intercept,
+    scale_estimated,
+    stack_block_diag,
+    to_zero_dim_jax_array,
+)
 from .concurvity import concurvity as _concurvity
 from .concurvity import term_blocks_for_gam
 from .iterative_optim import (
@@ -578,9 +585,9 @@ class GAM:
         regularizer_strength: list[jnp.ndarray],
         compute_sqrt,
         rtol: float = 1e-8,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """
-        Compute posterior covariance, EDF, and dispersion scale after fitting.
+        Compute posterior covariance and dispersion scale after fitting.
 
         This mirrors legacy PGAM's final refresh: recompute final IRLS weights
         from the returned coefficients, form QR(sqrt(W) X), then invert
@@ -590,8 +597,6 @@ class GAM:
         -------
         cov_beta :
             Posterior covariance ``φ · (X'WX + S_λ)⁻¹``, shape ``(p+1, p+1)``.
-        edf :
-            Effective degrees of freedom — Wood's ``edf1 = 2·tr(F) − tr(F²)``.
         scale :
             Estimated dispersion φ̂ from ``observation_model.estimate_scale``.
         """
@@ -619,30 +624,60 @@ class GAM:
         Xw = X_full * jnp.sqrt(weights)[:, None]
         R = jnp.linalg.qr(Xw, mode="r")
 
+        # TODO: Return it instead?
+        # save for p-values
+        self._R = R
+
         sqrt_penalty = compute_sqrt(regularizer_strength)
         sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
+        self._sqrt_penalty = sqrt_penalty
 
         # SVD of A = [R; B],  A^T A = X^T W X + S_lambda
-        # U1 = U[:k] (first k=R.shape[0] rows) encodes the hat matrix via A = Q_xw U1 U1' Q_xw'
         U_svd, singular_values, Vt = jnp.linalg.svd(
             jnp.vstack((R, sqrt_penalty)),
             full_matrices=False,
         )
-        U1 = U_svd[: R.shape[0], :]  # (k, k) where k = p + 1
-
-        # EDF: edf1 = 2·tr(F) − tr(F²) where F = (X'WX + S_λ)⁻¹ X'WX
-        # Expressed via U1: tr(F) = ‖U1‖²_F,  tr(F²) = ‖U1'U1‖²_F  (Wood 2017 eq. 6.13)
-        edf = jnp.sum(U1**2)
-        edf1 = 2.0 * edf - jnp.sum((U1.T @ U1) ** 2)
-
-        # dispersion: Poisson → 1.0; Gaussian/Gamma → Pearson χ²/dof
-        scale = self.observation_model.estimate_scale(y, mu, dof_resid=n_obs - edf1)
 
         # tiny singular values would blow up 1 / s^2, so discard them
         keep = singular_values >= rtol * singular_values.max()
-        singular_values_inv = jnp.where(keep, 1.0 / singular_values, 0.0)
-        cov_beta = scale * (Vt.T * singular_values_inv**2) @ Vt
-        return cov_beta, edf1, scale
+        singular_values_sq_inv = jnp.where(keep, singular_values ** (-2), 0.0)
+
+        information_matrix = R.T @ R
+        unscaled_cov_beta = (Vt.T * singular_values_sq_inv) @ Vt
+        F = unscaled_cov_beta @ information_matrix
+
+        diag_F = jnp.diag(F)
+        diag_F_sq = jnp.sum(F * F.T, axis=1)
+
+        # they have an extra term for the intercept
+        self._edf_by_coef = diag_F
+        self._edf1_by_coef = 2 * diag_F - diag_F_sq
+
+        # dispersion: Poisson → 1.0; Gaussian/Gamma → Pearson χ²/dof
+        scale = self.observation_model.estimate_scale(
+            y, mu, dof_resid=n_obs - self.edf_
+        )
+        scale = to_zero_dim_jax_array(scale)
+
+        # Bayesian covariance of the coefficients
+        cov_beta = scale * unscaled_cov_beta
+
+        # used as C.T in _smooth_pval_penalized
+        self._unscaled_freq_cov_root = unscaled_cov_beta @ R.T
+        # frequentist covariance
+        self.cov_beta_freq_ = (
+            scale * self._unscaled_freq_cov_root @ self._unscaled_freq_cov_root.T
+        )
+
+        return cov_beta, scale
+
+    @property
+    def edf_(self) -> JaxFloatScalar:
+        return jnp.sum(self._edf_by_coef)
+
+    @property
+    def edf1_(self) -> JaxFloatScalar:
+        return jnp.sum(self._edf1_by_coef)
 
     def _resolve_basis_component(
         self,
@@ -763,7 +798,7 @@ class GAM:
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
         self.n_iter_ = n_iter
-        self.cov_beta_, self.edf_, self.scale_ = self._compute_cov_beta_from_fit_state(
+        self.cov_beta_, self.scale_ = self._compute_cov_beta_from_fit_state(
             X,
             y,
             opt_coef,
@@ -939,6 +974,10 @@ class GAM:
         blocks = term_blocks_for_gam(self)
         return _concurvity(X, blocks, beta=beta, full=full, as_dataframe=as_dataframe)
 
+    def _raise_if_not_fitted(self):
+        if not hasattr(self, "cov_beta_"):
+            raise AttributeError("GAM instance is not fitted yet. Call fit first.")
+
     # TODO: Test against original implementation
     def smooth_compute(
         self,
@@ -956,8 +995,8 @@ class GAM:
         It is intentionally separate from ``predict``, which uses training
         centering.
         """
-        if not hasattr(self, "cov_beta_"):
-            raise AttributeError("GAM instance is not fitted yet. Call fit first.")
+        self._raise_if_not_fitted()
+
         if not isinstance(xi, tuple):
             xi = (xi,)
 
@@ -969,6 +1008,7 @@ class GAM:
                 f"{info.input_slice.stop - info.input_slice.start} input array(s), "
                 f"got {len(xi)}."
             )
+        # TODO: Why is this called fX? isn't it X_i?
         fX = _compute_features_identifiable(
             info.basis,
             *xi,
@@ -1016,6 +1056,288 @@ class GAM:
         delta = se_y * sts.norm().ppf(1 - (1 - perc) * 0.5)
         return mean_y, mean_y - delta, mean_y + delta
 
+    def _smooth_pval_unpenalized(self, component_index: int | str):
+        """
+        Compute a p-value for a smooth whose penalty has a null-space.
+
+        Implements the test from Wood 2017, section 6.12.1.
+
+        In theory, smooths built by this package penalize the null space, so their combined penalty
+        is full rank and 6.12.2 should be used.
+        In practice, this method seems to work better for smooths.
+
+        See ``GAM.test_smooth_significance``.
+        """
+
+        kappa = self.dof_resid_ if scale_estimated(self.observation_model) else None
+
+        component_info = self._resolve_basis_component(component_index)
+        smooth_slice = slice(
+            component_info.identifiable_feature_slice.start + 1,
+            component_info.identifiable_feature_slice.stop + 1,
+        )
+
+        # TODO: Have a helper (property?) for this beta construction
+        beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
+        beta_j = beta[smooth_slice]
+        edf1_j = jnp.sum(self._edf1_by_coef[smooth_slice])
+        V_beta_j = self.cov_beta_[smooth_slice, smooth_slice]
+
+        R_columns_j = self._R[:, smooth_slice]
+        R_j = jnp.linalg.qr(R_columns_j, mode="r")
+        z_j = R_j @ beta_j
+        C_j = R_j @ V_beta_j @ R_j.T
+
+        # This would be more like the book
+        # C_j_inv_plus, C_j_inv_minus = _wood_rank_r_inverse_pair(C_j, r)
+        # t_plus = z_j.T @ C_j_inv_plus @ z_j
+        # t_minus = z_j.T @ C_j_inv_minus @ z_j
+
+        # This avoids forming the Wood-style inverse
+        evals, U = jnp.linalg.eigh((C_j + C_j.T) / 2)
+        tol = jnp.max(evals) * jnp.finfo(evals.dtype).eps ** 0.9
+        keep = evals > tol
+        evals = evals[keep][::-1]
+        U = U[:, keep][:, ::-1]
+
+        if evals.size == 0:
+            raise ValueError(
+                "The transformed coefficients for this smooth have no numerically "
+                "nonzero variance, so its p-value cannot be computed."
+            )
+
+        # under the null hypothesis: z_j ~ N(0, C_j)
+        # cov(z_j) = C_j
+        # a_j are coordinates of z_j along the eigenvectors of C_j
+        # cov(a_j) = U.T @ C_j @ U -> diagonal, so a_j_i are independent and var(a_j_i) = evals_i
+        a_j = U.T @ z_j
+        # normalize by the std, so var(d_j_i) = 1, so d_j ~ N(0, I)
+        d_j = a_j / jnp.sqrt(evals)
+
+        r = min(float(edf1_j), beta_j.size, evals.size)
+        if not bool(jnp.isfinite(r)) or bool(r < 0):
+            r_problem = "negative" if bool(r < 0) else "not finite"
+            raise ValueError(
+                f"The effective test rank is {r_problem}, so the fit did not "
+                f"produce a usable smooth. Got r={r} from edf1={float(edf1_j)}."
+            )
+
+        k = int(jnp.floor(r))
+        nu = r - k
+
+        if r < 1:
+            k = 1
+            nu = 0.0
+
+        # psum_chisq reductions should handle this, but we can do it here already
+        # nu_1 = 1 and nu_2 = 0, so the nu_1 * chisq_1 is absorbed into the first term
+        # T_r ~ chisq_r because we're summing r terms
+        if nu == 0:
+            t_r = jnp.sum(d_j[:k] ** 2)
+            return weighted_chisq_pval(t_r, [1.0], [k], kappa)
+
+        nu_1 = (nu + 1 + jnp.sqrt(1 - nu**2)) / 2
+        nu_2 = nu + 1 - nu_1
+
+        rho = jnp.sqrt(nu * (1 - nu) / 2)
+
+        # The book has an error, the first dof is k-1 if k=floor(r), not k-2
+        # The expectation is a good check. With k-1:
+        # E[T_r] = (k - 1) + nu_1 + nu_2 = (k - 1) + (1 + nu) = k + nu = r
+        chisq_weights = [nu_1, nu_2]
+        chisq_df = [1, 1]
+        # for k = 1 the first term's df would be 0, so just don't add it
+        if k > 1:
+            chisq_weights = [1.0, *chisq_weights]
+            chisq_df = [k - 1, *chisq_df]
+
+        base = jnp.sum(d_j[: k - 1] ** 2)
+        d_k_minus_1 = d_j[k - 1]
+        d_k = d_j[k]
+
+        t_plus = base + d_k_minus_1**2 + nu * d_k**2 + 2 * rho * d_k_minus_1 * d_k
+        t_minus = base + d_k_minus_1**2 + nu * d_k**2 - 2 * rho * d_k_minus_1 * d_k
+
+        p_plus = weighted_chisq_pval(t_plus, chisq_weights, chisq_df, kappa)
+        p_minus = weighted_chisq_pval(t_minus, chisq_weights, chisq_df, kappa)
+
+        return (p_plus + p_minus) / 2
+
+    def _smooth_pval_penalized(self, component_index: int | str):
+        """
+        Compute a p-value for a smooth with a full-rank combined penalty.
+
+        Implements the test from Wood 2017, section 6.12.2.
+
+        The test conditions on the smoothing parameters. It does not account
+        for the fact that they were estimated from the same data, and for a
+        fully penalized smooth the null hypothesis sits on the boundary of the
+        parameter space at infinite lambda. The result is a loss of calibration
+        once the smoothing parameters are fitted rather than fixed.
+        In simulations 6.12.2 is close to nominal if smoothing parameters are
+        fixed, but over rejects when they are estimated (which is always the
+        case when fitting GAMs).
+
+        Treat p-values from a fitted model as a rough guide, and interpret a
+        value near a threshold as inconclusive rather than significant.
+
+        Parameters
+        ----------
+        component_index :
+            Index or label of the basis component to test.
+
+        Returns
+        -------
+        :
+            The p-value for the null hypothesis that the smooth is zero.
+        """
+        required_attributes = (
+            "_R",
+            "_sqrt_penalty",
+            "cov_beta_freq_",
+            "coef_",
+            "intercept_",
+            "scale_",
+            "dof_resid_",
+        )
+        missing = [name for name in required_attributes if not hasattr(self, name)]
+        if missing:
+            raise AttributeError(
+                "GAM instance is not fitted or is missing fitted state. "
+                f"Missing attribute(s): {', '.join(missing)}. "
+                "Call `fit` first."
+            )
+
+        component_info = self._resolve_basis_component(component_index)
+        smooth_slice = slice(
+            component_info.identifiable_feature_slice.start + 1,
+            component_info.identifiable_feature_slice.stop + 1,
+        )
+        smooth_idx = jnp.arange(smooth_slice.start, smooth_slice.stop)
+
+        n_j = len(smooth_idx)
+        n_coef = self._R.shape[1]
+
+        other_mask = jnp.ones(n_coef, dtype=bool).at[smooth_idx].set(False)
+        other_idx = jnp.arange(n_coef)[other_mask]
+
+        # NOTE: if using a non-canonical link, R should be constructed with Fisher weights
+        # for canonical links the observed and Fisher information are the same
+
+        # augmented.T @ augmented = X.T @ W @ X + S_lambda
+        augmented = jnp.vstack([self._R, self._sqrt_penalty])
+        # move the smooth's columns to the end
+        permuted = augmented[:, jnp.concatenate([other_idx, smooth_idx])]
+        R_augmented = jnp.linalg.qr(permuted, mode="r")
+        # R_hat on page 311 of Wood 2017
+        R_m = R_augmented[-n_j:, -n_j:]
+
+        beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
+        beta_j = beta[smooth_idx]
+
+        scale = to_zero_dim_jax_array(self.scale_)
+        if not bool(jnp.isfinite(scale)) or float(scale) <= 0:
+            raise ValueError(
+                f"`scale_` must be finite and positive. Got {float(scale)}."
+            )
+
+        # W = 2 * (l_1 - l_0) = beta_j.T @ R_m.T @ R_m @ beta_j
+        statistic = jnp.sum((R_m @ beta_j) ** 2) / scale
+        if not bool(jnp.isfinite(statistic)):
+            raise ValueError(
+                "The smooth test statistic is not finite, so the fit did not "
+                f"produce a usable smooth. Got {float(statistic)}."
+            )
+
+        # The statistic is T = beta_hat_j.T R_hat.T R_hat beta_hat_j / phi
+        #
+        # Under H0, beta_hat_j ~ N(0, V_freq_j)
+        # We can write beta_hat_j = C.T @ z, where z ~ N(0, I) and C.T @ C = V_freq_j
+        # because then Cov(beta_hat_j) = Cov(C.T @ z) = C.T @ C = V_freq_j
+        # Then the statistic can be written T = z.T (C R_hat.T R_hat C.T) z / phi
+        #
+        # Call the middle matrix with the 1 / phi included M = (C R_hat.T R_hat C.T) / phi
+        # Diagonalize it as U @ diag(evals) @ U.T and define q = U.T @ z
+        # so z = U q and z.T = q.T U.T
+        # U is orthogonal, so q ~ N(0, 1) and U.T @ U = I
+        # T = q.T U.T U diag(evals) U.T U q
+        # T = q.T diag(evals) q
+        # T = sum_i evals_i * q_i**2
+        # so T is a weighted sum of chisq_1 variables.
+
+        C_T = self._unscaled_freq_cov_root[smooth_idx, :]
+        L_j = R_m @ C_T
+        singular_values = jnp.linalg.svd(L_j, compute_uv=False)
+        tol = max(L_j.shape) * jnp.finfo(singular_values.dtype).eps * singular_values[0]
+        keep = singular_values > tol
+        evals = singular_values[keep] ** 2
+        if evals.size == 0:
+            raise ValueError("The smooth test covariance has numerical rank zero.")
+
+        kappa = self.dof_resid_ if scale_estimated(self.observation_model) else None
+
+        return weighted_chisq_pval(
+            statistic,
+            weights=evals,
+            df=jnp.ones_like(evals),
+            kappa=kappa,
+        )
+
+    def test_smooth_significance(self, component_index: int | str) -> float:
+        """
+        Test whether a smooth term contributes to the model.
+
+        Tests the null hypothesis that the selected smooth is zero over its domain.
+        The p-value is computed using the approximate test from Wood (2017), section
+        6.12.1.
+
+        Parameters
+        ----------
+        component_index :
+            Label or index of the smooth term to test.
+
+        Returns
+        -------
+        Approximate p-value for the null hypothesis that the smooth is zero.
+
+        Notes
+        -----
+        The test treats the fitted smoothing parameters as fixed. Consequently,
+        its p-values do not include uncertainty from smoothing-parameter
+        estimation and are approximate.
+        High concurvity can also make inference about individual smooths unreliable.
+        Treat values close to a decision threshold with caution.
+
+        Although the smooths constructed by this package have full-rank combined
+        penalties, for which section 6.12.2 is theoretically more appropriate,
+        in our simulations 6.12.1 was better calibrated when the smoothing parameters
+        were estimated during fitting.
+        Wood (2017, p. 311) also notes 6.12.1 performing better for smooths in simulations.
+        In our experience, 6.12.2 over-rejects, meaning for alpha=0.05 it reports a null
+        smooth being significant with a higher probability than the requested level (alpha).
+        In contrast, 6.12.1 slightly under-rejects.
+
+        When testing several smooths, consider whether a multiple-testing
+        correction is appropriate.
+
+        References
+        ----------
+        Wood, S. N. (2017). *Generalized Additive Models: An Introduction with R*,
+        2nd ed., section 6.12.1. CRC Press.
+
+        """
+        self._raise_if_not_fitted()
+
+        warnings.warn(
+            "Smooth significance p-values are approximate. "
+            "Treat p-values close to a decision threshold with caution. "
+            "High concurvity can make inference about individual smooths unreliable.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+        return self._smooth_pval_unpenalized(component_index)
+
     def score(
         self,
         xi: tuple[ArrayLike, ...],
@@ -1058,3 +1380,72 @@ class GAM:
             scale=self.scale_,
             aggregate_sample_scores=aggregate_sample_scores,
         )
+
+
+def _wood_rank_r_inverse_pair(M, r):
+
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        raise ValueError("`M` must be a square matrix.")
+
+    evals, U = jnp.linalg.eigh((M + M.T) / 2)
+    tol = jnp.max(evals) * jnp.finfo(evals.dtype).eps ** 0.9
+    keep = evals > tol
+    evals = evals[keep][::-1]
+    U = U[:, keep][:, ::-1]
+
+    numerical_rank = evals.shape[0]
+    r = float(r)
+    if not 1 <= r <= numerical_rank:
+        raise ValueError(
+            f"`r` must be between 1 and the numerical rank {numerical_rank}, got {r}."
+        )
+
+    k = int(jnp.floor(r))
+    nu = r - k
+
+    # r is integer, no need for the fractional formula
+    if nu == 0:
+        A = jnp.zeros((numerical_rank, numerical_rank))
+        A = A.at[:k, :k].set(jnp.diag(1 / evals[:k]))
+
+        C_r_inv = U @ A @ U.T
+        C_r_inv = (C_r_inv + C_r_inv.T) / 2
+
+        return C_r_inv, C_r_inv
+
+    rho = jnp.sqrt(nu * (1 - nu) / 2)
+
+    d_k_minus_1 = evals[k - 1]
+    d_k = evals[k]
+
+    Lambda_hat = jnp.array(
+        [
+            [1 / jnp.sqrt(d_k_minus_1), 0],
+            [0, 1 / jnp.sqrt(d_k)],
+        ]
+    )
+
+    B_hat_plus = jnp.array(
+        [
+            [1.0, rho],
+            [rho, nu],
+        ]
+    )
+    B_hat_minus = jnp.array(
+        [
+            [1.0, -rho],
+            [-rho, nu],
+        ]
+    )
+
+    def _C_r_inv(B_hat):
+
+        B = Lambda_hat @ B_hat @ Lambda_hat.T
+
+        A = stack_block_diag([jnp.diag(1 / evals[: k - 1]), B], numerical_rank)
+
+        C_r_inv = U @ A @ U.T
+
+        return (C_r_inv + C_r_inv.T) / 2
+
+    return _C_r_inv(B_hat_plus), _C_r_inv(B_hat_minus)

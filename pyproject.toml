@@ -33,6 +33,7 @@ dependencies = [
     "numpy",
     "packaging",
     "scipy",
+    "jaxtyping",
 ]
 
 
