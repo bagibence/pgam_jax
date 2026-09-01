@@ -1082,10 +1082,7 @@ def _reduce(
     The tail the caller asked for is read off the distribution directly. It is
     never formed by subtracting the other tail from one: once a tail falls
     below the spacing of floats near 1, the complement rounds to exactly 1.0
-    and the subtraction returns 0.0. That loss is under one ulp in absolute
-    terms, but these branches exist in order to be exact, and they report an
-    error estimate of 0.0 to :func:`_cdf_single`, which would otherwise be a
-    false claim of exactness.
+    and the subtraction returns 0.0, a small rounding error.
 
     Three shapes are exact. The quadrature is at its worst on the last of them,
     so this function runs before any numerical decision is made.
