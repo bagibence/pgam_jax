@@ -1073,10 +1073,19 @@ def _reduce(
     weights: FloatArray,
     df: FloatArray,
     noncentrality: FloatArray,
+    lower_tail: bool,
 ) -> float | None:
     """
-    The CDF at standardized point ``z`` in closed form where one exists,
-    ``None`` otherwise.
+    The requested tail at standardized point ``z`` in closed form where one
+    exists, ``None`` otherwise.
+
+    The tail the caller asked for is read off the distribution directly. It is
+    never formed by subtracting the other tail from one: once a tail falls
+    below the spacing of floats near 1, the complement rounds to exactly 1.0
+    and the subtraction returns 0.0. That loss is under one ulp in absolute
+    terms, but these branches exist in order to be exact, and they report an
+    error estimate of 0.0 to :func:`_cdf_single`, which would otherwise be a
+    false claim of exactness.
 
     Three shapes are exact. The quadrature is at its worst on the last of them,
     so this function runs before any numerical decision is made.
@@ -1108,12 +1117,16 @@ def _reduce(
         Standardized weights ``w_j / sd``, degrees of freedom ``nu_j``, and
         non-centrality parameters ``delta_j^2``, already collapsed to a
         canonical term list ordered by increasing weight.
+    lower_tail : bool
+        Whether ``Pr(Q <= z)`` is wanted rather than ``Pr(Q > z)``. Selects
+        which of ``cdf`` and ``sf`` is evaluated, so that the requested tail is
+        never obtained by subtraction.
 
     Returns
     -------
     float or None
-        The lower-tail probability, or ``None`` when no closed form applies. The
-        caller then goes on to :func:`_regime_gate`.
+        The probability in the requested tail, or ``None`` when no closed form
+        applies. The caller then goes on to :func:`_regime_gate`.
     """
     if np.any(df <= 0.0):
         raise ValueError("`df` must be positive")
@@ -1130,26 +1143,39 @@ def _reduce(
         else:
             distribution = ncx2(df[0], noncentrality[0])
 
-        # if w > 0: Pr(Q <= z) = Pr(wX <= z) = Pr(X <= z/w) -> use cdf
-        # if w < 0: Pr(Q <= z) = Pr(wX <= z) = Pr(X >= z/w) -> use sf = 1 - cdf
+        # if w > 0: Pr(Q <= z) = Pr(wX <= z) = Pr(X <= z/w)
+        # if w < 0: Pr(Q <= z) = Pr(wX <= z) = Pr(X >= z/w)
+        #
+        # Each tail comes from its own function. ``chi2(3).cdf(100)`` rounds to
+        # exactly 1.0, so an upper tail formed as ``1 - cdf`` would be 0.0 where
+        # the true value is 1.55e-21.
         if weight > 0.0:
-            probability = distribution.cdf(x)
+            probability = distribution.cdf(x) if lower_tail else distribution.sf(x)
         elif weight < 0.0:
-            probability = distribution.sf(x)
+            probability = distribution.sf(x) if lower_tail else distribution.cdf(x)
         else:
             raise RuntimeError("Single chi2 weight must be non-zero.")
 
         return probability
 
-    # all weights positive evaluated at a non-positive point
+    # all weights positive evaluated at a non-positive point. Q > 0 almost
+    # surely, so both tails are exact here and neither is a rounding of the
+    # other.
     if np.all(weights > 0.0) and z <= 0.0:
-        return 0.0
+        return 0.0 if lower_tail else 1.0
 
     # rewrite as an F distribution
     if z == 0.0 and central and weights.size == 2 and weights[0] < 0.0 < weights[1]:
         w_neg, w_pos = float(weights[0]), float(weights[1])
         n, m = float(df[0]), float(df[1])
-        return 1.0 - float(f_dist.sf((-w_neg * n) / (w_pos * m), m, n))
+        threshold = (-w_neg * n) / (w_pos * m)
+        # Pr(Q > 0) = Pr(F_{m,n} > threshold) is the survival function itself.
+        # Routing it through 1 - (1 - sf) costs the far tail: at
+        # weights = [-1e6, 1] with df = [50, 1] the upper tail is 1.1e-151 and
+        # the round trip through 1.0 returns 0.0.
+        if lower_tail:
+            return float(f_dist.cdf(threshold, m, n))
+        return float(f_dist.sf(threshold, m, n))
 
     return None
 
@@ -1249,10 +1275,12 @@ def _cdf_single(
     if not np.isfinite(z):
         raise RuntimeError(f"standardized evaluation point is not a number: z={z}")
 
-    # cases we can analytically reduce and don't need numerical integration
-    reduced = _reduce(z, std_weights, df_arr, ncp_arr)
+    # cases we can analytically reduce and don't need numerical integration.
+    # _reduce returns the tail the caller asked for, already correct in both
+    # directions, so nothing is subtracted here.
+    reduced = _reduce(z, std_weights, df_arr, ncp_arr, lower_tail)
     if reduced is not None:
-        return (reduced if lower_tail else 1.0 - reduced), 0.0
+        return reduced, 0.0
 
     # sum of two central chi2_1 variables with positive weights is better evaluated using a bounded angular integral
     two_positive_chi1 = (
