@@ -40,6 +40,7 @@ from ._typing import JaxFloatScalar
 from ._utils import (
     prepend_ones_for_intercept,
     scale_estimated,
+    singular_value_keep_mask,
     stack_block_diag,
     to_zero_dim_jax_array,
 )
@@ -584,14 +585,14 @@ class GAM:
         params: tuple[jnp.ndarray, jnp.ndarray],
         regularizer_strength: list[jnp.ndarray],
         compute_sqrt,
-        rtol: float = 1e-8,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """
         Compute posterior covariance and dispersion scale after fitting.
 
         This mirrors legacy PGAM's final refresh: recompute final IRLS weights
-        from the returned coefficients, form QR(sqrt(W) X), then invert
-        ``X.T W X + S_lambda`` via the SVD of ``[R; sqrt(S_lambda)]``.
+        from the returned coefficients, form QR(sqrt(W) X), then compute the
+        generalized inverse of ``X.T W X + S_lambda`` via the SVD of
+        ``[R; sqrt(S_lambda)]``.
 
         Returns
         -------
@@ -632,18 +633,38 @@ class GAM:
         sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
         self._sqrt_penalty = sqrt_penalty
 
-        # SVD of A = [R; B],  A^T A = X^T W X + S_lambda
-        U_svd, singular_values, Vt = jnp.linalg.svd(
-            jnp.vstack((R, sqrt_penalty)),
-            full_matrices=False,
-        )
+        A = jnp.vstack((R, sqrt_penalty))
+        _, singular_values, Vt = jnp.linalg.svd(A, full_matrices=False)
+        keep = singular_value_keep_mask(singular_values, A.shape)
+        safe_singular_values = jnp.where(keep, singular_values, 1.0)
+        singular_values_sq_inv = jnp.where(keep, safe_singular_values**-2, 0.0)
+        unscaled_cov_beta = (Vt.T * singular_values_sq_inv) @ Vt
 
-        # tiny singular values would blow up 1 / s^2, so discard them
-        keep = singular_values >= rtol * singular_values.max()
-        singular_values_sq_inv = jnp.where(keep, singular_values ** (-2), 0.0)
+        is_valid = (
+            jnp.all(jnp.isfinite(A))
+            & jnp.all(jnp.isfinite(singular_values))
+            & jnp.all(jnp.isfinite(Vt))
+            & jnp.all(jnp.isfinite(unscaled_cov_beta))
+        )
+        if not bool(is_valid):
+            raise ValueError(
+                "The penalized information matrix factorization produced "
+                "nonfinite values."
+            )
+
+        self.penalized_information_rank_ = int(jnp.sum(keep))
+
+        if self.penalized_information_rank_ < R.shape[1]:
+            warnings.warn(
+                "The penalized information matrix has numerical rank "
+                f"{self.penalized_information_rank_} "
+                f"for {R.shape[1]} coefficients. Covariance and effective "
+                "degrees of freedom use a generalized inverse.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         information_matrix = R.T @ R
-        unscaled_cov_beta = (Vt.T * singular_values_sq_inv) @ Vt
         F = unscaled_cov_beta @ information_matrix
 
         diag_F = jnp.diag(F)

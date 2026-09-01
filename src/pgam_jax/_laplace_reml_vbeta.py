@@ -15,8 +15,9 @@ so, with H = X^T W X / phi:
     V_β^{-1}        = V^T^T Σ² V^T / phi        = H + S_λ
     log|H + S_λ|    = 2 Σ_k log σ_k − r log φ   r = rank(H + S_λ)
 
-Singular-value masking mirrors _pql_reml.py: near-zero rows of V_T are zeroed
-(JAX-friendly substitute for numpy's row-deletion).
+Singular-value masking mirrors _pql_reml.py: contributions from near-zero
+singular values are zeroed. This is a JAX-friendly substitute for numpy's
+row deletion.
 
 R must be precomputed by the caller using model_constructors_for_weights_and_pseudo_data
 from iterative_optim, followed by jnp.linalg.qr(sqrt(W)[:, None] * X, mode="r").
@@ -24,7 +25,8 @@ from iterative_optim, followed by jnp.linalg.qr(sqrt(W)[:, None] * X, mode="r").
 
 import jax.numpy as jnp
 
-from ._pql_gcv import FLOAT_EPS, _vmap_where
+from ._pql_gcv import _vmap_where
+from ._utils import singular_value_keep_mask
 
 
 def vbeta_and_logdet(
@@ -49,14 +51,16 @@ def vbeta_and_logdet(
     V_beta : shape (p, p)
         Posterior covariance phi * (H + S_λ)^{-1}.
     V_beta_inv : shape (p, p)
-        Posterior precision (H + S_λ) / phi.
+        Posterior precision (H + S_λ) / phi with numerically discarded
+        singular directions set to zero.
     log_det_HpS : scalar
         log|H + S_λ|.
     """
-    U, s, V_T = jnp.linalg.svd(jnp.vstack([R, sqrt_penalty]), full_matrices=False)
+    A = jnp.vstack([R, sqrt_penalty])
+    U, s, V_T = jnp.linalg.svd(A, full_matrices=False)
     del U
 
-    low_vals = s < FLOAT_EPS * s.max()
+    low_vals = ~singular_value_keep_mask(s, A.shape)
     s = jnp.where(low_vals, 0.0, s)
     V_T = _vmap_where(low_vals, 0, V_T.T).T
 

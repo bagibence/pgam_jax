@@ -74,3 +74,98 @@ def test_finite_for_extreme_rho(rho_scale):
     assert jnp.all(jnp.isfinite(V_beta))
     assert jnp.all(jnp.isfinite(V_beta_inv))
     assert jnp.isfinite(log_det_HpS)
+
+
+@pytest.mark.parametrize("penalty_scale", [1e3, 1e6, 1e12])
+def test_axis_aligned_penalty_preserves_unpenalized_coordinate(penalty_scale):
+    """
+    A large penalty must not make an unrelated unpenalized direction disappear.
+
+    The diagonal construction has an exact inverse and log determinant. It
+    isolates the scale-separation problem in the raw augmented-matrix SVD: the
+    first coefficient is unpenalized while the remaining two are increasingly
+    strongly penalized.
+    """
+    R = jnp.diag(jnp.asarray([3.0, 2.0, 4.0]))
+    sqrt_penalty = jnp.asarray(
+        [
+            [0.0, penalty_scale, 0.0],
+            [0.0, 0.0, 2.0 * penalty_scale],
+        ]
+    )
+
+    V_beta, V_beta_inv, log_det = vbeta_and_logdet(
+        R,
+        sqrt_penalty,
+        phi=1.0,
+    )
+
+    precision_diagonal = np.asarray(
+        [
+            9.0,
+            4.0 + penalty_scale**2,
+            16.0 + 4.0 * penalty_scale**2,
+        ]
+    )
+    expected_covariance = np.diag(1.0 / precision_diagonal)
+    expected_precision = np.diag(precision_diagonal)
+    expected_log_det = np.sum(np.log(precision_diagonal))
+
+    np.testing.assert_allclose(V_beta, expected_covariance, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(V_beta_inv, expected_precision, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(log_det, expected_log_det, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(V_beta @ V_beta_inv, np.eye(3), rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("penalty_scale", [1e3, 1e4, 1e6])
+def test_large_penalty_preserves_rotated_unpenalized_direction(penalty_scale):
+    """
+    Preserve an unpenalized direction mixed across all coefficients.
+
+    This is an orthogonal rotation of the diagonal construction above. The
+    rotation preserves the exact spectrum and determinant while preventing
+    column normalization from isolating the null direction one coordinate at
+    a time.
+    """
+    R = np.diag([3.0, 2.0, 4.0])
+    sqrt_penalty = np.asarray(
+        [
+            [0.0, penalty_scale, 0.0],
+            [0.0, 0.0, 2.0 * penalty_scale],
+        ]
+    )
+
+    rng = np.random.default_rng(20260901)
+    rotation, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+
+    _, rotated_R = np.linalg.qr(R @ rotation)
+    rotated_sqrt_penalty = sqrt_penalty @ rotation
+
+    V_beta, _, log_det = vbeta_and_logdet(
+        jnp.asarray(rotated_R),
+        jnp.asarray(rotated_sqrt_penalty),
+        phi=1.0,
+    )
+
+    precision_diagonal = np.asarray(
+        [
+            9.0,
+            4.0 + penalty_scale**2,
+            16.0 + 4.0 * penalty_scale**2,
+        ]
+    )
+    expected_covariance = rotation.T @ np.diag(1.0 / precision_diagonal) @ rotation
+    expected_log_det = np.sum(np.log(precision_diagonal))
+
+    np.testing.assert_allclose(
+        V_beta,
+        expected_covariance,
+        rtol=1e-9,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        log_det,
+        expected_log_det,
+        rtol=1e-10,
+        atol=1e-10,
+    )
