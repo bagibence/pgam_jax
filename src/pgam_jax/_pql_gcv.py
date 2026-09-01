@@ -7,10 +7,8 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from numpy.typing import NDArray
 
+from ._utils import singular_value_keep_mask
 from .penalty_utils import compute_penalty_blocks, prepend_zeros_for_intercept
-
-FLOAT_EPS = jnp.finfo(jnp.float32).eps
-
 
 _vmap_where = jax.vmap(jnp.where, (None, None, 0), out_axes=0)
 
@@ -30,10 +28,11 @@ def _compute_gcv_and_states(
     sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
 
     n_obs = X.shape[0]
-    U, s, V_T = jnp.linalg.svd(jnp.vstack((R, sqrt_penalty)), full_matrices=False)
+    A = jnp.vstack((R, sqrt_penalty))
+    U, s, V_T = jnp.linalg.svd(A, full_matrices=False)
 
     # remove low val singular values (numerical stability)
-    low_vals = s < FLOAT_EPS * s.max()
+    low_vals = ~singular_value_keep_mask(s, A.shape)
     s = jnp.where(low_vals, 0, s)
     U = _vmap_where(low_vals, 0, U)
     V_T = _vmap_where(low_vals, 0, V_T.T).T

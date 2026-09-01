@@ -75,3 +75,15 @@ def stack_block_diag(
 def to_zero_dim_jax_array(x: ArrayLike) -> jax.Array:
     """Turn `x` into a 0-dimensional jax array."""
     return jnp.reshape(jnp.asarray(x), ())
+
+
+def singular_value_keep_mask(
+    singular_values: jax.Array, matrix_shape: tuple
+) -> jax.Array:
+    """
+    Return a boolean mask of numerically retained singular values.
+
+    Uses JAX's default pseudoinverse rank convention.
+    """
+    rtol = 10.0 * max(matrix_shape) * jnp.finfo(singular_values.dtype).eps
+    return singular_values > rtol * singular_values.max()
