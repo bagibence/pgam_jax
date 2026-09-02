@@ -706,7 +706,11 @@ def test_two_term_reduction_declines_outside_its_domain(z, weights, df, noncentr
     decision to refuse or integrate belongs.
     """
     reduced = chisqsum._reduce(
-        z, np.array(weights), np.array(df), np.array(noncentrality), lower_tail=True,
+        z,
+        np.array(weights),
+        np.array(df),
+        np.array(noncentrality),
+        lower_tail=True,
     )
     assert reduced is None
 
