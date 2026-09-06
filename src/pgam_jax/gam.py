@@ -7,7 +7,14 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxopt import LBFGS, ScipyMinimize
-from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
+from nemos.basis import (
+    AdditiveBasis,
+    BSplineConv,
+    BSplineEval,
+    CyclicBSplineConv,
+    CyclicBSplineEval,
+    MultiplicativeBasis,
+)
 from nemos.glm.initialize_parameters import (
     INVERSE_FUNCS,
     initialize_intercept_matching_mean_rate,
@@ -61,6 +68,15 @@ from .penalty_utils import (
     prepend_zeros_for_intercept,
 )
 
+SupportedBSplineBasis = (
+    BSplineEval
+    | CyclicBSplineEval
+    | BSplineConv
+    | CyclicBSplineConv
+    | AdditiveBasis
+    | MultiplicativeBasis
+)
+
 
 # TODO: Should any other observation model be supported?
 def _make_variance_function(
@@ -91,7 +107,8 @@ def _make_variance_function(
 
 
 def _validate_eval_bases_have_bounds(basis) -> None:
-    """Raise if any eval-mode leaf has ``bounds=None``.
+    """
+    Raise if any eval-mode leaf has ``bounds=None``.
 
     Without explicit bounds, ``nemos`` rescales each input array to ``[0, 1]``
     using its own min and max, so the same physical x maps to different
@@ -100,7 +117,7 @@ def _validate_eval_bases_have_bounds(basis) -> None:
     missing = [
         leaf
         for leaf in basis._iterate_over_components()
-        if isinstance(leaf, BSplineEval) and leaf.bounds is None
+        if isinstance(leaf, (BSplineEval, CyclicBSplineEval)) and leaf.bounds is None
     ]
     if not missing:
         return
@@ -226,7 +243,7 @@ class GAM:
 
     def __init__(
         self,
-        basis: BSplineEval | AdditiveBasis | MultiplicativeBasis,
+        basis: SupportedBSplineBasis,
         observation_model: Observations = PoissonObservations(),
         maxiter: int = 100,
         tol_update: float = 1e-5,
