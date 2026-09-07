@@ -68,6 +68,22 @@ uv run --extra dev --extra notebooks jupyter lab
 
 The Quick Start commands assume `uv`. If you installed with `pip`, run `jupyter lab` (and `pytest`) directly in your environment instead.
 
+## Performance
+
+Consider turning on JAX's persistent compilation cache. It stores compiled kernels on disk, so a new session loads them instead of recompiling.
+
+```python
+import os
+
+jax.config.update("jax_compilation_cache_dir", os.path.expanduser("~/.cache/jax")) # or wherever you want to store it
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+jax.config.update("jax_compilation_cache_max_size", 1024**3)  # bytes, 1 GiB
+```
+
+JAX does not expand `~` itself. Without `os.path.expanduser` it creates a directory named `~` in the working directory.
+
+Keep the minimum compile time at zero. A fit compiles a few hundred small kernels, and no single one takes more than a quarter of a second. The size cap bounds the cache directory instead. JAX evicts the least recently used entries once the directory exceeds it.
+
 ## Tests
 Run tests with:
 
