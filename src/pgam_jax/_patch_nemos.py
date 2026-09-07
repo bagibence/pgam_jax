@@ -28,6 +28,10 @@ def _bspline_derivative(self, sample_pts: np.ndarray, der: int = 2):
     """
     bounds = getattr(self, "bounds", None)
     sample_pts, _ = min_max_rescale_samples(sample_pts, bounds)
+    # nemos' bspline() screens for out-of-range points with the builtin any().
+    # On a JAX array that walks the samples one at a time, and each element
+    # costs a device transfer. Hand it a numpy array instead.
+    sample_pts = np.asarray(sample_pts)
     knot_locs = self._generate_knots(is_cyclic=False)
     shape = sample_pts.shape
     X = bspline(sample_pts, knot_locs, order=self.order, der=der, outer_ok=False)
