@@ -6,6 +6,8 @@ Statsmodels terminology:
 3. variance: the variance function of the observation model
 """
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -23,6 +25,7 @@ def tree_concat(tree1, tree2, axis):
     return jtu.tree_map(lambda x, y: jnp.concatenate([x, y], axis=axis), tree1, tree2)
 
 
+@functools.lru_cache(maxsize=None)
 def model_constructors_for_weights_and_pseudo_data(
     variance_func, link_func, fisher_scoring=False
 ):
@@ -43,6 +46,13 @@ def model_constructors_for_weights_and_pseudo_data(
     Returns
     -------
         The IRLS weights and pseudo-data computing function.
+
+    Notes
+    -----
+    The result is cached on the identity of ``variance_func`` and
+    ``link_func``. The helpers below are jitted closures, and JAX keys its
+    compilation cache on the function object. A fresh call would build fresh
+    closures, so every model would compile the same kernels again.
     """
 
     variance_der = _elementwise_derivative(variance_func)

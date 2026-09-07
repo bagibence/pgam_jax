@@ -79,6 +79,17 @@ SupportedBSplineBasis = (
 
 
 # TODO: Should any other observation model be supported?
+def _poisson_variance(mu: jnp.ndarray) -> jnp.ndarray:
+    """
+    Variance function of the Poisson family.
+
+    Defined at module level so that every call to ``_make_variance_function``
+    returns the same object. The jitted IRLS helpers are cached on that object,
+    so a second model reuses the compiled kernels instead of building new ones.
+    """
+    return mu
+
+
 def _make_variance_function(
     observation_model: Observations,
 ) -> Callable[[jnp.ndarray], jnp.ndarray]:
@@ -101,7 +112,7 @@ def _make_variance_function(
         If the observation model is not Poisson.
     """
     if isinstance(observation_model, PoissonObservations):
-        return lambda mu: mu
+        return _poisson_variance
     else:
         raise NotImplementedError("Currently only Poisson observations are supported.")
 
