@@ -21,35 +21,50 @@ from pgam_jax import GAM
 # ---------------------------------------------------------------------------
 
 
-def test_validator_raises_for_eval_basis_without_bounds():
-    basis = nmo.basis.BSplineEval(n_basis_funcs=10, order=4)
+@pytest.mark.parametrize(
+    "basis_cls", [nmo.basis.BSplineEval, nmo.basis.CyclicBSplineEval]
+)
+def test_validator_raises_for_eval_basis_without_bounds(basis_cls):
+    basis = basis_cls(n_basis_funcs=10, order=4)
     with pytest.raises(ValueError, match="bounds"):
         GAM(basis)
 
 
-def test_validator_raises_for_composite_with_missing_bounds():
+@pytest.mark.parametrize(
+    "basis_cls", [nmo.basis.BSplineEval, nmo.basis.CyclicBSplineEval]
+)
+def test_validator_raises_for_composite_with_missing_bounds(basis_cls):
     b1 = nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-1.0, 1.0))
-    b2 = nmo.basis.BSplineEval(n_basis_funcs=10, order=4)  # missing bounds
+    b2 = basis_cls(n_basis_funcs=10, order=4)  # missing bounds
     with pytest.raises(ValueError, match="bounds"):
         GAM(b1 + b2)
 
 
-def test_validator_raises_for_multiplicative_with_missing_bounds():
+@pytest.mark.parametrize(
+    "basis_cls", [nmo.basis.BSplineEval, nmo.basis.CyclicBSplineEval]
+)
+def test_validator_raises_for_multiplicative_with_missing_bounds(basis_cls):
     b1 = nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-1.0, 1.0))
-    b2 = nmo.basis.BSplineEval(n_basis_funcs=10, order=4)  # missing bounds
+    b2 = basis_cls(n_basis_funcs=10, order=4)  # missing bounds
     with pytest.raises(ValueError, match="bounds"):
         GAM(b1 * b2)
 
 
-def test_validator_does_not_raise_for_conv_basis():
-    # BSplineConv has no bounds attribute and must never trigger the validator
-    basis = nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
+@pytest.mark.parametrize(
+    "basis_cls", [nmo.basis.BSplineConv, nmo.basis.CyclicBSplineConv]
+)
+def test_validator_does_not_raise_for_conv_basis(basis_cls):
+    # Convolutional bases have no bounds attribute and must pass validation.
+    basis = basis_cls(n_basis_funcs=10, window_size=51)
     GAM(basis)
 
 
-def test_validator_does_not_raise_when_all_eval_bases_have_bounds():
+@pytest.mark.parametrize(
+    "basis_cls", [nmo.basis.BSplineEval, nmo.basis.CyclicBSplineEval]
+)
+def test_validator_does_not_raise_when_all_eval_bases_have_bounds(basis_cls):
     b1 = nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-1.0, 1.0))
-    b2 = nmo.basis.BSplineEval(n_basis_funcs=8, order=4, bounds=(0.0, 5.0))
+    b2 = basis_cls(n_basis_funcs=8, order=4, bounds=(0.0, 5.0))
     GAM(b1 + b2)
 
 
