@@ -7,8 +7,12 @@ Reference: Demo_PGAM/PGAM/src/PGAM/deriv_det_Slam.py
 
 Key design decisions vs. the numpy reference
 ---------------------------------------------
-1. transform_slam uses lax.scan with a fixed iteration budget of q steps.
-   Each step after convergence (gamma_mask empty) is an exact no-op.
+1. transform_slam iterates the Appendix B step until the state stops
+   changing, with q steps as the cap.  The step is a deterministic function of
+   the state, so a step that changes nothing is a fixed point and every later
+   step is an exact no-op.  The transform settles in a few steps while the cap
+   is one step per column, so stopping early is what keeps the dense penalty
+   path affordable.
 
 2. The Cholesky + try/except fallback in the reference is replaced by a
    single unconditional eigh path (_eigh_log_det_and_inv).  try/except cannot
@@ -16,8 +20,11 @@ Key design decisions vs. the numpy reference
    uniformly via jnp.where masking of non-positive eigenvalues.
 
 3. Gradients and Hessian are computed analytically (not via autodiff).
-   lax.scan through eigh does not reliably support reverse-mode AD, and the
-   analytical expressions are cheap once S_lam^{-1} is available.
+   Iterating eigh does not reliably support reverse-mode AD, and the
+   analytical expressions are cheap once S_lam^{-1} is available. The
+   lax.while_loop in decision 1 keeps that constraint: it cannot be
+   reverse-differentiated, and it raises rather than returning a wrong answer
+   if a caller ever tries.
 
 Public API
 ----------
@@ -30,7 +37,9 @@ Public API
 import warnings
 from collections import defaultdict
 
+import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 from jax import lax
 
@@ -145,13 +154,63 @@ def _make_scan_body(lams, q):
     return body
 
 
+def _run_to_fixed_point(body, init, max_iter):
+    """
+    Iterate the scan body until the state stops changing.
+
+    The body is a deterministic function of the state. Once one step leaves the
+    state unchanged, every later step is a no-op, so stopping there gives the
+    same result as running the full budget. ``max_iter`` is kept as a cap, so
+    this can never run more steps than the fixed-length loop it replaces.
+
+    The transform converges in a few steps, while the budget is one step per
+    column. Stopping early is what makes the dense penalty path affordable.
+
+    Parameters
+    ----------
+    body :
+        The scan body, mapping ``(state, None)`` to ``(new_state, None)``.
+    init :
+        The initial state tuple.
+    max_iter :
+        Static upper bound on the number of steps.
+
+    Returns
+    -------
+    :
+        The state after the last step.
+    """
+
+    def unchanged(old, new):
+        return jtu.tree_reduce(
+            jnp.logical_and,
+            jtu.tree_map(lambda x, y: jnp.all(x == y), old, new),
+            jnp.asarray(True),
+        )
+
+    def cond_fun(carry):
+        _, moving, step = carry
+        return moving & (step < max_iter)
+
+    def body_fun(carry):
+        state, _, step = carry
+        new_state, _ = body(state, None)
+        return new_state, jnp.logical_not(unchanged(state, new_state)), step + 1
+
+    state, _, _ = lax.while_loop(
+        cond_fun, body_fun, (init, jnp.asarray(True), jnp.zeros((), dtype=jnp.int32))
+    )
+    return state
+
+
+@jax.jit
 def transform_slam(S_tensor, rho):
     """
     Stable block-diagonal transform of Σᵢ λᵢ Sᵢ (Wood 2011, Appendix B).
 
-    Runs ``lax.scan`` for exactly ``q`` iterations.  Iterations after
-    convergence (``gamma_mask`` empty or ``r == Q``) are exact no-ops, so the
-    budget is safe.
+    Iterates until the state stops changing, with one step per column as the
+    cap. Steps after convergence are exact no-ops, so stopping at the fixed
+    point gives the same result as spending the whole budget.
 
     Parameters
     ----------
@@ -181,10 +240,11 @@ def transform_slam(S_tensor, rho):
         jnp.ones(M, dtype=bool),
         jnp.zeros((), dtype=jnp.int32),
     )
-    (_, S_i_out, _, _, _), _ = lax.scan(body, init, None, length=q)
+    _, S_i_out, _, _, _ = _run_to_fixed_point(body, init, q)
     return S_i_out
 
 
+@jax.jit
 def transform_slam_with_Q(S_tensor, lams):
     """
     Same block-diagonal transform as :func:`transform_slam` but also returns
@@ -220,7 +280,7 @@ def transform_slam_with_Q(S_tensor, lams):
         jnp.ones(M, dtype=bool),
         jnp.zeros((), dtype=jnp.int32),
     )
-    (_, S_i_out, Q_s, _, _), _ = lax.scan(body, init, None, length=q)
+    _, S_i_out, Q_s, _, _ = _run_to_fixed_point(body, init, q)
     return S_i_out, Q_s
 
 
