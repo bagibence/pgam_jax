@@ -33,7 +33,6 @@ from ._identifiable_features import (
     _component_feature_blocks,
     _compute_features_identifiable,
     _get_basis_component_infos,
-    _should_drop_basis_col,
     reduce_component_blocks,
 )
 from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
@@ -72,7 +71,7 @@ from .penalty_utils import (
     DROP_LAST_ROW_COL,
     IDENTITY,
     compute_energy_penalty_factors,
-    compute_energy_penalty_tensor,
+    compute_energy_penalty_tensor_additive_component,
     compute_penalty_blocks,
     prepend_zeros_for_intercept,
 )
@@ -149,24 +148,6 @@ def _validate_eval_bases_have_bounds(basis) -> None:
         "covariate range, so that fit and predict use the same normalized "
         "coordinates."
     )
-
-
-def _make_identifiability_dropper(
-    basis_component,
-    square: bool,
-    drop_conv_basis_col: bool,
-):
-    """
-    Per-leaf identifiability function matching ``compute_features_identifiable``.
-
-    Convolutional bases follow ``drop_conv_basis_col``, other bases drop the last column.
-    ``square=True`` returns a function that drops both the last row and column for use on penalty matrices.
-    """
-    if not _should_drop_basis_col(basis_component, drop_conv_basis_col):
-        return IDENTITY
-    if square:
-        return DROP_LAST_ROW_COL
-    return DROP_LAST_COL
 
 
 class GAM:
@@ -284,6 +265,12 @@ class GAM:
         Used as the reference rank in ``test_smooth_significance`` (available after ``fit``).
     dof_resid_ :
         Residual degrees of freedom ``n_obs − edf_`` (available after ``fit``).
+    component_infos_ :
+        Tuple of component layouts rebuilt during fit preparation. Each records
+        the basis, input slice, full-width nonempty mask, identifiability
+        decision, and fitted coefficient slice. Masks are read-only.
+    nonempty_columns_ :
+        Derived view of the masks in ``component_infos_`` for inspection.
     """
 
     def __init__(
@@ -344,25 +331,6 @@ class GAM:
         self.n_simpson_sample = int(1e4)
         self.use_glm_init = use_glm_init
         self.nan_handling = nan_handling
-
-        # Identifiability is applied per basis component to match how the design matrix is built:
-        # BSplineConv leaves follow ``drop_conv_basis_col``; other leaves drop the last column.
-        self._apply_identifiability_column = tuple(
-            _make_identifiability_dropper(
-                b,
-                square=False,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-            )
-            for b in self.basis
-        )
-        self._apply_identifiability_square = tuple(
-            _make_identifiability_dropper(
-                b,
-                square=True,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-            )
-            for b in self.basis
-        )
 
     def initialize_params(
         self,
@@ -465,14 +433,10 @@ class GAM:
         explicit entry of the masked tensor.
         """
         ph = PenaltyHandler()
-        nonempty = self._nonempty
-        for index, (S_tensor, basis_comp) in enumerate(zip(penalty_tree, self.basis)):
-            id_fn = (
-                DROP_LAST_COL
-                if _should_drop_basis_col(basis_comp, self.drop_conv_basis_col)
-                else IDENTITY
-            )
-            if nonempty is not None and nonempty.is_masked(index):
+        for S_tensor, info in zip(penalty_tree, self._component_infos(), strict=True):
+            basis_comp = info.basis
+            id_fn = DROP_LAST_COL if info.drops_identifiability_column else IDENTITY
+            if info.is_masked:
                 ph.add(
                     S_tensor,
                     penalize_null_space=False,
@@ -586,18 +550,18 @@ class GAM:
         """
         Compute the penalty tensor tree for all smooth terms.
 
-        Delegates to ``compute_energy_penalty_tensor``, which removes the rows
-        and columns of the empty design columns before it measures the null
-        space of each component.
+        Remove empty rows and columns before measuring each penalty's null
+        space. The identifiability column is still removed downstream.
         """
-        nonempty = self._nonempty
-        keep_masks = None if nonempty is None else list(nonempty.masks)
-        return compute_energy_penalty_tensor(
-            self.basis,
-            self.n_simpson_sample,
-            penalize_null_space=True,
-            keep_masks=keep_masks,
-        )
+        return [
+            compute_energy_penalty_tensor_additive_component(
+                info.basis,
+                self.n_simpson_sample,
+                penalize_null_space=True,
+                keep=info.nonempty_mask,
+            )
+            for info in self._component_infos()
+        ]
 
     @property
     def min_obs(self) -> int | None:
@@ -609,23 +573,42 @@ class GAM:
         """
         return resolve_min_obs(self.drop_empty_columns)
 
-    @property
-    def _drops_identifiability_column(self) -> list[bool]:
-        """Whether each component loses one more column after the mask."""
-        return [
-            _should_drop_basis_col(component, self.drop_conv_basis_col)
-            for component in self.basis
-        ]
+    def _component_infos(self) -> tuple[BasisComponentInfo, ...]:
+        """Return the prepared layout, or an unmasked layout before preparation."""
+        if hasattr(self, "component_infos_"):
+            return self.component_infos_
+        return _get_basis_component_infos(
+            self.basis, drop_conv_basis_col=self.drop_conv_basis_col
+        )
 
     @property
-    def _nonempty(self) -> NonemptyColumns | None:
-        """The fitted nonempty-column record, or None before fit."""
-        return getattr(self, "nonempty_columns_", None)
+    def nonempty_columns_(self) -> NonemptyColumns:
+        """Expose fitted masks as a derived view of the component layout."""
+        return NonemptyColumns(
+            tuple(info.nonempty_mask for info in self.component_infos_)
+        )
+
+    @property
+    def _apply_identifiability_column(self):
+        """Static column transforms matching the component layout."""
+        return tuple(
+            DROP_LAST_COL if info.drops_identifiability_column else IDENTITY
+            for info in self._component_infos()
+        )
+
+    @property
+    def _apply_identifiability_square(self):
+        """Static square-matrix transforms matching the component layout."""
+        return tuple(
+            DROP_LAST_ROW_COL if info.drops_identifiability_column else IDENTITY
+            for info in self._component_infos()
+        )
 
     def _detect_nonempty_columns(
         self,
         blocks: list,
         y: jnp.ndarray,
+        infos: tuple[BasisComponentInfo, ...],
     ) -> NonemptyColumns:
         """
         Find the empty columns of every basis component.
@@ -649,7 +632,7 @@ class GAM:
         min_obs = self.min_obs
         if min_obs is None:
             return NonemptyColumns.all_kept(
-                [component.n_basis_funcs for component in self.basis]
+                [info.basis.n_basis_funcs for info in infos]
             )
         kept_rows = np.asarray(
             kept_rows_for_fit(np.hstack(blocks), y, self.nan_handling)
@@ -657,7 +640,7 @@ class GAM:
         return NonemptyColumns.from_component_blocks(
             [block[kept_rows] for block in blocks],
             min_obs,
-            self._drops_identifiability_column,
+            [info.drops_identifiability_column for info in infos],
         )
 
     def _compute_raw_design_matrix(
@@ -670,12 +653,8 @@ class GAM:
         The basis must already be set up. ``fit`` sets it up once, and
         prediction reuses the basis state learned during fit.
         """
-        X = _compute_features_identifiable(
-            self.basis,
-            *inputs,
-            drop_conv_basis_col=self.drop_conv_basis_col,
-            nonempty=self._nonempty,
-        )
+        infos = self._component_infos()
+        X = reduce_component_blocks(_component_feature_blocks(infos, *inputs), infos)
         return jnp.asarray(X)
 
     def _fit_design_matrix(
@@ -692,21 +671,23 @@ class GAM:
         self.basis.setup_basis(*inputs)
         # Evaluate the basis once. Detection needs the full-width blocks, and
         # the design is those same blocks with columns removed.
-        blocks = _component_feature_blocks(self.basis, *inputs)
-        self.nonempty_columns_ = self._detect_nonempty_columns(blocks, y)
-        X_raw = jnp.asarray(
-            reduce_component_blocks(
-                blocks,
-                self.basis,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-                nonempty=self.nonempty_columns_,
-            )
+        unmasked = _get_basis_component_infos(
+            self.basis, drop_conv_basis_col=self.drop_conv_basis_col
         )
+        blocks = _component_feature_blocks(unmasked, *inputs)
+        nonempty = self._detect_nonempty_columns(blocks, y, unmasked)
+        infos = _get_basis_component_infos(
+            self.basis,
+            drop_conv_basis_col=self.drop_conv_basis_col,
+            nonempty=nonempty,
+        )
+        X_raw = jnp.asarray(reduce_component_blocks(blocks, infos))
         X, y, feature_mean = apply_nan_policy_for_fit(
             X_raw,
             y,
             self.nan_handling,
         )
+        self.component_infos_ = infos
         self.feature_mean_ = feature_mean
         if y is None:  # y was supplied, so this is an internal invariant.
             raise RuntimeError("NaN policy unexpectedly returned no response.")
@@ -888,11 +869,7 @@ class GAM:
         component: int | str,
     ) -> BasisComponentInfo:
         """Resolve a component index or basis label to component metadata."""
-        infos = _get_basis_component_infos(
-            self.basis,
-            drop_conv_basis_col=self.drop_conv_basis_col,
-            nonempty=self._nonempty,
-        )
+        infos = self._component_infos()
         if isinstance(component, str):
             for info in infos:
                 if info.basis.label == component:
@@ -1253,25 +1230,14 @@ class GAM:
 
         info = self._resolve_basis_component(component_index)
 
-        if len(xi) != info.input_slice.stop - info.input_slice.start:
+        if len(xi) != info.n_inputs:
             raise ValueError(
                 f"component_index {component_index} expects "
-                f"{info.input_slice.stop - info.input_slice.start} input array(s), "
+                f"{info.n_inputs} input array(s), "
                 f"got {len(xi)}."
             )
         # TODO: Why is this called fX? isn't it X_i?
-        nonempty = self._nonempty
-        component_nonempty = (
-            None if nonempty is None else nonempty.component(info.index)
-        )
-        fX = jnp.asarray(
-            _compute_features_identifiable(
-                info.basis,
-                *xi,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-                nonempty=component_nonempty,
-            )
-        )
+        fX = jnp.asarray(info.compute_features(*xi))
 
         nan_filter = jnp.asarray(
             jnp.sum(jnp.isnan(jnp.asarray(xi)), axis=0),

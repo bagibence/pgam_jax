@@ -65,22 +65,6 @@ class NonemptyColumns:
 
     masks: tuple[np.ndarray, ...]
 
-    def is_masked(self, index: int) -> bool:
-        """Whether component ``index`` lost any empty columns."""
-        return not bool(self.masks[index].all())
-
-    def mask_for_component(self, index: int) -> np.ndarray | None:
-        """
-        Return a component's mask, or None when every column is kept.
-
-        Callers can skip boolean indexing when no columns were removed.
-        """
-        return self.masks[index] if self.is_masked(index) else None
-
-    def component(self, index: int) -> NonemptyColumns:
-        """Return the record for just component ``index``."""
-        return NonemptyColumns((self.masks[index],))
-
     @classmethod
     def all_kept(cls, widths: Sequence[int]) -> NonemptyColumns:
         """Build a record that keeps every column of every component."""

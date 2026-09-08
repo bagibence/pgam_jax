@@ -164,9 +164,14 @@ gam = GAM(basis, drop_empty_columns=True)
 gam = GAM(basis, drop_empty_columns=20)
 ```
 
-After the fit, `gam.nonempty_columns_` holds one boolean mask per basis
-component, over the full basis width. `coef_` and `cov_beta_` are reduced to
-match.
+After the fit, `gam.component_infos_` holds one layout record per smooth:
+its basis, input slice, full-width nonempty mask, identifiability decision,
+and fitted coefficient slice. Feature construction and penalties use these
+same records. `coef_` and `cov_beta_` are reduced to match.
+
+`gam.nonempty_columns_` remains available as a derived inspection view of
+these masks. The masks are read-only so that editing a view cannot silently
+change the fitted column layout.
 
 Two points to know before you turn it on:
 

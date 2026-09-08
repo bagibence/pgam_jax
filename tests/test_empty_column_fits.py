@@ -103,6 +103,18 @@ class TestMaskingShrinksTheModel:
         assert blocks[2].start == blocks[1].stop + 1
         assert sum(block.ncol for block in blocks) == gam.coef_.size + 1
 
+        for index, values in enumerate((xi[0], second)):
+            smooth, lower, upper = gam.smooth_compute((values,), index)
+            raw = tuple(basis)[index]._compute_features(values)
+            reduced = raw[:, gam.nonempty_columns_.masks[index]][:, :-1]
+            coefficient_slice = slice(
+                blocks[index + 1].start - 1, blocks[index + 1].stop
+            )
+            expected = (reduced - reduced.mean(axis=0)) @ gam.coef_[coefficient_slice]
+            np.testing.assert_allclose(smooth, expected, atol=1e-12)
+            assert np.all(np.isfinite(lower))
+            assert np.all(np.isfinite(upper))
+
     def test_the_coefficient_vector_gets_shorter(self):
         xi, y = _partial_1d()
         on = _fit(_bspline(12), xi, y, True)
@@ -219,16 +231,19 @@ class TestDegenerateInputs:
         Concurvity before a fit must use the full basis, mask or no mask.
 
         A fit that raises after ``_fit_design_matrix`` leaves
-        ``nonempty_columns_`` set while ``coef_`` is absent. The pre-fit branch
+        ``component_infos_`` set while ``coef_`` is absent. The pre-fit branch
         must ignore it, or the design and the term blocks disagree in width.
         """
         from pgam_jax._empty_columns import NonemptyColumns
+        from pgam_jax._identifiable_features import _get_basis_component_infos
 
         xi, _ = _spread_1d()
         gam = GAM(_bspline(10), drop_empty_columns=True)
         stale = np.ones(10, dtype=bool)
         stale[:4] = False
-        gam.nonempty_columns_ = NonemptyColumns((stale,))
+        gam.component_infos_ = _get_basis_component_infos(
+            gam.basis, drop_conv_basis_col=False, nonempty=NonemptyColumns((stale,))
+        )
         assert not hasattr(gam, "coef_")
         assert sum(block.ncol for block in term_blocks_for_gam(gam)) == 10
 

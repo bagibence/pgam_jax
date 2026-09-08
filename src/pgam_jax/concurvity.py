@@ -294,12 +294,12 @@ def term_blocks_for_gam(gam: GAM) -> list[TermBlock]:
     account for the prepended intercept column.
     """
 
-    nonempty = gam._nonempty if hasattr(gam, "coef_") else None
-    infos = _get_basis_component_infos(
-        gam.basis,
-        drop_conv_basis_col=gam.drop_conv_basis_col,
-        nonempty=nonempty,
-    )
+    if hasattr(gam, "coef_"):
+        infos = gam.component_infos_
+    else:
+        infos = _get_basis_component_infos(
+            gam.basis, drop_conv_basis_col=gam.drop_conv_basis_col
+        )
     blocks = [TermBlock(label="para", start=0, stop=0)]
     for info in infos:
         s = info.identifiable_feature_slice

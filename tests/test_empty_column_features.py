@@ -36,21 +36,28 @@ def inputs():
 class TestComponentFeatureBlocks:
     def test_one_full_width_block_per_component(self, mixed_basis, inputs):
         mixed_basis.setup_basis(*inputs)
-        blocks = _component_feature_blocks(mixed_basis, *inputs)
+        blocks = _component_feature_blocks(
+            _get_basis_component_infos(mixed_basis, drop_conv_basis_col=False), *inputs
+        )
         assert [b.shape[1] for b in blocks] == [6, 7, 20]
         assert all(b.shape[0] == 50 for b in blocks)
 
     def test_blocks_concatenate_to_the_full_design(self, additive_basis, inputs):
         xi = inputs[:2]
         additive_basis.setup_basis(*xi)
-        blocks = _component_feature_blocks(additive_basis, *xi)
+        blocks = _component_feature_blocks(
+            _get_basis_component_infos(additive_basis, drop_conv_basis_col=False), *xi
+        )
         expected = additive_basis.compute_features(*xi)
         np.testing.assert_allclose(np.hstack(blocks), expected)
 
     def test_wrong_number_of_inputs_raises(self, additive_basis, inputs):
         additive_basis.setup_basis(*inputs[:2])
         with pytest.raises(ValueError, match="expects 2 input array"):
-            _component_feature_blocks(additive_basis, *inputs[:3])
+            _component_feature_blocks(
+                _get_basis_component_infos(additive_basis, drop_conv_basis_col=False),
+                *inputs[:3],
+            )
 
 
 class TestMaskedFeatures:
@@ -70,7 +77,9 @@ class TestMaskedFeatures:
     ):
         xi = inputs[:2]
         additive_basis.setup_basis(*xi)
-        blocks = _component_feature_blocks(additive_basis, *xi)
+        blocks = _component_feature_blocks(
+            _get_basis_component_infos(additive_basis, drop_conv_basis_col=False), *xi
+        )
 
         m0 = np.ones(6, dtype=bool)
         m0[2] = False
@@ -97,6 +106,37 @@ class TestMaskedFeatures:
 
 
 class TestComponentInfos:
+    @pytest.mark.parametrize("convolution", [False, True])
+    @pytest.mark.parametrize("drop_conv", [False, True])
+    def test_reference_and_features_use_full_basis_coordinates(
+        self, convolution, drop_conv
+    ):
+        basis = nmo.basis.BSplineConv(6, window_size=12) if convolution else _bspline(6)
+        mask = np.array([True, False, True, True, False, False])
+        (info,) = _get_basis_component_infos(
+            basis,
+            drop_conv_basis_col=drop_conv,
+            nonempty=NonemptyColumns((mask,)),
+        )
+        drops = not convolution or drop_conv
+        assert info.identifiability_column == (3 if drops else None)
+        block = np.arange(18).reshape(3, 6)
+        expected = block[:, [0, 2] if drops else [0, 2, 3]]
+        np.testing.assert_array_equal(info.reduce_features(block), expected)
+        assert info.identifiable_feature_slice == slice(0, expected.shape[1])
+
+    def test_layout_owns_a_read_only_copy_of_the_mask(self):
+        mask = np.array([True, False, True, True, False, False])
+        (info,) = _get_basis_component_infos(
+            _bspline(6),
+            drop_conv_basis_col=False,
+            nonempty=NonemptyColumns((mask,)),
+        )
+        mask[:] = True
+        assert info.identifiability_column == 3
+        with pytest.raises(ValueError, match="read-only"):
+            info.nonempty_mask[0] = False
+
     def test_slices_shrink_with_the_mask(self, mixed_basis):
         m0 = np.ones(6, dtype=bool)
         m0[1] = False
@@ -144,7 +184,9 @@ class TestMaskingIsARestriction:
     def test_columns_are_a_subset_of_the_unmasked_columns(self, additive_basis, inputs):
         xi = inputs[:2]
         additive_basis.setup_basis(*xi)
-        blocks = _component_feature_blocks(additive_basis, *xi)
+        blocks = _component_feature_blocks(
+            _get_basis_component_infos(additive_basis, drop_conv_basis_col=False), *xi
+        )
 
         m0 = np.ones(6, dtype=bool)
         m0[[1, 4]] = False

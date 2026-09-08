@@ -7,14 +7,55 @@ from ._empty_columns import NonemptyColumns
 from ._nemos_compat import get_n_inputs
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class BasisComponentInfo:
-    """Slices for one component after identifiability column dropping."""
+    """
+    Layout of one smooth in the full basis and fitted coefficient vector.
+
+    ``nonempty_mask`` indexes the full basis, before identifiability. The
+    last surviving column is removed when ``drops_identifiability_column``
+    is True. ``identifiable_feature_slice`` indexes the resulting design
+    and coefficients, without the intercept.
+
+    Penalties use the nonempty mask before rebuilding their null-space term.
+    Their identifiability transform remains a separate, later operation.
+    """
 
     index: int
     basis: object
     input_slice: slice
     identifiable_feature_slice: slice
+    nonempty_mask: np.ndarray
+    drops_identifiability_column: bool
+
+    @property
+    def n_inputs(self) -> int:
+        """Number of input arrays consumed by this component."""
+        return self.input_slice.stop - self.input_slice.start
+
+    @property
+    def is_masked(self) -> bool:
+        """Whether any full-basis columns were removed as empty."""
+        return not bool(self.nonempty_mask.all())
+
+    @property
+    def identifiability_column(self) -> int | None:
+        """Full-basis index of the last survivor, or None without a constraint."""
+        if not self.drops_identifiability_column:
+            return None
+        return int(np.flatnonzero(self.nonempty_mask)[-1])
+
+    def reduce_features(self, block: np.ndarray) -> np.ndarray:
+        """Remove empty columns, then the identifiability column."""
+        if self.is_masked:
+            block = block[:, self.nonempty_mask]
+        if self.drops_identifiability_column:
+            block = block[:, :-1]
+        return block
+
+    def compute_features(self, *inputs) -> np.ndarray:
+        """Evaluate reduced features using the already configured basis."""
+        return self.reduce_features(self.basis._compute_features(*inputs))
 
 
 def _should_drop_basis_col(
@@ -33,38 +74,14 @@ def _should_drop_basis_col(
     return True
 
 
-def _iter_components_with_inputs(basis, inputs):
-    """
-    Pair each basis component with the inputs it consumes.
-
-    Iterating a nemos basis flattens additive composition, so a tensor product
-    counts as one component. The input arrays are split in the same order.
-    """
-    n_expected = sum(get_n_inputs(component) for component in basis)
+def _component_feature_blocks(infos, *inputs) -> list[np.ndarray]:
+    """Evaluate full-width blocks using the component records' input slices."""
+    n_expected = sum(info.n_inputs for info in infos)
     if len(inputs) != n_expected:
         raise ValueError(
             f"This basis expects {n_expected} input array(s), got {len(inputs)}."
         )
-    start = 0
-    for component in basis:
-        n_inputs = get_n_inputs(component)
-        yield component, inputs[start : start + n_inputs]
-        start += n_inputs
-
-
-def _component_feature_blocks(basis, *inputs) -> list[np.ndarray]:
-    """
-    Evaluate one full-width feature block per basis component.
-
-    The blocks carry every basis function, so no identifiability column and no
-    empty column is removed yet. Empty-column detection needs this full width,
-    because a nonempty mask indexes basis functions rather than fitted
-    coefficients.
-    """
-    return [
-        component._compute_features(*component_inputs)
-        for component, component_inputs in _iter_components_with_inputs(basis, inputs)
-    ]
+    return [info.basis._compute_features(*inputs[info.input_slice]) for info in infos]
 
 
 def _get_basis_component_infos(
@@ -72,18 +89,32 @@ def _get_basis_component_infos(
     *,
     drop_conv_basis_col: bool,
     nonempty: NonemptyColumns | None = None,
-) -> list[BasisComponentInfo]:
-    """Return component slices matching the identifiable feature matrix columns."""
+) -> tuple[BasisComponentInfo, ...]:
+    """Build component records with full-width masks and reduced slices."""
     infos = []
     input_start = 0
     out_start = 0
-    for index, component in enumerate(basis):
+    components = tuple(basis)
+    if nonempty is not None and len(nonempty) != len(components):
+        raise ValueError("Expected one nonempty mask per basis component.")
+    for index, component in enumerate(components):
         n_inputs = get_n_inputs(component)
 
-        mask = None if nonempty is None else nonempty.mask_for_component(index)
-        n_outputs = component.n_basis_funcs if mask is None else int(mask.sum())
-        if _should_drop_basis_col(component, drop_conv_basis_col):
-            n_outputs -= 1
+        mask = (
+            np.ones(component.n_basis_funcs, dtype=bool)
+            if nonempty is None
+            else np.array(nonempty.masks[index], dtype=bool, copy=True)
+        )
+        if mask.shape != (component.n_basis_funcs,):
+            raise ValueError(
+                f"Mask for component {index} must have shape "
+                f"{(component.n_basis_funcs,)}, got {mask.shape}."
+            )
+        drops_column = _should_drop_basis_col(component, drop_conv_basis_col)
+        n_outputs = int(mask.sum()) - int(drops_column)
+        if n_outputs < 1:
+            raise ValueError(f"Basis component {index} has no fitted columns.")
+        mask.setflags(write=False)
 
         infos.append(
             BasisComponentInfo(
@@ -91,11 +122,13 @@ def _get_basis_component_infos(
                 basis=component,
                 input_slice=slice(input_start, input_start + n_inputs),
                 identifiable_feature_slice=slice(out_start, out_start + n_outputs),
+                nonempty_mask=mask,
+                drops_identifiability_column=drops_column,
             )
         )
         input_start += n_inputs
         out_start += n_outputs
-    return infos
+    return tuple(infos)
 
 
 def compute_features_identifiable(
@@ -104,12 +137,13 @@ def compute_features_identifiable(
     drop_conv_basis_col: bool,
     nonempty: NonemptyColumns | None = None,
 ):
-    """Build the identifiability-constrained design matrix, **uncentered**.
+    """
+    Build the identifiability-constrained design matrix, **uncentered**.
 
     The returned matrix has one column dropped per eval-basis component to
-    remove collinearity with the intercept, but is NOT mean-centered.  Callers
+    remove collinearity with the intercept, but is NOT mean-centered. Callers
     that want a usable design must subtract the per-column means of the
-    training matrix.  ``GAM._fit_design_matrix`` does this and stores the
+    training matrix. ``GAM._fit_design_matrix`` does this and stores the
     means as ``feature_mean_`` for reuse at prediction time
     (``GAM._transform_design_matrix``).
 
@@ -129,29 +163,11 @@ def compute_features_identifiable(
     )
 
 
-# TODO: Should this be a method in nemos basis classes?
-def reduce_component_blocks(
-    blocks,
-    basis,
-    *,
-    drop_conv_basis_col: bool,
-    nonempty: NonemptyColumns | None = None,
-):
-    """
-    Turn full-width component blocks into the reduced design matrix.
-
-    Each block drops its empty columns first. The identifiability column is
-    then taken from the survivors.
-    """
-    out = []
-    for index, (component, block) in enumerate(zip(basis, blocks)):
-        mask = None if nonempty is None else nonempty.mask_for_component(index)
-        if mask is not None:
-            block = block[:, mask]
-        if _should_drop_basis_col(component, drop_conv_basis_col):
-            block = block[:, :-1]
-        out.append(block)
-    return np.hstack(out)
+def reduce_component_blocks(blocks, infos):
+    """Reduce full-width blocks using their matching component records."""
+    return np.hstack(
+        [info.reduce_features(block) for info, block in zip(infos, blocks, strict=True)]
+    )
 
 
 def _compute_features_identifiable(
@@ -160,9 +176,7 @@ def _compute_features_identifiable(
     drop_conv_basis_col: bool,
     nonempty: NonemptyColumns | None = None,
 ):
-    return reduce_component_blocks(
-        _component_feature_blocks(basis, *inputs),
-        basis,
-        drop_conv_basis_col=drop_conv_basis_col,
-        nonempty=nonempty,
+    infos = _get_basis_component_infos(
+        basis, drop_conv_basis_col=drop_conv_basis_col, nonempty=nonempty
     )
+    return reduce_component_blocks(_component_feature_blocks(infos, *inputs), infos)
