@@ -4,12 +4,12 @@ import nemos as nmo
 import numpy as np
 import pytest
 
-from pgam_jax._empty_columns import NonemptyColumns
 from pgam_jax._identifiable_features import (
     _component_feature_blocks,
     _compute_features_identifiable,
     _get_basis_component_infos,
     compute_features_identifiable,
+    reduce_component_blocks,
 )
 
 
@@ -31,6 +31,37 @@ def mixed_basis():
 def inputs():
     rng = np.random.default_rng(0)
     return tuple(rng.uniform(0.05, 0.95, 50) for _ in range(4))
+
+
+def _detection_blocks(widths, empty=None):
+    """
+    Build training blocks whose named columns hold no observations.
+
+    ``empty`` maps a component index to the full-basis columns to empty out.
+    Detection over these blocks produces the mask the test asks for.
+    """
+    empty = {} if empty is None else empty
+    blocks = []
+    for index, width in enumerate(widths):
+        block = np.ones((4, width))
+        block[:, list(empty.get(index, ()))] = 0.0
+        blocks.append(block)
+    return blocks
+
+
+def _detected_infos(basis, widths, empty=None, drop_conv_basis_col=False):
+    """Component records whose masks come from synthetic detection blocks."""
+    return _get_basis_component_infos(
+        basis,
+        drop_conv_basis_col=drop_conv_basis_col,
+        blocks=_detection_blocks(widths, empty),
+        min_obs=1,
+    )
+
+
+def _masked_features(infos, *inputs):
+    """Reduce the real feature blocks with an already detected layout."""
+    return reduce_component_blocks(_component_feature_blocks(infos, *inputs), infos)
 
 
 class TestComponentFeatureBlocks:
@@ -61,15 +92,13 @@ class TestComponentFeatureBlocks:
 
 
 class TestMaskedFeatures:
-    def test_no_mask_matches_the_unmasked_result(self, mixed_basis, inputs):
+    def test_an_empty_mask_matches_the_unmasked_result(self, mixed_basis, inputs):
         mixed_basis.setup_basis(*inputs)
         without = _compute_features_identifiable(
             mixed_basis, *inputs, drop_conv_basis_col=False
         )
-        kept = NonemptyColumns.all_kept([6, 7, 20])
-        with_all_true = _compute_features_identifiable(
-            mixed_basis, *inputs, drop_conv_basis_col=False, nonempty=kept
-        )
+        infos = _detected_infos(mixed_basis, [6, 7, 20])
+        with_all_true = _masked_features(infos, *inputs)
         np.testing.assert_array_equal(without, with_all_true)
 
     def test_mask_is_applied_before_the_identifiability_drop(
@@ -81,28 +110,23 @@ class TestMaskedFeatures:
             _get_basis_component_infos(additive_basis, drop_conv_basis_col=False), *xi
         )
 
-        m0 = np.ones(6, dtype=bool)
-        m0[2] = False
-        m1 = np.ones(7, dtype=bool)
-        m1[6] = False  # the column the identifiability rule would have dropped
-        nonempty = NonemptyColumns((m0, m1))
+        # Component 1 loses the column the identifiability rule would have taken.
+        infos = _detected_infos(additive_basis, [6, 7], {0: [2], 1: [6]})
+        m0, m1 = (info.nonempty_mask for info in infos)
 
-        got = _compute_features_identifiable(
-            additive_basis, *xi, drop_conv_basis_col=False, nonempty=nonempty
-        )
+        got = _masked_features(infos, *xi)
         expected = np.hstack([blocks[0][:, m0][:, :-1], blocks[1][:, m1][:, :-1]])
         np.testing.assert_array_equal(got, expected)
         assert got.shape[1] == (5 - 1) + (6 - 1)
 
-    def test_setup_wrapper_forwards_the_mask(self, additive_basis, inputs):
+    def test_the_setup_wrapper_evaluates_without_a_prior_setup(
+        self, additive_basis, inputs
+    ):
         xi = inputs[:2]
-        m0 = np.ones(6, dtype=bool)
-        m0[0] = False
-        nonempty = NonemptyColumns((m0, np.ones(7, dtype=bool)))
         got = compute_features_identifiable(
-            additive_basis, *xi, drop_conv_basis_col=False, nonempty=nonempty
+            additive_basis, *xi, drop_conv_basis_col=False
         )
-        assert got.shape[1] == (5 - 1) + (7 - 1)
+        assert got.shape == (50, (6 - 1) + (7 - 1))
 
 
 class TestComponentInfos:
@@ -112,11 +136,11 @@ class TestComponentInfos:
         self, convolution, drop_conv
     ):
         basis = nmo.basis.BSplineConv(6, window_size=12) if convolution else _bspline(6)
-        mask = np.array([True, False, True, True, False, False])
-        (info,) = _get_basis_component_infos(
-            basis,
-            drop_conv_basis_col=drop_conv,
-            nonempty=NonemptyColumns((mask,)),
+        (info,) = _detected_infos(
+            basis, [6], {0: [1, 4, 5]}, drop_conv_basis_col=drop_conv
+        )
+        np.testing.assert_array_equal(
+            info.nonempty_mask, [True, False, True, True, False, False]
         )
         drops = not convolution or drop_conv
         assert info.identifiability_column == (3 if drops else None)
@@ -125,28 +149,14 @@ class TestComponentInfos:
         np.testing.assert_array_equal(info.reduce_features(block), expected)
         assert info.identifiable_feature_slice == slice(0, expected.shape[1])
 
-    def test_layout_owns_a_read_only_copy_of_the_mask(self):
-        mask = np.array([True, False, True, True, False, False])
-        (info,) = _get_basis_component_infos(
-            _bspline(6),
-            drop_conv_basis_col=False,
-            nonempty=NonemptyColumns((mask,)),
-        )
-        mask[:] = True
-        assert info.identifiability_column == 3
-        with pytest.raises(ValueError, match="read-only"):
-            info.nonempty_mask[0] = False
+    def test_counts_follow_the_mask(self):
+        (info,) = _detected_infos(_bspline(6), [6], {0: [1, 4, 5]})
+        assert info.n_kept == 3
+        assert info.n_dropped == 3
+        assert info.is_masked is True
 
     def test_slices_shrink_with_the_mask(self, mixed_basis):
-        m0 = np.ones(6, dtype=bool)
-        m0[1] = False
-        m2 = np.ones(20, dtype=bool)
-        m2[:5] = False
-        nonempty = NonemptyColumns((m0, np.ones(7, dtype=bool), m2))
-
-        infos = _get_basis_component_infos(
-            mixed_basis, drop_conv_basis_col=False, nonempty=nonempty
-        )
+        infos = _detected_infos(mixed_basis, [6, 7, 20], {0: [1], 2: list(range(5))})
         widths = [
             i.identifiable_feature_slice.stop - i.identifiable_feature_slice.start
             for i in infos
@@ -156,10 +166,7 @@ class TestComponentInfos:
         assert starts == [0, 4, 10]
 
     def test_input_slices_are_unchanged_by_the_mask(self, mixed_basis):
-        nonempty = NonemptyColumns.all_kept([6, 7, 20])
-        infos = _get_basis_component_infos(
-            mixed_basis, drop_conv_basis_col=False, nonempty=nonempty
-        )
+        infos = _detected_infos(mixed_basis, [6, 7, 20], {0: [1], 2: list(range(5))})
         assert [(i.input_slice.start, i.input_slice.stop) for i in infos] == [
             (0, 1),
             (1, 2),
@@ -188,15 +195,11 @@ class TestMaskingIsARestriction:
             _get_basis_component_infos(additive_basis, drop_conv_basis_col=False), *xi
         )
 
-        m0 = np.ones(6, dtype=bool)
-        m0[[1, 4]] = False
-        m1 = np.ones(7, dtype=bool)
-        m1[6] = False  # the column the unmasked rule would have dropped
-        nonempty = NonemptyColumns((m0, m1))
+        # Component 1 loses the column the unmasked rule would have taken.
+        infos = _detected_infos(additive_basis, [6, 7], {0: [1, 4], 1: [6]})
+        m0, m1 = (info.nonempty_mask for info in infos)
 
-        masked = _compute_features_identifiable(
-            additive_basis, *xi, drop_conv_basis_col=False, nonempty=nonempty
-        )
+        masked = _masked_features(infos, *xi)
         expected = np.hstack(
             [
                 blocks[0][:, self._kept_indices(m0)],
@@ -213,16 +216,8 @@ class TestMaskingIsARestriction:
         unmasked = _compute_features_identifiable(
             additive_basis, *xi, drop_conv_basis_col=False
         )
-        m0 = np.ones(6, dtype=bool)
-        m0[2] = False
-        m1 = np.ones(7, dtype=bool)
-        m1[3] = False
-        masked = _compute_features_identifiable(
-            additive_basis,
-            *xi,
-            drop_conv_basis_col=False,
-            nonempty=NonemptyColumns((m0, m1)),
-        )
+        infos = _detected_infos(additive_basis, [6, 7], {0: [2], 1: [3]})
+        masked = _masked_features(infos, *xi)
         for j in range(masked.shape[1]):
             hits = np.all(np.isclose(unmasked, masked[:, [j]]), axis=0)
             assert (

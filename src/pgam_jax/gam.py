@@ -24,16 +24,13 @@ from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
 
-from ._empty_columns import (
-    NonemptyColumns,
-    resolve_min_obs,
-)
 from ._identifiable_features import (
     BasisComponentInfo,
     _component_feature_blocks,
     _compute_features_identifiable,
     _get_basis_component_infos,
     reduce_component_blocks,
+    resolve_min_obs,
 )
 from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
 from ._nan_policy import (
@@ -269,8 +266,6 @@ class GAM:
         Tuple of component layouts rebuilt during fit preparation. Each records
         the basis, input slice, full-width nonempty mask, identifiability
         decision, and fitted coefficient slice. Masks are read-only.
-    nonempty_columns_ :
-        Derived view of the masks in ``component_infos_`` for inspection.
     """
 
     def __init__(
@@ -582,13 +577,6 @@ class GAM:
         )
 
     @property
-    def nonempty_columns_(self) -> NonemptyColumns:
-        """Expose fitted masks as a derived view of the component layout."""
-        return NonemptyColumns(
-            tuple(info.nonempty_mask for info in self.component_infos_)
-        )
-
-    @property
     def _apply_identifiability_column(self):
         """Static column transforms matching the component layout."""
         return tuple(
@@ -602,45 +590,6 @@ class GAM:
         return tuple(
             DROP_LAST_ROW_COL if info.drops_identifiability_column else IDENTITY
             for info in self._component_infos()
-        )
-
-    def _detect_nonempty_columns(
-        self,
-        blocks: list,
-        y: jnp.ndarray,
-        infos: tuple[BasisComponentInfo, ...],
-    ) -> NonemptyColumns:
-        """
-        Find the empty columns of every basis component.
-
-        Detection runs on the rows that reach the solver, and before centering.
-        Subtracting a column mean turns a sparse column into a dense one, so a
-        later check cannot tell which columns were empty.
-
-        The rows come from the full-width design, while the fit selects its own
-        rows from the reduced design. Under ``nan_handling="drop"`` the
-        full-width design carries at least as many NaN rows as the reduced one,
-        so this can only keep fewer rows, never more. That direction is safe:
-        it never keeps a column that the solver would see as empty. The two row
-        sets are the same for every basis this class accepts, because both an
-        eval B-spline out of bounds and a convolution pad produce NaN across a
-        whole row of the component rather than in single columns.
-
-        ``blocks`` must be the full-width feature blocks for ``inputs``. The
-        caller evaluates them once and reuses them to build the design.
-        """
-        min_obs = self.min_obs
-        if min_obs is None:
-            return NonemptyColumns.all_kept(
-                [info.basis.n_basis_funcs for info in infos]
-            )
-        kept_rows = np.asarray(
-            kept_rows_for_fit(np.hstack(blocks), y, self.nan_handling)
-        )
-        return NonemptyColumns.from_component_blocks(
-            [block[kept_rows] for block in blocks],
-            min_obs,
-            [info.drops_identifiability_column for info in infos],
         )
 
     def _compute_raw_design_matrix(
@@ -675,12 +624,22 @@ class GAM:
             self.basis, drop_conv_basis_col=self.drop_conv_basis_col
         )
         blocks = _component_feature_blocks(unmasked, *inputs)
-        nonempty = self._detect_nonempty_columns(blocks, y, unmasked)
-        infos = _get_basis_component_infos(
-            self.basis,
-            drop_conv_basis_col=self.drop_conv_basis_col,
-            nonempty=nonempty,
-        )
+        min_obs = self.min_obs
+        if min_obs is None:
+            infos = unmasked
+        else:
+            # Count observations before centering and only on fitting rows.
+            # Supported bases put NaNs across an entire component row, so
+            # full-width and reduced designs select the same fitting rows.
+            kept_rows = np.asarray(
+                kept_rows_for_fit(np.hstack(blocks), y, self.nan_handling)
+            )
+            infos = _get_basis_component_infos(
+                self.basis,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+                blocks=[block[kept_rows] for block in blocks],
+                min_obs=min_obs,
+            )
         X_raw = jnp.asarray(reduce_component_blocks(blocks, infos))
         X, y, feature_mean = apply_nan_policy_for_fit(
             X_raw,
@@ -1171,7 +1130,6 @@ class GAM:
                     self.basis,
                     *xi,
                     drop_conv_basis_col=self.drop_conv_basis_col,
-                    nonempty=None,
                 )
             )
             X_smooths, _, _ = apply_nan_policy_for_fit(X_raw, None, self.nan_handling)

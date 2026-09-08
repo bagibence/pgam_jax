@@ -1,10 +1,35 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import Sequence
 
 import nemos as nmo
 import numpy as np
 
-from ._empty_columns import NonemptyColumns
 from ._nemos_compat import get_n_inputs
+
+
+def resolve_min_obs(drop_empty_columns: bool | int) -> int | None:
+    """
+    Turn the user-facing flag into a ``min_obs`` threshold.
+
+    ``False`` disables dropping and returns None. ``True`` means a threshold of
+    1. An integer sets the threshold directly.
+    """
+    if isinstance(drop_empty_columns, bool):
+        return 1 if drop_empty_columns else None
+    if isinstance(drop_empty_columns, (int, np.integer)):
+        min_obs = int(drop_empty_columns)
+        if min_obs < 1:
+            raise ValueError(
+                f"drop_empty_columns must be at least 1 when given as an "
+                f"integer, got {min_obs}."
+            )
+        return min_obs
+    raise TypeError(
+        f"drop_empty_columns must be a bool or int, got "
+        f"{type(drop_empty_columns).__name__}."
+    )
 
 
 @dataclass(frozen=True, eq=False)
@@ -27,6 +52,76 @@ class BasisComponentInfo:
     identifiable_feature_slice: slice
     nonempty_mask: np.ndarray
     drops_identifiability_column: bool
+
+    @classmethod
+    def from_block(
+        cls,
+        basis,
+        *,
+        index: int,
+        input_start: int,
+        feature_start: int,
+        drop_conv_basis_col: bool,
+        block: np.ndarray | None = None,
+        min_obs: int | None = None,
+    ) -> BasisComponentInfo:
+        """
+        Build a component record from an uncentered training feature block.
+
+        The caller selects the fitting rows before supplying ``block``.
+        ``min_obs=None`` keeps every column and does not require a block.
+        Otherwise, NaNs count as zero, matching the zero-fill NaN policy.
+        """
+        if min_obs is None:
+            mask = np.ones(basis.n_basis_funcs, dtype=bool)
+        else:
+            if block is None:
+                raise ValueError("Column detection requires a training feature block.")
+            block = np.asarray(block)
+            if block.ndim != 2 or block.shape[1] != basis.n_basis_funcs:
+                raise ValueError(
+                    f"Feature block for component {index} must be two-dimensional "
+                    f"with {basis.n_basis_funcs} columns, got {block.shape}."
+                )
+            mask = np.sum(np.abs(block) > 0, axis=0) >= min_obs
+
+        drops_column = _should_drop_basis_col(basis, drop_conv_basis_col)
+        needed = 1 + int(drops_column)
+        n_kept = int(mask.sum())
+        if n_kept < needed:
+            raise ValueError(
+                f"Basis component {index} keeps {n_kept} column(s) at "
+                f"min_obs={min_obs}, but it needs {needed}. "
+                + (
+                    "One more column comes off that component for "
+                    "identifiability, so a single survivor leaves it empty. "
+                    if drops_column
+                    else ""
+                )
+                + "Lower min_obs, use a smaller basis for that covariate, "
+                "or remove the component."
+            )
+        mask.setflags(write=False)
+        return cls(
+            index=index,
+            basis=basis,
+            input_slice=slice(input_start, input_start + get_n_inputs(basis)),
+            identifiable_feature_slice=slice(
+                feature_start, feature_start + n_kept - int(drops_column)
+            ),
+            nonempty_mask=mask,
+            drops_identifiability_column=drops_column,
+        )
+
+    @property
+    def n_kept(self) -> int:
+        """Number of nonempty columns, before the identifiability constraint."""
+        return int(self.nonempty_mask.sum())
+
+    @property
+    def n_dropped(self) -> int:
+        """Number of full-basis columns removed as empty."""
+        return self.nonempty_mask.size - self.n_kept
 
     @property
     def n_inputs(self) -> int:
@@ -88,46 +183,35 @@ def _get_basis_component_infos(
     basis,
     *,
     drop_conv_basis_col: bool,
-    nonempty: NonemptyColumns | None = None,
+    blocks: Sequence[np.ndarray] | None = None,
+    min_obs: int | None = None,
 ) -> tuple[BasisComponentInfo, ...]:
-    """Build component records with full-width masks and reduced slices."""
+    """
+    Build component records and assign consecutive coefficient slices.
+
+    With ``min_obs`` set, detect empty columns directly from full-width
+    training blocks whose rows have already been selected for fitting.
+    Otherwise, build an unmasked layout.
+    """
+    components = tuple(basis)
+    if blocks is not None and len(blocks) != len(components):
+        raise ValueError("Expected one feature block per basis component.")
     infos = []
     input_start = 0
-    out_start = 0
-    components = tuple(basis)
-    if nonempty is not None and len(nonempty) != len(components):
-        raise ValueError("Expected one nonempty mask per basis component.")
+    feature_start = 0
     for index, component in enumerate(components):
-        n_inputs = get_n_inputs(component)
-
-        mask = (
-            np.ones(component.n_basis_funcs, dtype=bool)
-            if nonempty is None
-            else np.array(nonempty.masks[index], dtype=bool, copy=True)
+        info = BasisComponentInfo.from_block(
+            component,
+            index=index,
+            input_start=input_start,
+            feature_start=feature_start,
+            drop_conv_basis_col=drop_conv_basis_col,
+            block=None if blocks is None else blocks[index],
+            min_obs=min_obs,
         )
-        if mask.shape != (component.n_basis_funcs,):
-            raise ValueError(
-                f"Mask for component {index} must have shape "
-                f"{(component.n_basis_funcs,)}, got {mask.shape}."
-            )
-        drops_column = _should_drop_basis_col(component, drop_conv_basis_col)
-        n_outputs = int(mask.sum()) - int(drops_column)
-        if n_outputs < 1:
-            raise ValueError(f"Basis component {index} has no fitted columns.")
-        mask.setflags(write=False)
-
-        infos.append(
-            BasisComponentInfo(
-                index=index,
-                basis=component,
-                input_slice=slice(input_start, input_start + n_inputs),
-                identifiable_feature_slice=slice(out_start, out_start + n_outputs),
-                nonempty_mask=mask,
-                drops_identifiability_column=drops_column,
-            )
-        )
-        input_start += n_inputs
-        out_start += n_outputs
+        infos.append(info)
+        input_start = info.input_slice.stop
+        feature_start = info.identifiable_feature_slice.stop
     return tuple(infos)
 
 
@@ -135,7 +219,6 @@ def compute_features_identifiable(
     basis,
     *inputs,
     drop_conv_basis_col: bool,
-    nonempty: NonemptyColumns | None = None,
 ):
     """
     Build the identifiability-constrained design matrix, **uncentered**.
@@ -150,16 +233,12 @@ def compute_features_identifiable(
     Without that centering, smooth columns remain correlated with the
     intercept, which both leaves the model only weakly identifiable in
     finite samples and inflates the conditioning of ``H + S_λ/φ``.
-
-    When ``nonempty`` is given, each component drops its empty columns first,
-    and the identifiability column is then taken from the survivors.
     """
     basis.setup_basis(*inputs)
     return _compute_features_identifiable(
         basis,
         *inputs,
         drop_conv_basis_col=drop_conv_basis_col,
-        nonempty=nonempty,
     )
 
 
@@ -174,9 +253,8 @@ def _compute_features_identifiable(
     basis,
     *inputs,
     drop_conv_basis_col: bool,
-    nonempty: NonemptyColumns | None = None,
 ):
     infos = _get_basis_component_infos(
-        basis, drop_conv_basis_col=drop_conv_basis_col, nonempty=nonempty
+        basis, drop_conv_basis_col=drop_conv_basis_col
     )
     return reduce_component_blocks(_component_feature_blocks(infos, *inputs), infos)

@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
+from conftest import any_columns_dropped, n_columns_dropped
 
 from pgam_jax import GAM
 from pgam_jax._penalty_handler import (
@@ -57,19 +58,19 @@ class TestDetectionOnATensorBasis:
     def test_the_island_leaves_columns_empty(self, tensor_basis):
         xi, counts = _island_inputs()
         gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
-        assert gam.nonempty_columns_.any_dropped
-        assert gam.nonempty_columns_.n_dropped > 10
-        assert len(gam.nonempty_columns_) == 1
+        assert any_columns_dropped(gam)
+        assert n_columns_dropped(gam) > 10
+        assert len(gam.component_infos_) == 1
 
     def test_spread_data_leaves_nothing_empty(self, tensor_basis):
         xi, counts = _spread_inputs()
         gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
-        assert not gam.nonempty_columns_.any_dropped
+        assert not any_columns_dropped(gam)
 
     def test_the_flag_off_keeps_every_column(self, tensor_basis):
         xi, counts = _island_inputs()
         gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=False)
-        assert not gam.nonempty_columns_.any_dropped
+        assert not any_columns_dropped(gam)
 
     def test_the_design_matrix_shrinks(self, tensor_basis):
         xi, counts = _island_inputs()
@@ -77,7 +78,7 @@ class TestDetectionOnATensorBasis:
         off = _prepared(tensor_basis, xi, counts, drop_empty_columns=False)
         X_on, _ = on._fit_design_matrix(xi, counts)
         X_off, _ = off._fit_design_matrix(xi, counts)
-        n_kept = on.nonempty_columns_.n_kept[0]
+        n_kept = on.component_infos_[0].n_kept
         assert X_on.shape[1] == n_kept - 1
         assert X_off.shape[1] == 64 - 1
         assert X_on.shape[1] < X_off.shape[1]
@@ -87,7 +88,7 @@ class TestMaskedPenaltyTree:
     def test_tree_is_sliced_to_the_kept_columns(self, tensor_basis):
         xi, counts = _island_inputs()
         gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
-        k = gam.nonempty_columns_.n_kept[0]
+        k = gam.component_infos_[0].n_kept
         tree = gam._get_penalty_tree()
         assert len(tree) == 1
         assert tree[0].shape[1:] == (k, k)
@@ -124,7 +125,7 @@ class TestPenaltyHandlerRouting:
         x = rng.uniform(0.02, 0.98, 400)
         counts = jnp.asarray(rng.poisson(1.0, 400).astype(float))
         gam = _prepared(_bspline(8), (x,), counts, drop_empty_columns=True)
-        assert not gam.nonempty_columns_.any_dropped
+        assert not any_columns_dropped(gam)
         ph = gam._build_penalty_handler(gam._get_penalty_tree())
         assert isinstance(ph._penalties[0], _SingleWithNullPenalty)
 
@@ -134,7 +135,7 @@ class TestPenaltyHandlerRouting:
         x = rng.uniform(0.02, 0.35, 400)  # covers only part of the range
         counts = jnp.asarray(rng.poisson(1.0, 400).astype(float))
         gam = _prepared(_bspline(10), (x,), counts, drop_empty_columns=True)
-        assert gam.nonempty_columns_.any_dropped
+        assert any_columns_dropped(gam)
         tree = gam._get_penalty_tree()
         assert tree[0].shape[0] == 1
         ph = gam._build_penalty_handler(tree)

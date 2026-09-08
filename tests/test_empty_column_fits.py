@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
+from conftest import any_columns_dropped, n_columns_dropped
 
 from pgam_jax import GAM
 from pgam_jax._penalty_handler import _KroneckerWithNullPenalty
@@ -62,7 +63,7 @@ class TestAFullyActiveDesignIsUnchanged:
         xi, y = _spread_1d()
         on = _fit(_bspline(8), xi, y, True, method=method)
         off = _fit(_bspline(8), xi, y, False, method=method)
-        assert not on.nonempty_columns_.any_dropped
+        assert not any_columns_dropped(on)
         np.testing.assert_array_equal(on.coef_, off.coef_)
         np.testing.assert_array_equal(on.intercept_, off.intercept_)
         assert float(on.edf_) == float(off.edf_)
@@ -75,7 +76,7 @@ class TestAFullyActiveDesignIsUnchanged:
         counts = jnp.asarray(rng.poisson(1.5, n).astype(float))
         on = _fit(_bspline(6) * _bspline(6), (x, y), counts, True)
         off = _fit(_bspline(6) * _bspline(6), (x, y), counts, False)
-        assert not on.nonempty_columns_.any_dropped
+        assert not any_columns_dropped(on)
         np.testing.assert_array_equal(on.coef_, off.coef_)
 
     def test_the_kronecker_fast_path_is_still_taken(self):
@@ -106,7 +107,7 @@ class TestMaskingShrinksTheModel:
         for index, values in enumerate((xi[0], second)):
             smooth, lower, upper = gam.smooth_compute((values,), index)
             raw = tuple(basis)[index]._compute_features(values)
-            reduced = raw[:, gam.nonempty_columns_.masks[index]][:, :-1]
+            reduced = gam.component_infos_[index].reduce_features(raw)
             coefficient_slice = slice(
                 blocks[index + 1].start - 1, blocks[index + 1].stop
             )
@@ -119,9 +120,9 @@ class TestMaskingShrinksTheModel:
         xi, y = _partial_1d()
         on = _fit(_bspline(12), xi, y, True)
         off = _fit(_bspline(12), xi, y, False)
-        assert on.nonempty_columns_.any_dropped
+        assert any_columns_dropped(on)
         assert on.coef_.shape[0] < off.coef_.shape[0]
-        n_kept = on.nonempty_columns_.n_kept[0]
+        n_kept = on.component_infos_[0].n_kept
         assert on.coef_.shape[0] == n_kept - 1
 
     def test_the_covariance_matches_the_coefficients(self):
@@ -143,8 +144,8 @@ class TestMaskingShrinksTheModel:
         xi, y = _partial_1d()
         few = _fit(_bspline(14), xi, y, 1)
         many = _fit(_bspline(14), xi, y, 150)
-        assert few.nonempty_columns_.n_dropped == 6
-        assert many.nonempty_columns_.n_dropped == 8
+        assert n_columns_dropped(few) == 6
+        assert n_columns_dropped(many) == 8
 
 
 class TestMaskingKeepsTheFitOnTheObservedRegion:
@@ -223,7 +224,7 @@ class TestDegenerateInputs:
         x = rng.uniform(0.02, 0.45, 400)
         y = jnp.asarray(rng.poisson(1.0, 400).astype(float))
         gam = _fit(_bspline(10), (x,), y, 375)
-        assert gam.nonempty_columns_.n_kept[0] == 2
+        assert gam.component_infos_[0].n_kept == 2
         assert gam.coef_.shape[0] == 1
 
     def test_a_stale_mask_does_not_leak_into_prefit_concurvity(self):
@@ -234,15 +235,14 @@ class TestDegenerateInputs:
         ``component_infos_`` set while ``coef_`` is absent. The pre-fit branch
         must ignore it, or the design and the term blocks disagree in width.
         """
-        from pgam_jax._empty_columns import NonemptyColumns
         from pgam_jax._identifiable_features import _get_basis_component_infos
 
         xi, _ = _spread_1d()
         gam = GAM(_bspline(10), drop_empty_columns=True)
-        stale = np.ones(10, dtype=bool)
-        stale[:4] = False
+        stale_block = np.ones((8, 10))
+        stale_block[:, :4] = 0.0
         gam.component_infos_ = _get_basis_component_infos(
-            gam.basis, drop_conv_basis_col=False, nonempty=NonemptyColumns((stale,))
+            gam.basis, drop_conv_basis_col=False, blocks=[stale_block], min_obs=1
         )
         assert not hasattr(gam, "coef_")
         assert sum(block.ncol for block in term_blocks_for_gam(gam)) == 10
@@ -259,10 +259,10 @@ class TestDegenerateInputs:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             gam.fit(narrow, y_narrow)
-            dropped_first = gam.nonempty_columns_.n_dropped
+            dropped_first = n_columns_dropped(gam)
             gam.fit(wide, y_wide)
         assert dropped_first > 0
-        assert gam.nonempty_columns_.n_dropped == 0
+        assert n_columns_dropped(gam) == 0
 
 
 @pytest.mark.slow
@@ -272,7 +272,7 @@ class TestIslandRecovery:
     def test_the_bump_is_recovered_inside_the_disc(self):
         xi, counts, log_rate = _island_2d()
         gam = _fit(_bspline(9) * _bspline(9), xi, counts, True, method="pql_reml")
-        assert gam.nonempty_columns_.n_dropped > 20
+        assert n_columns_dropped(gam) > 20
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

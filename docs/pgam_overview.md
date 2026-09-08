@@ -169,9 +169,16 @@ its basis, input slice, full-width nonempty mask, identifiability decision,
 and fitted coefficient slice. Feature construction and penalties use these
 same records. `coef_` and `cov_beta_` are reduced to match.
 
-`gam.nonempty_columns_` remains available as a derived inspection view of
-these masks. The masks are read-only so that editing a view cannot silently
-change the fitted column layout.
+To inspect the result, read the records. Each one reports `n_kept`,
+`n_dropped`, and `is_masked` for its own component:
+
+```python
+any(info.is_masked for info in gam.component_infos_)
+sum(info.n_dropped for info in gam.component_infos_)
+```
+
+The masks are read-only, so an edit to one cannot silently change the fitted
+column layout.
 
 Two points to know before you turn it on:
 
