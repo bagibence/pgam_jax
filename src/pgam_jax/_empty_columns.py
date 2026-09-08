@@ -19,15 +19,6 @@ from typing import Sequence
 import numpy as np
 
 
-class EmptyColumnWarning(UserWarning):
-    """
-    Raised when a result depends on columns that the fit dropped as empty.
-
-    Filter it with ``warnings.filterwarnings("ignore", category=EmptyColumnWarning)``,
-    or promote it to an error with ``"error"``.
-    """
-
-
 def resolve_min_obs(drop_empty_columns: bool | int) -> int | None:
     """
     Turn the user-facing flag into a ``min_obs`` threshold.
@@ -73,6 +64,22 @@ class NonemptyColumns:
     """
 
     masks: tuple[np.ndarray, ...]
+
+    def is_masked(self, index: int) -> bool:
+        """Whether component ``index`` lost any empty columns."""
+        return not bool(self.masks[index].all())
+
+    def mask_for_component(self, index: int) -> np.ndarray | None:
+        """
+        Return a component's mask, or None when every column is kept.
+
+        Callers can skip boolean indexing when no columns were removed.
+        """
+        return self.masks[index] if self.is_masked(index) else None
+
+    def component(self, index: int) -> NonemptyColumns:
+        """Return the record for just component ``index``."""
+        return NonemptyColumns((self.masks[index],))
 
     @classmethod
     def all_kept(cls, widths: Sequence[int]) -> NonemptyColumns:
@@ -134,24 +141,3 @@ class NonemptyColumns:
 
     def __len__(self) -> int:
         return len(self.masks)
-
-
-def rows_activating_dropped_columns(
-    blocks: Sequence[np.ndarray],
-    nonempty: NonemptyColumns,
-) -> int:
-    """
-    Count rows whose inputs activate a column that the fit dropped as empty.
-
-    ``blocks`` must be one full-width feature block per basis component, in the
-    same order as the masks.
-    """
-    activated = None
-    for index, block in enumerate(blocks):
-        mask = nonempty.masks[index]
-        if mask.all():
-            continue
-        dropped = np.asarray(block)[:, ~mask]
-        rows = np.any(np.abs(dropped) > 0, axis=1)
-        activated = rows if activated is None else (activated | rows)
-    return 0 if activated is None else int(activated.sum())

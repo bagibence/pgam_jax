@@ -67,19 +67,6 @@ def _component_feature_blocks(basis, *inputs) -> list[np.ndarray]:
     ]
 
 
-def _mask_for_component(nonempty: NonemptyColumns | None, index: int):
-    """
-    Return the nonempty mask for one component, or None when unmasked.
-
-    An all-true mask returns None so that the caller skips the copy that
-    boolean indexing would make.
-    """
-    if nonempty is None:
-        return None
-    mask = nonempty.masks[index]
-    return None if mask.all() else mask
-
-
 def _get_basis_component_infos(
     basis,
     *,
@@ -93,7 +80,7 @@ def _get_basis_component_infos(
     for index, component in enumerate(basis):
         n_inputs = get_n_inputs(component)
 
-        mask = _mask_for_component(nonempty, index)
+        mask = None if nonempty is None else nonempty.mask_for_component(index)
         n_outputs = component.n_basis_funcs if mask is None else int(mask.sum())
         if _should_drop_basis_col(component, drop_conv_basis_col):
             n_outputs -= 1
@@ -158,7 +145,7 @@ def reduce_component_blocks(
     """
     out = []
     for index, (component, block) in enumerate(zip(basis, blocks)):
-        mask = _mask_for_component(nonempty, index)
+        mask = None if nonempty is None else nonempty.mask_for_component(index)
         if mask is not None:
             block = block[:, mask]
         if _should_drop_basis_col(component, drop_conv_basis_col):

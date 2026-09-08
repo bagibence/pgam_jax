@@ -177,9 +177,8 @@ Two points to know before you turn it on:
 - A masked tensor-product term leaves the fast Kronecker penalty path, so it
   can fit slower. Treat the flag as a correctness feature first.
 
-Prediction outside the region the data cover raises an `EmptyColumnWarning`.
-The model still returns a value there, but the dropped basis functions took
-their support with them, so the value is an extrapolation.
+The model still returns predictions outside the region the data cover.
+Those values are extrapolations and are not supported by training data.
 
 A worked 2-D example is in `examples/island_column_masking.ipynb`.
 

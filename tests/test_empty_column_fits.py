@@ -10,6 +10,7 @@ import pytest
 
 from pgam_jax import GAM
 from pgam_jax._penalty_handler import _KroneckerWithNullPenalty
+from pgam_jax.concurvity import TermBlock, term_blocks_for_gam
 
 jax.config.update("jax_enable_x64", True)
 
@@ -89,6 +90,19 @@ class TestAFullyActiveDesignIsUnchanged:
 
 
 class TestMaskingShrinksTheModel:
+    def test_term_blocks_follow_the_fitted_additive_design(self):
+        xi, y = _partial_1d()
+        second = np.random.default_rng(17).uniform(0.02, 0.98, len(y))
+        basis = _bspline(12) + _bspline(6)
+        gam = _fit(basis, (*xi, second), y, True)
+
+        blocks = term_blocks_for_gam(gam)
+        assert blocks[0] == TermBlock("para", 0, 0)
+        assert blocks[1].ncol < 11
+        assert blocks[2].ncol == 5
+        assert blocks[2].start == blocks[1].stop + 1
+        assert sum(block.ncol for block in blocks) == gam.coef_.size + 1
+
     def test_the_coefficient_vector_gets_shorter(self):
         xi, y = _partial_1d()
         on = _fit(_bspline(12), xi, y, True)
@@ -216,6 +230,7 @@ class TestDegenerateInputs:
         stale[:4] = False
         gam.nonempty_columns_ = NonemptyColumns((stale,))
         assert not hasattr(gam, "coef_")
+        assert sum(block.ncol for block in term_blocks_for_gam(gam)) == 10
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

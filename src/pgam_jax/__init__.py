@@ -8,7 +8,6 @@ if bool_env("JAX_ENABLE_X64", True):
 # monkey-patch nemos.basis.BSplineEval and nemos.basis.BSPlineConv to have a derivative() method
 from ._patch_nemos import *  # isort: skip
 
-from ._empty_columns import EmptyColumnWarning
 from .gam import GAM
 
-__all__ = ["GAM", "EmptyColumnWarning"]
+__all__ = ["GAM"]
