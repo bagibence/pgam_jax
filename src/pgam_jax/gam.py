@@ -6,6 +6,7 @@ from typing import Callable, Literal
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import numpy as np
 from jaxopt import LBFGS, ScipyMinimize
 from nemos.basis import (
     AdditiveBasis,
@@ -23,12 +24,19 @@ from nemos.observation_models import Observations, PoissonObservations
 from numpy.typing import ArrayLike
 from scipy import stats as sts
 
+from ._empty_columns import (
+    EmptyColumnWarning,
+    NonemptyColumns,
+    resolve_min_obs,
+    rows_activating_dropped_columns,
+)
 from ._identifiable_features import (
     BasisComponentInfo,
+    _component_feature_blocks,
     _compute_features_identifiable,
     _get_basis_component_infos,
     _should_drop_basis_col,
-    compute_features_identifiable,
+    reduce_component_blocks,
 )
 from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
 from ._nan_policy import (
@@ -37,6 +45,7 @@ from ._nan_policy import (
     apply_nan_policy_for_fit,
     apply_nan_policy_for_transform,
     get_valid_y_rows,
+    kept_rows_for_fit,
     validate_nan_handling,
 )
 from ._p_values import weighted_chisq_pval
@@ -210,6 +219,16 @@ class GAM:
         Default is False.
         Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
         but the option is added for matching the original implementation if required.
+    drop_empty_columns :
+        Drop design columns that no data activate. ``False`` keeps every
+        column. ``True`` drops a column that has no non-zero entry. An integer
+        sets that threshold directly, as ``min_obs``. Default is False.
+
+        A basis built over a full covariate range produces empty columns
+        whenever the data cover only part of that range. Such a column adds a
+        term to the REML log-determinant that depends only on the smoothing
+        parameter and not on the data, which biases the selection. Dropping
+        empty columns also shrinks every solve.
     method :
         Smoothing-parameter selection algorithm. Default ``"pql_reml"``.
 
@@ -279,6 +298,7 @@ class GAM:
         use_scipy: bool = False,
         convergence_criterion: str = "score",
         drop_conv_basis_col: bool = False,
+        drop_empty_columns: bool | int = False,
         method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_reml",
         method_kwargs: dict | None = None,
         use_glm_init: bool = True,
@@ -321,6 +341,8 @@ class GAM:
         self.use_scipy = use_scipy
         self.convergence_criterion = convergence_criterion
         self.drop_conv_basis_col = drop_conv_basis_col
+        self.drop_empty_columns = drop_empty_columns
+        resolve_min_obs(drop_empty_columns)  # fail now, not at fit time
         self.n_simpson_sample = int(1e4)
         self.use_glm_init = use_glm_init
         self.nan_handling = nan_handling
@@ -433,16 +455,36 @@ class GAM:
 
         return (coef, intercept)
 
+    def _component_is_masked(self, index: int) -> bool:
+        """Whether component ``index`` lost at least one empty column."""
+        nonempty = self._nonempty
+        return nonempty is not None and not nonempty.masks[index].all()
+
     def _build_penalty_handler(self, penalty_tree: list) -> PenaltyHandler:
-        """Construct a PenaltyHandler from the penalty tensor list."""
+        """
+        Construct a PenaltyHandler from the penalty tensor list.
+
+        A component with no empty column keeps its existing fast path: the
+        Kronecker-sum path for a tensor product, the single-matrix path
+        otherwise. A component with empty columns takes the general path
+        instead, because masking rows and columns of a Kronecker sum does not
+        leave a Kronecker sum, and because the null-space term is already an
+        explicit entry of the masked tensor.
+        """
         ph = PenaltyHandler()
-        for S_tensor, basis_comp in zip(penalty_tree, self.basis):
+        for index, (S_tensor, basis_comp) in enumerate(zip(penalty_tree, self.basis)):
             id_fn = (
                 DROP_LAST_COL
                 if _should_drop_basis_col(basis_comp, self.drop_conv_basis_col)
                 else IDENTITY
             )
-            if isinstance(basis_comp, MultiplicativeBasis):
+            if self._component_is_masked(index):
+                ph.add(
+                    S_tensor,
+                    penalize_null_space=False,
+                    identifiability_fn=id_fn,
+                )
+            elif isinstance(basis_comp, MultiplicativeBasis):
                 factors = compute_energy_penalty_factors(
                     basis_comp, self.n_simpson_sample
                 )
@@ -550,30 +592,148 @@ class GAM:
         """
         Compute the penalty tensor tree for all smooth terms.
 
-        Delegates to ``compute_energy_penalty_tensor``.
+        Delegates to ``compute_energy_penalty_tensor``, which removes the rows
+        and columns of the empty design columns before it measures the null
+        space of each component.
         """
+        nonempty = self._nonempty
+        keep_masks = None if nonempty is None else list(nonempty.masks)
         return compute_energy_penalty_tensor(
-            self.basis, self.n_simpson_sample, penalize_null_space=True
+            self.basis,
+            self.n_simpson_sample,
+            penalize_null_space=True,
+            keep_masks=keep_masks,
+        )
+
+    @property
+    def min_obs(self) -> int | None:
+        """
+        The non-zero count a column needs to survive, or None when off.
+
+        Resolved from ``drop_empty_columns`` on every read, so that changing
+        that attribute after construction takes effect at the next fit.
+        """
+        return resolve_min_obs(self.drop_empty_columns)
+
+    @property
+    def _drops_identifiability_column(self) -> list[bool]:
+        """Whether each component loses one more column after the mask."""
+        return [
+            _should_drop_basis_col(component, self.drop_conv_basis_col)
+            for component in self.basis
+        ]
+
+    @property
+    def _nonempty(self) -> NonemptyColumns | None:
+        """The fitted nonempty-column record, or None before fit."""
+        return getattr(self, "nonempty_columns_", None)
+
+    def _component_nonempty(self, index: int) -> NonemptyColumns | None:
+        """The nonempty-column record restricted to one basis component."""
+        nonempty = self._nonempty
+        if nonempty is None:
+            return None
+        return NonemptyColumns((nonempty.masks[index],))
+
+    def _detect_nonempty_columns(
+        self,
+        blocks: list,
+        y: jnp.ndarray,
+    ) -> NonemptyColumns:
+        """
+        Find the empty columns of every basis component.
+
+        Detection runs on the rows that reach the solver, and before centering.
+        Subtracting a column mean turns a sparse column into a dense one, so a
+        later check cannot tell which columns were empty.
+
+        The rows come from the full-width design, while the fit selects its own
+        rows from the reduced design. Under ``nan_handling="drop"`` the
+        full-width design carries at least as many NaN rows as the reduced one,
+        so this can only keep fewer rows, never more. That direction is safe:
+        it never keeps a column that the solver would see as empty. The two row
+        sets are the same for every basis this class accepts, because both an
+        eval B-spline out of bounds and a convolution pad produce NaN across a
+        whole row of the component rather than in single columns.
+
+        ``blocks`` must be the full-width feature blocks for ``inputs``. The
+        caller evaluates them once and reuses them to build the design.
+        """
+        min_obs = self.min_obs
+        if min_obs is None:
+            return NonemptyColumns.all_kept(
+                [component.n_basis_funcs for component in self.basis]
+            )
+        kept_rows = np.asarray(
+            kept_rows_for_fit(np.hstack(blocks), y, self.nan_handling)
+        )
+        return NonemptyColumns.from_component_blocks(
+            [block[kept_rows] for block in blocks],
+            min_obs,
+            self._drops_identifiability_column,
+        )
+
+    @staticmethod
+    def _warn_if_dropped_columns_are_active(
+        blocks,
+        nonempty,
+        where: str,
+        stacklevel: int = 3,
+    ) -> None:
+        """
+        Warn when new inputs fall where the fit dropped columns as empty.
+
+        The fit removed those basis functions, so the model extrapolates there
+        with the columns that remain. The result is a smooth continuation, not
+        an estimate supported by data.
+
+        ``blocks`` and ``nonempty`` must cover the same components in the same
+        order. ``where`` names the public method the user called, and
+        ``stacklevel`` must point the warning at that method's caller.
+        """
+        if nonempty is None or not nonempty.any_dropped:
+            return
+        n_rows = rows_activating_dropped_columns(blocks, nonempty)
+        if n_rows == 0:
+            return
+        warnings.warn(
+            f"{where}: {n_rows} row(s) fall where the fit dropped "
+            f"{nonempty.n_dropped} column(s) as empty. The model extrapolates "
+            "there using the columns that remain, so those values are not "
+            "supported by training data.",
+            EmptyColumnWarning,
+            stacklevel=stacklevel,
+        )
+
+    def _warn_if_restricted_to_observed_region(self, where: str) -> None:
+        """Warn that a summary describes only the region the data cover."""
+        nonempty = self._nonempty
+        if nonempty is None or not nonempty.any_dropped:
+            return
+        warnings.warn(
+            f"{where} describes only the observed region: the fit dropped "
+            f"{nonempty.n_dropped} empty column(s), so the degrees of freedom "
+            "and this result differ from a fit that kept every column.",
+            EmptyColumnWarning,
+            stacklevel=3,
         )
 
     def _compute_raw_design_matrix(
         self,
         inputs: tuple[ArrayLike, ...],
-        setup_basis: bool,
     ) -> jnp.ndarray:
-        """Build an uncentered design matrix with its NaNs intact."""
-        if setup_basis:
-            X = compute_features_identifiable(
-                self.basis,
-                *inputs,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-            )
-        else:
-            X = _compute_features_identifiable(
-                self.basis,
-                *inputs,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-            )
+        """
+        Build an uncentered design matrix with its NaNs intact.
+
+        The basis must already be set up. ``fit`` sets it up once, and
+        prediction reuses the basis state learned during fit.
+        """
+        X = _compute_features_identifiable(
+            self.basis,
+            *inputs,
+            drop_conv_basis_col=self.drop_conv_basis_col,
+            nonempty=self._nonempty,
+        )
         return jnp.asarray(X)
 
     def _fit_design_matrix(
@@ -587,7 +747,19 @@ class GAM:
         This is the only design-matrix path that calls ``basis.setup_basis``.
         Prediction must reuse this fitted basis state and centering.
         """
-        X_raw = self._compute_raw_design_matrix(inputs, setup_basis=True)
+        self.basis.setup_basis(*inputs)
+        # Evaluate the basis once. Detection needs the full-width blocks, and
+        # the design is those same blocks with columns removed.
+        blocks = _component_feature_blocks(self.basis, *inputs)
+        self.nonempty_columns_ = self._detect_nonempty_columns(blocks, y)
+        X_raw = jnp.asarray(
+            reduce_component_blocks(
+                blocks,
+                self.basis,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+                nonempty=self.nonempty_columns_,
+            )
+        )
         X, y, feature_mean = apply_nan_policy_for_fit(
             X_raw,
             y,
@@ -601,18 +773,37 @@ class GAM:
     def _transform_design_matrix_with_policy(
         self,
         inputs: tuple[ArrayLike, ...],
+        where: str = "predict",
+        stacklevel: int = 4,
     ) -> jnp.ndarray:
         """
         Build a row-preserving design using the fitted NaN policy.
 
         This intentionally does not call ``basis.setup_basis``: predict should
         transform new inputs with the basis state learned during fit.
+
+        ``where`` and ``stacklevel`` describe the public method the user
+        called, so that an empty-column warning names the user's own line.
+        The default of 4 suits a method that calls this directly, such as
+        ``score`` or ``concurvity``. ``predict`` goes through ``_predict`` and
+        therefore needs one more.
         """
         if not hasattr(self, "feature_mean_"):
             raise AttributeError(
                 "GAM instance is not fitted yet. Call fit before predict."
             )
-        X_raw = self._compute_raw_design_matrix(inputs, setup_basis=False)
+        blocks = _component_feature_blocks(self.basis, *inputs)
+        self._warn_if_dropped_columns_are_active(
+            blocks, self._nonempty, where, stacklevel
+        )
+        X_raw = jnp.asarray(
+            reduce_component_blocks(
+                blocks,
+                self.basis,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+                nonempty=self._nonempty,
+            )
+        )
         return apply_nan_policy_for_transform(
             X_raw,
             self.feature_mean_,
@@ -777,6 +968,7 @@ class GAM:
         infos = _get_basis_component_infos(
             self.basis,
             drop_conv_basis_col=self.drop_conv_basis_col,
+            nonempty=self._nonempty,
         )
         if isinstance(component, str):
             for info in infos:
@@ -935,7 +1127,7 @@ class GAM:
             design-invalid rows are NaN.
         """
         w, b = params
-        X = self._transform_design_matrix_with_policy(xi)
+        X = self._transform_design_matrix_with_policy(xi, "predict", stacklevel=5)
         return self.observation_model.default_inverse_link_function(X @ w + b)
 
     def predict(self, xi: tuple[ArrayLike, ...]) -> jnp.ndarray:
@@ -1054,7 +1246,8 @@ class GAM:
         """
         if hasattr(self, "coef_"):
             # Post-fit: reuse the cached centering and the fitted β.
-            X_transformed = self._transform_design_matrix_with_policy(xi)
+            nonempty = self._nonempty
+            X_transformed = self._transform_design_matrix_with_policy(xi, "concurvity")
             valid_X_rows = ~_rows_with_nan(X_transformed)
             if not bool(jnp.any(valid_X_rows)):
                 raise ValueError("No valid design rows remain for concurvity.")
@@ -1071,11 +1264,23 @@ class GAM:
                 UserWarning,
                 stacklevel=2,
             )
-            X_raw = self._compute_raw_design_matrix(xi, setup_basis=True)
+            # A model that is not fitted has no mask, even if an earlier fit
+            # raised after it stored one. Build the full design here.
+            nonempty = None
+            self.basis.setup_basis(*xi)
+            X_raw = jnp.asarray(
+                _compute_features_identifiable(
+                    self.basis,
+                    *xi,
+                    drop_conv_basis_col=self.drop_conv_basis_col,
+                    nonempty=None,
+                )
+            )
             X_smooths, _, _ = apply_nan_policy_for_fit(X_raw, None, self.nan_handling)
             X = prepend_ones_for_intercept(X_smooths)
             beta = None
-        blocks = term_blocks_for_gam(self)
+        self._warn_if_restricted_to_observed_region("concurvity")
+        blocks = term_blocks_for_gam(self, nonempty)
         return _concurvity(X, blocks, beta=beta, full=full, as_dataframe=as_dataframe)
 
     def _raise_if_not_fitted(self):
@@ -1135,12 +1340,19 @@ class GAM:
                 f"got {len(xi)}."
             )
         # TODO: Why is this called fX? isn't it X_i?
-        fX = _compute_features_identifiable(
-            info.basis,
-            *xi,
-            drop_conv_basis_col=self.drop_conv_basis_col,
+        component_nonempty = self._component_nonempty(info.index)
+        component_blocks = _component_feature_blocks(info.basis, *xi)
+        self._warn_if_dropped_columns_are_active(
+            component_blocks, component_nonempty, "smooth_compute"
         )
-        fX = jnp.asarray(fX)
+        fX = jnp.asarray(
+            reduce_component_blocks(
+                component_blocks,
+                info.basis,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+                nonempty=component_nonempty,
+            )
+        )
 
         nan_filter = jnp.asarray(
             jnp.sum(jnp.isnan(jnp.asarray(xi)), axis=0),
@@ -1461,6 +1673,7 @@ class GAM:
             UserWarning,
             stacklevel=2,
         )
+        self._warn_if_restricted_to_observed_region("test_smooth_significance")
 
         return self._smooth_pval_unpenalized(component_index)
 
@@ -1490,7 +1703,7 @@ class GAM:
             Aggregated log-likelihood score.
         """
         y = jnp.asarray(y)
-        X = self._transform_design_matrix_with_policy(xi)
+        X = self._transform_design_matrix_with_policy(xi, "score")
         valid_X_rows = ~_rows_with_nan(X)
         valid_y_rows = get_valid_y_rows(y, n_rows=X.shape[0])
         score_rows = valid_X_rows & valid_y_rows

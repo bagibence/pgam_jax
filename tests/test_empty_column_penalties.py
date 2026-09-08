@@ -1,0 +1,214 @@
+"""Tests for penalty handling when empty columns are dropped."""
+
+import jax
+import jax.numpy as jnp
+import nemos as nmo
+import numpy as np
+import pytest
+
+from pgam_jax import GAM
+from pgam_jax._penalty_handler import (
+    _GeneralPenalty,
+    _KroneckerWithNullPenalty,
+    _SinglePenalty,
+    _SingleWithNullPenalty,
+)
+
+jax.config.update("jax_enable_x64", True)
+
+
+def _bspline(k):
+    return nmo.basis.BSplineEval(k, bounds=(0.0, 1.0))
+
+
+def _island_inputs(n=600, radius=0.22, center=(0.3, 0.35), seed=0):
+    """Positions confined to a disc inside the unit square."""
+    rng = np.random.default_rng(seed)
+    r = radius * np.sqrt(rng.uniform(0, 1, n))
+    theta = rng.uniform(0, 2 * np.pi, n)
+    x = center[0] + r * np.cos(theta)
+    y = center[1] + r * np.sin(theta)
+    counts = rng.poisson(1.0, n).astype(float)
+    return (x, y), jnp.asarray(counts)
+
+
+def _spread_inputs(n=600, seed=1):
+    """Positions covering the whole unit square."""
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.02, 0.98, n)
+    y = rng.uniform(0.02, 0.98, n)
+    counts = rng.poisson(1.0, n).astype(float)
+    return (x, y), jnp.asarray(counts)
+
+
+def _prepared(basis, xi, counts, drop_empty_columns):
+    """Run detection only, without a full fit."""
+    gam = GAM(basis, drop_empty_columns=drop_empty_columns)
+    gam._fit_design_matrix(xi, counts)
+    return gam
+
+
+@pytest.fixture
+def tensor_basis():
+    return _bspline(8) * _bspline(8)
+
+
+class TestDetectionOnATensorBasis:
+    def test_the_island_leaves_columns_empty(self, tensor_basis):
+        xi, counts = _island_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        assert gam.nonempty_columns_.any_dropped
+        assert gam.nonempty_columns_.n_dropped > 10
+        assert len(gam.nonempty_columns_) == 1
+
+    def test_spread_data_leaves_nothing_empty(self, tensor_basis):
+        xi, counts = _spread_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        assert not gam.nonempty_columns_.any_dropped
+
+    def test_the_flag_off_keeps_every_column(self, tensor_basis):
+        xi, counts = _island_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=False)
+        assert not gam.nonempty_columns_.any_dropped
+
+    def test_the_design_matrix_shrinks(self, tensor_basis):
+        xi, counts = _island_inputs()
+        on = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        off = _prepared(tensor_basis, xi, counts, drop_empty_columns=False)
+        X_on, _ = on._fit_design_matrix(xi, counts)
+        X_off, _ = off._fit_design_matrix(xi, counts)
+        n_kept = on.nonempty_columns_.n_kept[0]
+        assert X_on.shape[1] == n_kept - 1
+        assert X_off.shape[1] == 64 - 1
+        assert X_on.shape[1] < X_off.shape[1]
+
+
+class TestMaskedPenaltyTree:
+    def test_tree_is_sliced_to_the_kept_columns(self, tensor_basis):
+        xi, counts = _island_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        k = gam.nonempty_columns_.n_kept[0]
+        tree = gam._get_penalty_tree()
+        assert len(tree) == 1
+        assert tree[0].shape[1:] == (k, k)
+
+    def test_tree_is_untouched_without_a_mask(self, tensor_basis):
+        xi, counts = _spread_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        tree = gam._get_penalty_tree()
+        assert tree[0].shape[1:] == (64, 64)
+
+    def test_slicing_keeps_the_penalty_symmetric_and_psd(self, tensor_basis):
+        xi, counts = _island_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        for S in gam._get_penalty_tree()[0]:
+            np.testing.assert_allclose(S, S.T, atol=1e-10)
+            assert np.min(np.linalg.eigvalsh(S)) > -1e-8
+
+
+class TestPenaltyHandlerRouting:
+    def test_unmasked_tensor_keeps_the_kronecker_path(self, tensor_basis):
+        xi, counts = _spread_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        ph = gam._build_penalty_handler(gam._get_penalty_tree())
+        assert isinstance(ph._penalties[0], _KroneckerWithNullPenalty)
+
+    def test_masked_tensor_falls_back_to_the_general_path(self, tensor_basis):
+        xi, counts = _island_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        ph = gam._build_penalty_handler(gam._get_penalty_tree())
+        assert isinstance(ph._penalties[0], _GeneralPenalty)
+
+    def test_unmasked_one_dimensional_keeps_the_single_path(self):
+        rng = np.random.default_rng(3)
+        x = rng.uniform(0.02, 0.98, 400)
+        counts = jnp.asarray(rng.poisson(1.0, 400).astype(float))
+        gam = _prepared(_bspline(8), (x,), counts, drop_empty_columns=True)
+        assert not gam.nonempty_columns_.any_dropped
+        ph = gam._build_penalty_handler(gam._get_penalty_tree())
+        assert isinstance(ph._penalties[0], _SingleWithNullPenalty)
+
+    def test_masked_one_dimensional_drops_the_redundant_null_term(self):
+        """A reduced 1-D energy penalty is full rank, so the null lambda goes."""
+        rng = np.random.default_rng(4)
+        x = rng.uniform(0.02, 0.35, 400)  # covers only part of the range
+        counts = jnp.asarray(rng.poisson(1.0, 400).astype(float))
+        gam = _prepared(_bspline(10), (x,), counts, drop_empty_columns=True)
+        assert gam.nonempty_columns_.any_dropped
+        tree = gam._get_penalty_tree()
+        assert tree[0].shape[0] == 1
+        ph = gam._build_penalty_handler(tree)
+        assert isinstance(ph._penalties[0], _SinglePenalty)
+        assert ph._penalties[0].rho_len == 1
+
+
+class TestRhoLengthsAgree:
+    @pytest.mark.parametrize("inputs_fn", [_island_inputs, _spread_inputs])
+    def test_handler_rho_len_matches_the_tree(self, tensor_basis, inputs_fn):
+        xi, counts = inputs_fn()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        tree = gam._get_penalty_tree()
+        ph = gam._build_penalty_handler(tree)
+        init = gam._init_regularizer_strength(tree)
+        assert [p.rho_len for p in ph._penalties] == [r.shape[0] for r in init]
+
+    def test_masking_drops_the_redundant_null_lambda(self, tensor_basis):
+        """
+        The null-space term is rebuilt from the reduced penalty, not carried over.
+
+        A null-space vector of the full tensor penalty is a global polynomial.
+        It does not vanish outside the kept columns, so the reduced penalty is
+        full rank and needs no separate null-space smoothing parameter. Keeping
+        one leaves a parameter with nothing to penalize, and selection drives it
+        to infinity.
+        """
+        xi, counts = _island_inputs()
+        on = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        off = _prepared(tensor_basis, xi, counts, drop_empty_columns=False)
+        on_tree = on._get_penalty_tree()
+        off_tree = off._get_penalty_tree()
+        assert off_tree[0].shape[0] == 3  # two energy terms plus the null term
+        assert on_tree[0].shape[0] == 2  # the null term is gone
+        reduced = np.asarray(on_tree[0]).sum(axis=0)
+        assert np.linalg.matrix_rank(reduced) == reduced.shape[0]
+
+
+def _penalty_from_tree(S_tensor, rho):
+    """Reference weighted penalty with the identifiability row and column gone."""
+    lams = np.exp(np.asarray(rho))
+    S = np.einsum("i,ijk->jk", lams, np.asarray(S_tensor))
+    return S[:-1, :-1]
+
+
+class TestMaskedSqrtIsCorrect:
+    """``compute_sqrt`` must factor the masked, identifiability-reduced penalty."""
+
+    @pytest.mark.parametrize("inputs_fn", [_island_inputs, _spread_inputs])
+    def test_sqrt_reproduces_the_penalty(self, tensor_basis, inputs_fn):
+        xi, counts = inputs_fn()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        tree = gam._get_penalty_tree()
+        ph = gam._build_penalty_handler(tree)
+        compute_sqrt, _ = ph.build()
+
+        rho = [jnp.asarray([0.3, -0.7, 1.1][: tree[0].shape[0]])]
+        B = np.asarray(compute_sqrt(rho))
+        got = B.T @ B
+        expected = _penalty_from_tree(tree[0], rho[0])
+        np.testing.assert_allclose(got, expected, atol=1e-8)
+
+    def test_log_det_matches_the_dense_pseudo_determinant(self, tensor_basis):
+        xi, counts = _island_inputs()
+        gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
+        tree = gam._get_penalty_tree()
+        ph = gam._build_penalty_handler(tree)
+        _, compute_log_det_and_grad = ph.build()
+
+        rho = [jnp.asarray([0.3, -0.7, 1.1][: tree[0].shape[0]])]
+        log_dets, _ = compute_log_det_and_grad(rho)
+
+        S = _penalty_from_tree(tree[0], rho[0])
+        eig = np.linalg.eigvalsh(S)
+        tol = eig.max() * S.shape[0] * np.finfo(S.dtype).eps
+        expected = np.sum(np.log(eig[eig > tol]))
+        np.testing.assert_allclose(float(log_dets[0]), expected, rtol=1e-8)

@@ -46,7 +46,7 @@ def test_default_zero_matches_legacy_zero_fill_then_center_behavior():
     y = jnp.arange(x.size, dtype=float)
 
     X, y_aligned = gam._fit_design_matrix((x,), y)
-    X_raw = gam._compute_raw_design_matrix((x,), setup_basis=False)
+    X_raw = gam._compute_raw_design_matrix((x,))
     X_zero = jnp.where(jnp.isnan(X_raw), 0.0, X_raw)
 
     assert gam.nan_handling == "zero"
@@ -62,7 +62,7 @@ def test_gam_fit_design_omits_nan_response_before_centering(nan_handling):
     y = jnp.arange(x.size, dtype=float).at[5].set(jnp.nan)
 
     X, y_aligned = gam._fit_design_matrix((x,), y)
-    X_raw = gam._compute_raw_design_matrix((x,), setup_basis=False)
+    X_raw = gam._compute_raw_design_matrix((x,))
     expected_X, expected_y, expected_feature_mean = apply_nan_policy_for_fit(
         X_raw, y, nan_handling
     )
@@ -82,7 +82,7 @@ def test_drop_conv_filters_the_built_design_without_changing_history():
     y = jnp.arange(x.size, dtype=float).at[10].set(jnp.nan)
 
     X, y_aligned = gam._fit_design_matrix((x,), y)
-    X_raw = gam._compute_raw_design_matrix((x,), setup_basis=False)
+    X_raw = gam._compute_raw_design_matrix((x,))
     valid_y_rows = get_valid_y_rows(y, n_rows=X_raw.shape[0])
     kept_rows = valid_y_rows & ~jnp.any(jnp.isnan(X_raw), axis=1)
     expected_uncentered = X_raw[kept_rows]

@@ -144,6 +144,45 @@ apply_identifiability = DROP_LAST_COL
 apply_identifiability_penalty = DROP_LAST_ROW_COL
 ```
 
+### 5.4 Dropping Empty Columns
+
+A basis covers the whole range you give it. The data often cover less. A 2-D
+spline over a square arena has many basis functions that no observation ever
+activates, and their columns are all zero.
+
+An empty column carries no information about its coefficient. It still adds a
+term to the REML log-determinant that depends only on the smoothing parameter,
+which biases the selection. Set `drop_empty_columns` to remove such columns.
+
+```python
+from pgam_jax import GAM
+
+# Drop a column that has no non-zero entry
+gam = GAM(basis, drop_empty_columns=True)
+
+# Or require at least 20 observations per column
+gam = GAM(basis, drop_empty_columns=20)
+```
+
+After the fit, `gam.nonempty_columns_` holds one boolean mask per basis
+component, over the full basis width. `coef_` and `cov_beta_` are reduced to
+match.
+
+Two points to know before you turn it on:
+
+- Masking changes the model. In an unmasked fit the empty coefficients are
+  free, and the smoothness penalty pulls them toward the values that make it
+  smallest. Masking forces them to zero. The two fits agree closely, not
+  exactly.
+- A masked tensor-product term leaves the fast Kronecker penalty path, so it
+  can fit slower. Treat the flag as a correctness feature first.
+
+Prediction outside the region the data cover raises an `EmptyColumnWarning`.
+The model still returns a value there, but the dropped basis functions took
+their support with them, so the value is an extrapolation.
+
+A worked 2-D example is in `examples/island_column_masking.ipynb`.
+
 ## 6. Generalized Cross-Validation (GCV)
 
 ### 6.1 The Challenge

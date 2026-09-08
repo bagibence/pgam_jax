@@ -285,14 +285,19 @@ def _to_dataframe(
 # ---------------------------------------------------------------------------
 
 
-def term_blocks_for_gam(gam: GAM) -> list[TermBlock]:
+def term_blocks_for_gam(gam: GAM, nonempty=None) -> list[TermBlock]:
     """Build the TermBlock list for a fitted GAM (parametric block first,
     then one block per smooth component), using the same slice convention
     as `_get_basis_component_infos`. The +1 shifts account for the
-    prepended intercept column (see `prepend_ones_for_intercept`)."""
+    prepended intercept column (see `prepend_ones_for_intercept`).
+
+    `nonempty` must be the record used to build the matching design, so the
+    block widths line up with its columns. Pass None for an unmasked design."""
 
     infos = _get_basis_component_infos(
-        gam.basis, drop_conv_basis_col=gam.drop_conv_basis_col
+        gam.basis,
+        drop_conv_basis_col=gam.drop_conv_basis_col,
+        nonempty=nonempty,
     )
     blocks = [TermBlock(label="para", start=0, stop=0)]
     for info in infos:
