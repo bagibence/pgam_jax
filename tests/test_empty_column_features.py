@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from pgam_jax._identifiable_features import (
-    _component_feature_blocks,
+    _compute_full_width_blocks,
     _compute_features_identifiable,
     _get_basis_component_infos,
     compute_features_identifiable,
@@ -61,13 +61,13 @@ def _detected_infos(basis, widths, empty=None, drop_conv_basis_col=False):
 
 def _masked_features(infos, *inputs):
     """Reduce the real feature blocks with an already detected layout."""
-    return reduce_component_blocks(_component_feature_blocks(infos, *inputs), infos)
+    return reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
 
 
 class TestComponentFeatureBlocks:
     def test_one_full_width_block_per_component(self, mixed_basis, inputs):
         mixed_basis.setup_basis(*inputs)
-        blocks = _component_feature_blocks(
+        blocks = _compute_full_width_blocks(
             _get_basis_component_infos(mixed_basis, drop_conv_basis_col=False), *inputs
         )
         assert [b.shape[1] for b in blocks] == [6, 7, 20]
@@ -76,7 +76,7 @@ class TestComponentFeatureBlocks:
     def test_blocks_concatenate_to_the_full_design(self, additive_basis, inputs):
         xi = inputs[:2]
         additive_basis.setup_basis(*xi)
-        blocks = _component_feature_blocks(
+        blocks = _compute_full_width_blocks(
             _get_basis_component_infos(additive_basis, drop_conv_basis_col=False), *xi
         )
         expected = additive_basis.compute_features(*xi)
@@ -85,7 +85,7 @@ class TestComponentFeatureBlocks:
     def test_wrong_number_of_inputs_raises(self, additive_basis, inputs):
         additive_basis.setup_basis(*inputs[:2])
         with pytest.raises(ValueError, match="expects 2 input array"):
-            _component_feature_blocks(
+            _compute_full_width_blocks(
                 _get_basis_component_infos(additive_basis, drop_conv_basis_col=False),
                 *inputs[:3],
             )
@@ -106,7 +106,7 @@ class TestMaskedFeatures:
     ):
         xi = inputs[:2]
         additive_basis.setup_basis(*xi)
-        blocks = _component_feature_blocks(
+        blocks = _compute_full_width_blocks(
             _get_basis_component_infos(additive_basis, drop_conv_basis_col=False), *xi
         )
 
@@ -191,7 +191,7 @@ class TestMaskingIsARestriction:
     def test_columns_are_a_subset_of_the_unmasked_columns(self, additive_basis, inputs):
         xi = inputs[:2]
         additive_basis.setup_basis(*xi)
-        blocks = _component_feature_blocks(
+        blocks = _compute_full_width_blocks(
             _get_basis_component_infos(additive_basis, drop_conv_basis_col=False), *xi
         )
 

@@ -148,7 +148,7 @@ class BasisComponentInfo:
             block = block[:, :-1]
         return block
 
-    def compute_features(self, *inputs) -> np.ndarray:
+    def compute_reduced_features(self, *inputs) -> np.ndarray:
         """Evaluate reduced features using the already configured basis."""
         return self.reduce_features(self.basis._compute_features(*inputs))
 
@@ -169,7 +169,7 @@ def _should_drop_basis_col(
     return True
 
 
-def _component_feature_blocks(infos, *inputs) -> list[np.ndarray]:
+def _compute_full_width_blocks(infos, *inputs) -> list[np.ndarray]:
     """Evaluate full-width blocks using the component records' input slices."""
     n_expected = sum(info.n_inputs for info in infos)
     if len(inputs) != n_expected:
@@ -257,4 +257,4 @@ def _compute_features_identifiable(
     infos = _get_basis_component_infos(
         basis, drop_conv_basis_col=drop_conv_basis_col
     )
-    return reduce_component_blocks(_component_feature_blocks(infos, *inputs), infos)
+    return reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)

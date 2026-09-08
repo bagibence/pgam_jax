@@ -26,7 +26,7 @@ from scipy import stats as sts
 
 from ._identifiable_features import (
     BasisComponentInfo,
-    _component_feature_blocks,
+    _compute_full_width_blocks,
     _compute_features_identifiable,
     _get_basis_component_infos,
     reduce_component_blocks,
@@ -603,7 +603,7 @@ class GAM:
         prediction reuses the basis state learned during fit.
         """
         infos = self._component_infos()
-        X = reduce_component_blocks(_component_feature_blocks(infos, *inputs), infos)
+        X = reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
         return jnp.asarray(X)
 
     def _fit_design_matrix(
@@ -623,7 +623,7 @@ class GAM:
         unmasked = _get_basis_component_infos(
             self.basis, drop_conv_basis_col=self.drop_conv_basis_col
         )
-        blocks = _component_feature_blocks(unmasked, *inputs)
+        blocks = _compute_full_width_blocks(unmasked, *inputs)
         min_obs = self.min_obs
         if min_obs is None:
             infos = unmasked
@@ -1195,7 +1195,7 @@ class GAM:
                 f"got {len(xi)}."
             )
         # TODO: Why is this called fX? isn't it X_i?
-        fX = jnp.asarray(info.compute_features(*xi))
+        fX = jnp.asarray(info.compute_reduced_features(*xi))
 
         nan_filter = jnp.asarray(
             jnp.sum(jnp.isnan(jnp.asarray(xi)), axis=0),
