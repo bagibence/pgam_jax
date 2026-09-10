@@ -150,9 +150,8 @@ A basis covers the whole range you give it. The data often cover less. A 2-D
 spline over a square arena has many basis functions that no observation ever
 activates, and their columns are all zero.
 
-An empty column carries no information about its coefficient. It still adds a
-term to the REML log-determinant that depends only on the smoothing parameter,
-which biases the selection. Set `drop_empty_columns` to remove such columns.
+An empty column carries no information about its coefficient.
+Set `drop_empty_columns` to remove such columns.
 
 ```python
 from pgam_jax import GAM
@@ -184,10 +183,11 @@ Two points to know before you turn it on:
 
 - Masking changes the model. In an unmasked fit the empty coefficients are
   free, and the smoothness penalty pulls them toward the values that make it
-  smallest. Masking forces them to zero. The two fits agree closely, not
-  exactly.
+  smallest. Masking forces them to zero and rebuilds the null-space penalty
+  for the retained basis. Predictions and selected smoothing parameters can
+  therefore differ from an unmasked fit.
 - A masked tensor-product term leaves the fast Kronecker penalty path, so it
-  can fit slower. Treat the flag as a correctness feature first.
+  can fit slower despite having fewer coefficients.
 
 The model still returns predictions outside the region the data cover.
 Those values are extrapolations and are not supported by training data.

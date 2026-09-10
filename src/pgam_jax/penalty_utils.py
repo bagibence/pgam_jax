@@ -575,12 +575,10 @@ def compute_energy_penalty_tensor_additive_component(
     one_dim_pen = compute_energy_penalty_factors(basis_component, n_samples)
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)
     if keep is not None and not np.all(keep):
-        # Slice before measuring the null space. Removing empty columns usually
-        # makes the energy penalty full rank, because a null-space vector of the
-        # full penalty is a global polynomial and does not vanish outside the
-        # kept columns. Carrying the full-space projector over would leave a
-        # smoothing parameter with nothing to penalize, and that parameter runs
-        # away during selection.
+        # Slice before measuring the null space. A reduced energy penalty is
+        # usually full rank. A sliced original null-space projector can still be
+        # nonzero, but not actually penalize anything. Rebuild that projector
+        # below to define the reduced model.
         index = jnp.asarray(np.flatnonzero(np.asarray(keep)))
         out = out[:, index][:, :, index]
     if penalize_null_space:

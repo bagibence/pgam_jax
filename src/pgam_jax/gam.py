@@ -201,10 +201,11 @@ class GAM:
         sets that threshold directly, as ``min_obs``. Default is False.
 
         A basis built over a full covariate range produces empty columns
-        whenever the data cover only part of that range. Such a column adds a
-        term to the REML log-determinant that depends only on the smoothing
-        parameter and not on the data, which biases the selection. Dropping
-        empty columns also shrinks every solve.
+        whenever the data cover only part of that range. Dropping columns
+        reduces the coefficient space and changes the penalty model: removed
+        coefficients are fixed to zero, and the null-space penalty is rebuilt
+        for the retained basis. Predictions and selected smoothing parameters
+        can therefore differ from an unmasked fit.
     method :
         Smoothing-parameter selection algorithm. Default ``"pql_reml"``.
 
