@@ -1,10 +1,12 @@
 """General JAX utilities shared across modules."""
 
+import warnings
 from functools import wraps
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.typing import ArrayLike
 from nemos.observation_models import (
     GammaObservations,
@@ -70,6 +72,50 @@ def stack_block_diag(
     B = jax.scipy.linalg.block_diag(*submatrices)
     pad = size - total
     return jnp.pad(B, ((0, pad), (0, pad)))
+
+
+def warn_if_x64_disabled(fname: str) -> None:
+    """
+    Warn that ``fname`` runs in float32 because JAX x64 mode is off.
+
+    pgam_jax enables x64 on import, so this only fires if the user turned it off.
+    Call it from public entry points, outside jit, so it fires on every call.
+    """
+    if not jax.config.jax_enable_x64:
+        warnings.warn(
+            f"{fname}: JAX x64 mode is disabled, so JAX computes in float32. "
+            "pgam_jax relies on float64 precision and can give inaccurate results "
+            "in float32. pgam_jax enables x64 on import unless JAX_ENABLE_X64 is "
+            "set to a false value. Unset JAX_ENABLE_X64, or call "
+            "jax.config.update('jax_enable_x64', True).",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+def warn_if_not_float64(
+    fname: str, arrays: Mapping[str, ArrayLike], *, advice: str
+) -> None:
+    """
+    Warn about each floating-point array whose dtype is not float64.
+
+    Arrays that are not floating-point (for example integer counts) are skipped.
+    Nothing is checked when x64 mode is off. In that case no array can be float64,
+    and ``warn_if_x64_disabled`` already reports the cause.
+    ``advice`` is appended to the message and tells the user what happens next.
+    """
+    if not jax.config.jax_enable_x64:
+        return
+    for name, arr in arrays.items():
+        dtype = jnp.asarray(arr).dtype
+        if jnp.issubdtype(dtype, jnp.floating) and dtype != np.float64:
+            warnings.warn(
+                f"{fname}: {name} has dtype {dtype}, not float64. "
+                "pgam_jax relies on float64 precision and can give inaccurate "
+                f"results with {dtype} data. {advice}",
+                UserWarning,
+                stacklevel=3,
+            )
 
 
 def to_zero_dim_jax_array(x: ArrayLike) -> jax.Array:

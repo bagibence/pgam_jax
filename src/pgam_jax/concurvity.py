@@ -17,8 +17,8 @@ Worked examples live in ``docs/concurvity_examples.md``.
 
 Numerical note: float64 is required to reproduce mgcv's LAPACK output;
 the diagnostic is sensitive to the near-rank-deficient end of the QR and
-float32 diverges by ~1e-4. Callers should set
-``jax.config.update("jax_enable_x64", True)`` before invoking this.
+float32 diverges by ~1e-4. pgam_jax enables x64 on import, and
+:func:`concurvity` warns if x64 mode is off.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 
 from ._identifiable_features import _get_basis_component_infos
+from ._utils import warn_if_x64_disabled
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -229,6 +230,7 @@ def concurvity(
         Shape depends on `full` and `as_dataframe`. Measure keys are
         'worst', 'estimate', and 'observed' (only if beta was supplied).
     """
+    warn_if_x64_disabled("concurvity")
     if precondition:
         X = _precondition(X)
 
