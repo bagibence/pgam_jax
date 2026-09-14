@@ -50,6 +50,8 @@ def make_inner_solver(solver_name=_DEFAULT_INNER_SOLVER, solver_kwargs=None):
         ``solve(loss, beta0) -> params``, where ``loss(beta, *args) -> scalar``.
     """
     impl = nemos.solvers.get_solver(solver_name).implementation
+    # TODO: Merge user kwargs into the defaults ({**defaults, **solver_kwargs}).
+    # Now passing only tol drops the default maxiter, and passing only maxiter drops tol=1e-12.
     kwargs = _DEFAULT_INNER_SOLVER_KWARGS if solver_kwargs is None else solver_kwargs
 
     def solve(loss, beta0):
@@ -207,6 +209,8 @@ def laplace_reml_outer_iteration(
         )
         return -objective(rhos_tree, jax.lax.stop_gradient(beta_hat), X, y, S_all)
 
+    # TODO: Merge user kwargs into the defaults ({**defaults, **outer_solver_kwargs}).
+    # Now passing only tol drops the default maxiter=200, so the nemos solver default applies.
     kwargs = (
         _DEFAULT_OUTER_SOLVER_KWARGS
         if outer_solver_kwargs is None

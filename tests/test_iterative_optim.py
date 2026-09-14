@@ -112,11 +112,11 @@ def test_check_pql_convergence_coef_and_reg_warmup_skips_iteration_zero():
     )
 
 
-def test_check_pql_convergence_gcv_matches_legacy_min_iteration():
-    # gcv ignores params/reg deltas; it only looks at scores. Pass huge deltas
+def test_check_pql_convergence_score_matches_legacy_min_iteration():
+    # score ignores params/reg deltas; it only looks at scores. Pass huge deltas
     # to demonstrate that.
     assert not check_pql_convergence(
-        "gcv",
+        "score",
         iteration=3,
         tol=1e-5,
         old_params=_params(0.0),
@@ -127,7 +127,7 @@ def test_check_pql_convergence_gcv_matches_legacy_min_iteration():
         new_score=1.0,
     )
     assert check_pql_convergence(
-        "gcv",
+        "score",
         iteration=4,
         tol=1e-5,
         old_params=_params(0.0),
@@ -139,12 +139,12 @@ def test_check_pql_convergence_gcv_matches_legacy_min_iteration():
     )
 
 
-def test_check_pql_convergence_gcv_handles_negative_scores():
+def test_check_pql_convergence_score_handles_negative_scores():
     # The relative threshold uses |new_score|, so negative scores converge the
     # same as positive ones. Without the abs the threshold flips sign and
     # convergence never triggers.
     assert check_pql_convergence(
-        "gcv",
+        "score",
         iteration=4,
         tol=1e-5,
         old_params=_params(0.0),
@@ -156,10 +156,10 @@ def test_check_pql_convergence_gcv_handles_negative_scores():
     )
 
 
-def test_check_pql_convergence_gcv_returns_false_when_old_score_missing():
+def test_check_pql_convergence_score_returns_false_when_old_score_missing():
     # First post-warmup iteration: old_inner_score is still None.
     assert not check_pql_convergence(
-        "gcv",
+        "score",
         iteration=4,
         tol=1e-5,
         old_params=_params(0.0),

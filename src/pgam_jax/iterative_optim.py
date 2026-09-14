@@ -126,7 +126,7 @@ def _tree_max_leaf_l2(tree):
     return pytree_map_and_reduce(jnp.linalg.norm, max, tree)
 
 
-VALID_CONVERGENCE_CRITERIA = ("coef", "coef_and_reg", "gcv")
+VALID_CONVERGENCE_CRITERIA = ("coef", "coef_and_reg", "score")
 
 
 def check_pql_convergence(
@@ -158,7 +158,7 @@ def check_pql_convergence(
         ) < tol * _tree_max_leaf_l2(new_reg_strength)
         return coef_ok & reg_ok
 
-    if criterion == "gcv":
+    if criterion == "score":
         if iteration <= 3:
             return False
         if old_score is None or new_score is None:
@@ -186,7 +186,7 @@ def pql_outer_iteration(
     tol_optim=10**-10,
     tol_update=10**-5,
     use_scipy=False,
-    convergence_criterion: str = "gcv",
+    convergence_criterion: str = "score",
 ):
     """
 
@@ -209,14 +209,14 @@ def pql_outer_iteration(
     fisher_scoring
     max_iter
     use_scipy:
-        If True, use scipy's L-BFGS-B for the inner GCV minimization instead
+        If True, use scipy's L-BFGS-B for the inner GCV or REML minimization instead
         of jaxopt's. Often faster on CPU. Defaults to False.
     convergence_criterion:
         Outer-loop convergence monitor. ``"coef"`` checks only coefficient
         movement, ``"coef_and_reg"`` checks both coefficient and log-regularizer
-        movement, and ``"gcv"`` checks relative change in the optimized inner
-        GCV score, matching the legacy PGAM convention.
-        Defaults to ``"gcv"``.
+        movement, and ``"score"`` checks relative change in the optimized inner
+        GCV or REML score, matching the legacy PGAM convention.
+        Defaults to ``"score"``.
     Returns
     -------
 
