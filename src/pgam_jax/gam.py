@@ -50,6 +50,8 @@ from ._utils import (
     singular_value_keep_mask,
     stack_block_diag,
     to_zero_dim_jax_array,
+    warn_if_not_float64,
+    warn_if_x64_disabled,
 )
 from .concurvity import concurvity as _concurvity
 from .concurvity import term_blocks_for_gam
@@ -831,10 +833,25 @@ class GAM:
         if not isinstance(xi, tuple):
             raise TypeError("Inputs xi have to be wrapped in a tuple.")
 
+        warn_if_x64_disabled("GAM.fit")
         y = jnp.asarray(y)
+        warn_if_not_float64(
+            "GAM.fit",
+            {"y": y},
+            advice="pgam_jax casts y to float64, but it cannot recover "
+            "precision lost in float32 data.",
+        )
+        # float is the default float dtype: float64 with x64 on, float32 with
+        # x64 off (warned above). Mixed dtypes crash the jaxopt GLM init.
+        y = y.astype(float)
         X, y = self._fit_design_matrix(xi, y)
-        penalty_tree = self._get_penalty_tree()
+        warn_if_not_float64(
+            "GAM.fit",
+            {"design matrix": X},
+            advice="Cast the inputs to float64.",
+        )
 
+        penalty_tree = self._get_penalty_tree()
         ph = self._build_penalty_handler(penalty_tree)
         compute_sqrt, compute_log_det_and_grad = ph.build()
 

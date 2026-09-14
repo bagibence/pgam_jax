@@ -34,29 +34,12 @@ Public API
     hessian: (M, M)       = hes_log_det_slam(rho, S_i_out)
 """
 
-import warnings
 from collections import defaultdict
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
-import numpy as np
 from jax import lax
-
-
-def _warn_if_not_f64(fname: str) -> None:
-    if jnp.finfo(float).dtype != np.dtype("float64"):
-        warnings.warn(
-            f"{fname}: JAX is operating in {jnp.finfo(float).dtype} precision. "
-            "The Wood (2011) Appendix B algorithm uses machine-epsilon thresholds "
-            "for the dominant/subdominant split and rank determination that are "
-            "calibrated for float64 and will produce inaccurate results in lower "
-            "precision.  Enable float64 with "
-            "jax.config.update('jax_enable_x64', True).",
-            UserWarning,
-            stacklevel=3,
-        )
-
 
 # ===========================================================================
 # Wood (2011) Appendix B — block-diagonal transform via lax.scan
@@ -228,7 +211,6 @@ def transform_slam(S_tensor, rho):
         no cross-scale cancellation.  Pass to :func:`log_det_slam`,
         :func:`grad_log_det_slam`, and :func:`hes_log_det_slam`.
     """
-    _warn_if_not_f64("transform_slam")
     lams = jnp.exp(rho)
     M, q = S_tensor.shape[0], S_tensor.shape[1]
 
@@ -269,7 +251,6 @@ def transform_slam_with_Q(S_tensor, lams):
     Q_s :
         Shape (q, q) accumulated rotation.
     """
-    _warn_if_not_f64("transform_slam_with_Q")
     M, q = S_tensor.shape[0], S_tensor.shape[1]
 
     body = _make_scan_body(lams, q)
@@ -346,7 +327,6 @@ def log_det_slam(rho, S_i_out):
     :
         Scalar log-determinant.
     """
-    _warn_if_not_f64("log_det_slam")
     lams = jnp.exp(rho)
     log_det, _ = _eigh_log_det_and_inv(S_i_out, lams)
     return log_det
@@ -372,7 +352,6 @@ def log_det_and_grad_slam(rho, S_i_out):
     grad :
         Shape (M,) gradient vector.
     """
-    _warn_if_not_f64("log_det_and_grad_slam")
     lams = jnp.exp(rho)
     log_det, Sinv = _eigh_log_det_and_inv(S_i_out, lams)
     grad = lams * jnp.einsum("kl,jlk->j", Sinv, S_i_out)
@@ -397,7 +376,6 @@ def grad_log_det_slam(rho, S_i_out):
     :
         Shape (M,) gradient vector.
     """
-    _warn_if_not_f64("grad_log_det_slam")
     lams = jnp.exp(rho)
     _, Sinv = _eigh_log_det_and_inv(S_i_out, lams)
     grad = lams * jnp.einsum("kl,jlk->j", Sinv, S_i_out)
@@ -425,7 +403,6 @@ def hes_log_det_slam(rho, S_i_out):
     :
         Shape (M, M) Hessian matrix.
     """
-    _warn_if_not_f64("hes_log_det_slam")
     lams = jnp.exp(rho)
     _, Sinv = _eigh_log_det_and_inv(S_i_out, lams)
 
