@@ -426,24 +426,24 @@ class GAM:
         """
         Construct a PenaltyHandler from the penalty tensor list.
 
-        A component with no empty column keeps its existing fast path: the
-        Kronecker-sum path for a tensor product, the single-matrix path
-        otherwise. A component with empty columns takes the general path
-        instead, because masking rows and columns of a Kronecker sum does not
-        leave a Kronecker sum, and because the null-space term is already an
-        explicit entry of the masked tensor.
+        Components that are not ``MultiplicativeBasis`` use the single-matrix
+        path, rebuilding any null-space penalty from the possibly masked energy
+        matrix. Unmasked tensor products use the Kronecker-sum path. Masked tensor
+        products use the general path because arbitrary masks break that structure.
         """
         ph = PenaltyHandler()
         for S_tensor, info in zip(penalty_tree, self._component_infos(), strict=True):
             basis_comp = info.basis
             id_fn = DROP_LAST_COL if info.drops_identifiability_column else IDENTITY
-            if info.is_masked:
+            # single can use the fast path
+            if not isinstance(basis_comp, MultiplicativeBasis):
                 ph.add(
-                    S_tensor,
-                    penalize_null_space=False,
+                    S_tensor[0],
+                    penalize_null_space=True,
                     identifiability_fn=id_fn,
                 )
-            elif isinstance(basis_comp, MultiplicativeBasis):
+            # unmasked tensor product can use the fast path
+            elif not info.is_masked:
                 factors = compute_energy_penalty_factors(
                     basis_comp, self.n_simpson_sample
                 )
@@ -452,10 +452,11 @@ class GAM:
                     penalize_null_space=True,
                     identifiability_fn=id_fn,
                 )
+            # masked tensor product falls back to general
             else:
                 ph.add(
-                    S_tensor[0],
-                    penalize_null_space=True,
+                    S_tensor,
+                    penalize_null_space=False,
                     identifiability_fn=id_fn,
                 )
         return ph

@@ -9,11 +9,13 @@ from conftest import any_columns_dropped, n_columns_dropped
 
 from pgam_jax import GAM
 from pgam_jax._penalty_handler import (
+    PenaltyHandler,
     _GeneralPenalty,
     _KroneckerWithNullPenalty,
     _SinglePenalty,
     _SingleWithNullPenalty,
 )
+from pgam_jax.penalty_utils import DROP_LAST_COL, IDENTITY
 
 jax.config.update("jax_enable_x64", True)
 
@@ -141,6 +143,55 @@ class TestPenaltyHandlerRouting:
         ph = gam._build_penalty_handler(tree)
         assert isinstance(ph._penalties[0], _SinglePenalty)
         assert ph._penalties[0].rho_len == 1
+
+    @pytest.mark.parametrize("drop_identifiability", [False, True])
+    @pytest.mark.parametrize("rho", [[0.3, -0.7], [-4.0, 3.0], [3.0, -4.0]])
+    def test_masked_one_dimensional_with_null_matches_general(
+        self, drop_identifiability, rho
+    ):
+        """
+        Removing one column leaves one unpenalized linear direction.
+
+        Zero-only masking retains the identifiability drop. Threshold masking
+        removes a nonempty column and keeps all surviving columns instead.
+        """
+        x = np.linspace(0.02, 0.79, 400)
+        if drop_identifiability:
+            min_obs = True
+            id_fn = DROP_LAST_COL
+        else:
+            x = np.append(x, 0.9)
+            min_obs = 2
+            id_fn = IDENTITY
+        gam = _prepared(_bspline(8), (x,), np.ones(len(x)), min_obs)
+        info = gam.component_infos_[0]
+        assert info.n_dropped == 1
+        assert info.drops_identifiability_column == drop_identifiability
+        tree = gam._get_penalty_tree()
+        assert tree[0].shape == (2, 7, 7)
+
+        routed = gam._build_penalty_handler(tree)
+        penalty = routed._penalties[0]
+        assert isinstance(penalty, _SingleWithNullPenalty)
+        assert penalty.rank_null == 1
+        assert penalty.rho_len == gam._init_regularizer_strength(tree)[0].size == 2
+
+        baseline = PenaltyHandler()
+        baseline.add(tree[0], penalize_null_space=False, identifiability_fn=id_fn)
+        assert isinstance(baseline._penalties[0], _GeneralPenalty)
+        rhos = [jnp.asarray(rho)]
+        B = np.asarray(routed.compute_sqrt(rhos))
+        B_general = np.asarray(baseline.compute_sqrt(rhos))
+        expected = np.einsum("i,ijk->jk", np.exp(rho), tree[0])
+        if drop_identifiability:
+            expected = expected[:-1, :-1]
+        np.testing.assert_allclose(B.T @ B, expected, rtol=1e-9, atol=1e-8)
+        np.testing.assert_allclose(B.T @ B, B_general.T @ B_general, atol=1e-8)
+
+        values, gradients = routed.compute_log_det_and_grad(rhos)
+        general_values, general_gradients = baseline.compute_log_det_and_grad(rhos)
+        np.testing.assert_allclose(values, general_values, rtol=1e-8, atol=1e-8)
+        np.testing.assert_allclose(gradients, general_gradients, rtol=1e-8, atol=1e-8)
 
 
 class TestRhoLengthsAgree:
