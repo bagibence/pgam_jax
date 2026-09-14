@@ -164,33 +164,44 @@ class GAM:
     """
     Generalized Additive Model.
 
-    Wraps supported nemos ``Basis`` objects and an ``ObservationModel`` to fit a GAM using
-    IRLS for coefficients, GCV for smoothing-parameter selection, and identifiability
-    constraints on the basis functions.
+    Wraps supported nemos ``Basis`` objects and an ``ObservationModel`` to fit a GAM.
 
     Parameters
     ----------
     basis :
         A nemos ``Basis`` describing the smooth terms.
-        Must be a ``BSpline`` or an additive or multiplicative composite of ``BSpline`` bases.
+        Must be a ``(Cyclic)BSplineEval``, ``(Cyclic)BSplineConv``, or an additive or
+        multiplicative composite of such bases.
+        Evaluation bases require ``bounds`` set.
     observation_model :
-        A nemos observation model. Default is ``PoissonObservations()``.
+        A nemos observation model. Currently only ``PoissonObservations()`` is supported.
     maxiter :
         Maximum number of outer PQL iterations. Default is 100.
+        Only used by the ``pql_*`` methods. For ``"laplace_reml"``, set ``maxiter``
+        in ``method_kwargs["outer_solver_kwargs"]`` instead.
     tol_update :
-        Outer-loop convergence tolerance. Its meaning depends on
+        Outer-loop convergence tolerance in PQL. Its meaning depends on
         ``convergence_criterion``. Default is 1e-5.
+        Only used by the ``pql_*`` methods. For ``"laplace_reml"``, set ``tol``
+        in ``method_kwargs["outer_solver_kwargs"]`` instead.
     tol_optim :
-        Tolerance for the inner GCV optimization (L-BFGS-B). Default is 1e-10.
+        Tolerance for the inner score (GCV or REML) optimization (L-BFGS-B).
+        Default is 1e-10.
+        Only used by the ``pql_*`` methods. For ``"laplace_reml"``, set ``tol``
+        in ``method_kwargs["inner_solver_kwargs"]`` instead.
     use_scipy :
-        If True, use scipy's L-BFGS-B for both the inner GCV minimization
+        If True, use scipy's L-BFGS-B for both the inner score (GCV or REML) minimization
         and the initial GLM fit instead of jaxopt's. Often faster on CPU.
         Default is False.
+        For ``"laplace_reml"``, it only affects the initial GLM fit.
     convergence_criterion :
         Outer-loop convergence monitor passed to ``pql_outer_iteration``.
-        ``"gcv"`` matches legacy PGAM, while ``"coef"`` and ``"coef_and_reg"``
-        are fixed-point style monitors.
-        Default is ``"gcv"``.
+        ``"score"`` matches legacy PGAM, requiring convergence of the inner criterion (GCV or REML).
+        ``"coef"`` and ``"coef_and_reg"`` are fixed-point style monitors:
+        ``"coef"`` checks for convergence of the regression coefficients (beta).
+        ``"coef_and_reg"`` for the regression coefficients and the regularization parameters (lambda/rho).
+        Default is ``"score"``.
+        Only used by the ``pql_*`` methods.
     drop_conv_basis_col :
         If True, convolutional basis leaves drop their last column for
         identifiability. If False, convolutional basis leaves keep all columns.
@@ -205,7 +216,7 @@ class GAM:
         - ``"pql_reml"``: Restricted Maximum Likelihood on the PQL-linearized
           working model.
         - ``"laplace_reml"``: Laplace-approximated REML on the true GLM
-          likelihood at the MAP. Currently Poisson-only (φ fixed at 1).
+          likelihood at the MAP.
 
         The ``pql_*`` methods share the IRLS outer loop (``pql_outer_iteration``);
         ``laplace_reml`` instead optimizes ρ directly over the Laplace REML
@@ -217,8 +228,9 @@ class GAM:
         ``nemos.solvers`` registry name and its constructor kwargs.
     use_glm_init :
         If no ``init_params`` are provided, ``fit`` initializes the parameters to
-        zeros. When this is True, it then fits a regularized GLM (starting from
-        those zeros) to warm-start the coefficients before the PQL iterations.
+        zeros and the intercept to link(mean(y)). When this is True, it then fits
+        a regularized GLM to warm-start the coefficients and start the fit from there.
+        Default is True.
     nan_handling :
         Policy for NaNs in the raw design matrix. ``"zero"`` (default) replaces
         NaN features with zero and retains their rows. ``"drop"`` omits rows
@@ -236,18 +248,21 @@ class GAM:
     regularizer_strength_ :
         Log-space regularization strengths for each smooth term (available after ``fit``).
     n_iter_ :
-        Number of outer PQL iterations performed (available after ``fit``).
+        Number of outer iterations performed (available after ``fit``).
     cov_beta_ :
         Posterior covariance of the full coefficient vector ``[intercept, coef_]``
         treating smoothing parameters as fixed (available after ``fit``).
         Includes the dispersion factor: ``φ̂ · (X'WX + S_λ)⁻¹``.
     scale_ :
         Estimated dispersion parameter φ̂ (available after ``fit``).
-        Poisson/Bernoulli models always return 1.0; Gaussian/Gamma models
+        Poisson models always return 1.0; Gaussian/Gamma models will
         estimate φ̂ from Pearson residuals divided by residual degrees of freedom.
     edf_ :
-        Effective degrees of freedom — Wood's ``edf1 = 2·tr(F) − tr(F²)``
+        Effective degrees of freedom ``tr(F)``, where ``F = (X'WX + S_λ)⁻¹ X'WX``
         (available after ``fit``).
+    edf1_ :
+        Alternative effective degrees of freedom, Wood's ``edf1 = 2·tr(F) - tr(F²)``.
+        Used as the reference rank in ``test_smooth_significance`` (available after ``fit``).
     dof_resid_ :
         Residual degrees of freedom ``n_obs − edf_`` (available after ``fit``).
     """
@@ -260,7 +275,7 @@ class GAM:
         tol_update: float = 1e-5,
         tol_optim: float = 1e-10,
         use_scipy: bool = False,
-        convergence_criterion: str = "gcv",
+        convergence_criterion: str = "score",
         drop_conv_basis_col: bool = False,
         method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_reml",
         method_kwargs: dict | None = None,
@@ -285,9 +300,9 @@ class GAM:
         self.observation_model = observation_model
 
         # Laplace-REML currently supports only Poisson: phi is fixed at 1 there.
-        # The empirical phi-scaling test (_script/check_phi_scaling.py) shows
-        # rho-hat does NOT factor from phi for the Laplace objective, so non-
-        # Poisson families need a joint rho/phi outer iteration not yet built.
+        # The empirical phi-scaling test shows rho-hat does NOT factor from phi
+        # for the Laplace objective, so non-Poisson families need a joint rho/phi
+        # outer iteration not yet built.
         if method == "laplace_reml" and not isinstance(
             observation_model, PoissonObservations
         ):
@@ -333,7 +348,10 @@ class GAM:
         y: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """
-        Initialize model parameters to zeros.
+        Initialize model parameters.
+
+        Coefficients start at zero. The intercept starts at ``link(mean(y))``,
+        which is the optimum of the intercept-only model.
 
         Parameters
         ----------
@@ -345,7 +363,7 @@ class GAM:
         Returns
         -------
         :
-            Zero-initialized (coefficients, intercept).
+            Initial (coefficients, intercept).
         """
         coef = jnp.zeros(X.shape[1])
 
@@ -470,10 +488,11 @@ class GAM:
         init_params,
         init_regularizer_strength,
     ):
-        """Direct Laplace-REML fit: optimise rho via the Laplace-approximated REML.
+        """
+        Direct Laplace-REML fit: optimise rho via the Laplace-approximated REML.
 
-        Mirrors the output contract of ``pql_outer_iteration`` — returns
-        ``((coef, intercept), regularizer_strength, n_iter)`` — so ``fit`` can
+        Mirrors the output contract of ``pql_outer_iteration``, returning
+        ``((coef, intercept), regularizer_strength, n_iter)``, so ``fit`` can
         treat both paths uniformly.
 
         Unlike the PQL path (which alternates IRLS coefficient updates with a
@@ -486,7 +505,7 @@ class GAM:
         X_full = prepend_ones_for_intercept(X)
 
         # S_all: (M, P, P) penalty stack in the full coef space, intercept
-        # row/col zero — same construction _pql_reml uses for its gradient.
+        # row/col zero. Same construction _pql_reml uses for its gradient.
         penalty_blocks = compute_penalty_blocks(
             penalty_tree,
             apply_identifiability=self._apply_identifiability_square,
@@ -499,7 +518,7 @@ class GAM:
 
         # M_null: _get_penalty_tree penalises every smooth's null space
         # (penalize_null_space=True), so the only unpenalised direction is the
-        # intercept — M_null is 1, analytically, with no rank estimation.
+        # intercept. M_null is 1, analytically, with no rank estimation.
         M_null = 1
 
         # phi = 1: Laplace-REML is Poisson-only here (enforced at construction).
@@ -529,7 +548,7 @@ class GAM:
         """
         Compute the penalty tensor tree for all smooth terms.
 
-        Delegatest to ``compute_energy_penalty_tensor``.
+        Delegates to ``compute_energy_penalty_tensor``.
         """
         return compute_energy_penalty_tensor(
             self.basis, self.n_simpson_sample, penalize_null_space=True
@@ -622,6 +641,24 @@ class GAM:
         generalized inverse of ``X.T W X + S_lambda`` via the SVD of
         ``[R; sqrt(S_lambda)]``.
 
+        Besides returning ``cov_beta`` and ``scale``, it sets the following on ``self``:
+        ``_R``, ``_sqrt_penalty``, ``_edf_by_coef``, ``_edf1_by_coef``,
+        ``_unscaled_freq_cov_root``, ``cov_beta_freq_``, and ``penalized_information_rank_``.
+
+        Parameters
+        ----------
+        X :
+            Centered design matrix without the intercept column, shape ``(n_samples, n_features)``.
+        y :
+            Response variable, shape ``(n_samples,)``.
+        params :
+            Fitted (coefficients, intercept).
+        regularizer_strength :
+            Fitted log-space regularization strengths.
+        compute_sqrt :
+            Function that maps ``regularizer_strength`` to the square root of the
+            combined penalty ``S_λ`` (from ``PenaltyHandler.build``).
+
         Returns
         -------
         cov_beta :
@@ -702,7 +739,7 @@ class GAM:
         self._edf_by_coef = diag_F
         self._edf1_by_coef = 2 * diag_F - diag_F_sq
 
-        # dispersion: Poisson → 1.0; Gaussian/Gamma → Pearson χ²/dof
+        # dispersion: Poisson -> 1.0; Gaussian/Gamma -> Pearson χ²/dof
         scale = self.observation_model.estimate_scale(
             y, mu, dof_resid=n_obs - self.edf_
         )
@@ -722,10 +759,12 @@ class GAM:
 
     @property
     def edf_(self) -> JaxFloatScalar:
+        """Effective degrees of freedom ``tr(F)``, where ``F = (X'WX + S_λ)⁻¹ X'WX``."""
         return jnp.sum(self._edf_by_coef)
 
     @property
     def edf1_(self) -> JaxFloatScalar:
+        """Alternative effective degrees of freedom, Wood's ``edf1 = 2·tr(F) - tr(F²)``."""
         return jnp.sum(self._edf1_by_coef)
 
     def _resolve_basis_component(
@@ -766,10 +805,6 @@ class GAM:
         """
         Fit the GAM to data.
 
-        Delegates to ``pql_outer_iteration``, which alternates between IRLS
-        (updating coefficients) and GCV-based optimizationo f the smoothing
-        parameters until convergence.
-
         Parameters
         ----------
         xi :
@@ -779,7 +814,8 @@ class GAM:
             are omitted before centering and fitting.
         init_params :
             Initial (coefficients, intercept).
-            If None, initialized to zeros, then further tuned if ``use_glm_init`` is True.
+            If None, coefficients start at zero and the intercept at ``link(mean(y))``
+            (see ``initialize_params``), then further tuned if ``use_glm_init`` is True.
         init_regularizer_strength :
             Initial log-space regularization strengths. If None, initialized to zeros
             (lambda=1 for every penalty component).
@@ -788,7 +824,8 @@ class GAM:
         -------
         :
             The fitted model, with ``coef_``, ``intercept_``, ``regularizer_strength_``,
-            and ``n_iter_`` set.
+            ``n_iter_``, ``cov_beta_``, ``cov_beta_freq_``, ``scale_``, ``dof_resid_``,
+            ``feature_mean_``, and ``penalized_information_rank_`` set.
         """
         # TODO: Handle different types if accepting xi instead of X
         if not isinstance(xi, tuple):
@@ -839,7 +876,7 @@ class GAM:
                 fisher_scoring=False,  # use observed information, not expected
                 max_iter=self.maxiter,
                 tol_update=self.tol_update,  # convergence tol for coefficient updates
-                tol_optim=self.tol_optim,  # tolerance for inner GCV optimization
+                tol_optim=self.tol_optim,  # tolerance for inner score optimization
                 use_scipy=self.use_scipy,
                 convergence_criterion=self.convergence_criterion,
             )
@@ -909,7 +946,8 @@ class GAM:
         full: bool = True,
         as_dataframe: bool = False,
     ):
-        r"""Concurvity diagnostics for this GAM.
+        r"""
+        Concurvity diagnostics for this GAM.
 
         Concurvity generalizes collinearity to smooth terms: it measures the
         fraction of a smooth's fitted curve that can be reproduced by some
@@ -925,14 +963,14 @@ class GAM:
         Three indices summarize :math:`\|\mathbf{g}_i\|^2/\|\mathbf{f}_i\|^2`,
         all in :math:`[0, 1]` (0 = identifiable, 1 = fully redundant):
 
-        - ``worst`` — :math:`\sup_{\boldsymbol{\beta}_i}
+        - ``worst``: :math:`\sup_{\boldsymbol{\beta}_i}
           \|\mathbf{g}_i\|^2/\|\mathbf{f}_i\|^2`. Worst case over coefficient
           space; pessimistic but coefficient-free.
-        - ``estimate`` — the Frobenius-norm ratio
+        - ``estimate``: the Frobenius-norm ratio
           :math:`\|\mathbf{R}_{12}\|_F^2/\|\mathbf{R}_{:,2}\|_F^2` from the
           block-QR of :math:`[\mathbf{X}_{-i} \mid \mathbf{X}_i]`. Free of
           both pessimism and optimism; depends only on the design matrix.
-        - ``observed`` — the ratio evaluated at the fitted
+        - ``observed``: the ratio evaluated at the fitted
           :math:`\hat{\boldsymbol{\beta}}_i`. Most direct interpretation, but
           can be over-optimistic if shrinkage pushed :math:`\hat{\boldsymbol{\beta}}_i`
           away from the worst-case direction. **Only available after fit.**
@@ -1043,6 +1081,28 @@ class GAM:
         on the supplied grid, and combined with the matching coefficient block.
         It is intentionally separate from ``predict``, which uses training
         centering.
+
+        Parameters
+        ----------
+        xi :
+            Input arrays for the selected component, one per input dimension of
+            that component. A single array is also accepted and wrapped in a tuple.
+        component_index :
+            Index or label of the smooth component to evaluate.
+        perc :
+            Coverage of the confidence band. Default is 0.95.
+        se_with_mean :
+            If True, include the intercept uncertainty in the standard error.
+            Default is True.
+
+        Returns
+        -------
+        mean :
+            Centered smooth evaluated at ``xi``, shape ``(n_samples,)``.
+        lower :
+            Lower bound of the confidence band, shape ``(n_samples,)``.
+        upper :
+            Upper bound of the confidence band, shape ``(n_samples,)``.
         """
         self._raise_if_not_fitted()
 
