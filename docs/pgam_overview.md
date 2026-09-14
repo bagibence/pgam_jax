@@ -144,6 +144,62 @@ apply_identifiability = DROP_LAST_COL
 apply_identifiability_penalty = DROP_LAST_ROW_COL
 ```
 
+### 5.4 Dropping Empty Columns
+
+A basis covers the whole range you give it. The data often cover less. A 2-D
+spline over a square arena has many basis functions that no observation ever
+activates, and their columns are all zero.
+
+An empty column carries no information about its coefficient.
+Set `drop_empty_columns` to remove such columns.
+
+```python
+from pgam_jax import GAM
+
+# Drop a column that has no non-zero entry
+gam = GAM(basis, drop_empty_columns=True)
+
+# Or require at least 20 observations per column
+gam = GAM(basis, drop_empty_columns=20)
+```
+
+If the threshold removes a nonempty evaluation-basis column for the component,
+all its surviving columns are retained without the usual additional identifiability drop.
+The survivors need not sum to one, so dropping another column could remove
+a direction that the model can identify. A single survivor is allowed in
+this case. Removing only zero columns preserves the existing drop rule.
+
+After the fit, `gam.component_infos_` holds one layout record per smooth:
+its basis, input slice, full-width nonempty mask, identifiability decision,
+and fitted coefficient slice. Feature construction and penalties use these
+same records. `coef_` and `cov_beta_` are reduced to match.
+
+To inspect the result, read the records. Each one reports `n_kept`,
+`n_dropped`, and `is_masked` for its own component:
+
+```python
+any(info.is_masked for info in gam.component_infos_)
+sum(info.n_dropped for info in gam.component_infos_)
+```
+
+The masks are read-only, so an edit to one cannot silently change the fitted
+column layout.
+
+Two points to know before you turn it on:
+
+- Masking changes the model. In an unmasked fit the empty coefficients are
+  free, and the smoothness penalty pulls them toward the values that make it
+  smallest. Masking forces them to zero and rebuilds the null-space penalty
+  for the retained basis. Predictions and selected smoothing parameters can
+  therefore differ from an unmasked fit.
+- A masked tensor-product term leaves the fast Kronecker penalty path, so it
+  can fit slower despite having fewer coefficients.
+
+The model still returns predictions outside the region the data cover.
+Those values are extrapolations and are not supported by training data.
+
+A worked 2-D example is in `examples/island_column_masking.ipynb`.
+
 ## 6. Generalized Cross-Validation (GCV)
 
 ### 6.1 The Challenge

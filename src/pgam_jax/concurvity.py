@@ -286,14 +286,20 @@ def _to_dataframe(
 
 
 def term_blocks_for_gam(gam: GAM) -> list[TermBlock]:
-    """Build the TermBlock list for a fitted GAM (parametric block first,
-    then one block per smooth component), using the same slice convention
-    as `_get_basis_component_infos`. The +1 shifts account for the
-    prepended intercept column (see `prepend_ones_for_intercept`)."""
+    """
+    Build term blocks using the GAM's fitted column layout.
 
-    infos = _get_basis_component_infos(
-        gam.basis, drop_conv_basis_col=gam.drop_conv_basis_col
-    )
+    Before fitting, use the unmasked layout, as ``GAM.concurvity`` does.
+    A mask left by an unsuccessful initial fit is ignored. The +1 shifts
+    account for the prepended intercept column.
+    """
+
+    if hasattr(gam, "coef_"):
+        infos = gam.component_infos_
+    else:
+        infos = _get_basis_component_infos(
+            gam.basis, drop_conv_basis_col=gam.drop_conv_basis_col
+        )
     blocks = [TermBlock(label="para", start=0, stop=0)]
     for info in infos:
         s = info.identifiable_feature_slice

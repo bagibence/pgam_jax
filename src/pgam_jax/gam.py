@@ -6,6 +6,7 @@ from typing import Callable, Literal
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import numpy as np
 from jaxopt import LBFGS, ScipyMinimize
 from nemos.basis import (
     AdditiveBasis,
@@ -26,9 +27,10 @@ from scipy import stats as sts
 from ._identifiable_features import (
     BasisComponentInfo,
     _compute_features_identifiable,
+    _compute_full_width_blocks,
     _get_basis_component_infos,
-    _should_drop_basis_col,
-    compute_features_identifiable,
+    reduce_component_blocks,
+    resolve_min_obs,
 )
 from ._laplace_reml_fit import laplace_reml_outer_iteration, make_inner_solver
 from ._nan_policy import (
@@ -37,6 +39,7 @@ from ._nan_policy import (
     apply_nan_policy_for_fit,
     apply_nan_policy_for_transform,
     get_valid_y_rows,
+    kept_rows_for_fit,
     validate_nan_handling,
 )
 from ._p_values import weighted_chisq_pval
@@ -65,7 +68,7 @@ from .penalty_utils import (
     DROP_LAST_ROW_COL,
     IDENTITY,
     compute_energy_penalty_factors,
-    compute_energy_penalty_tensor,
+    compute_energy_penalty_tensor_additive_component,
     compute_penalty_blocks,
     prepend_zeros_for_intercept,
 )
@@ -144,24 +147,6 @@ def _validate_eval_bases_have_bounds(basis) -> None:
     )
 
 
-def _make_identifiability_dropper(
-    basis_component,
-    square: bool,
-    drop_conv_basis_col: bool,
-):
-    """
-    Per-leaf identifiability function matching ``compute_features_identifiable``.
-
-    Convolutional bases follow ``drop_conv_basis_col``, other bases drop the last column.
-    ``square=True`` returns a function that drops both the last row and column for use on penalty matrices.
-    """
-    if not _should_drop_basis_col(basis_component, drop_conv_basis_col):
-        return IDENTITY
-    if square:
-        return DROP_LAST_ROW_COL
-    return DROP_LAST_COL
-
-
 class GAM:
     """
     Generalized Additive Model.
@@ -210,6 +195,22 @@ class GAM:
         Default is False.
         Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
         but the option is added for matching the original implementation if required.
+    drop_empty_columns :
+        Drop design columns that no data activate. ``False`` keeps every
+        column. ``True`` drops a column that has no non-zero entry. An integer
+        sets that threshold directly, as ``min_obs``. Default is False.
+
+        If a nonempty evaluation-basis column is removed for the component,
+        the last column doesn't have to be dropped for identifiability anymore,
+        so that automatic dropping is disabled.
+        The explicit convolutional column drop option is unchanged.
+
+        A basis built over a full covariate range produces empty columns
+        whenever the data cover only part of that range. Dropping columns
+        reduces the coefficient space and changes the penalty model: removed
+        coefficients are fixed to zero, and the null-space penalty is rebuilt
+        for the retained basis. Predictions and selected smoothing parameters
+        can therefore differ from an unmasked fit.
     method :
         Smoothing-parameter selection algorithm. Default ``"pql_reml"``.
 
@@ -267,6 +268,10 @@ class GAM:
         Used as the reference rank in ``test_smooth_significance`` (available after ``fit``).
     dof_resid_ :
         Residual degrees of freedom ``n_obs − edf_`` (available after ``fit``).
+    component_infos_ :
+        Tuple of component layouts rebuilt during fit preparation. Each records
+        the basis, input slice, full-width nonempty mask, identifiability
+        decision, and fitted coefficient slice. Masks are read-only.
     """
 
     def __init__(
@@ -279,6 +284,7 @@ class GAM:
         use_scipy: bool = False,
         convergence_criterion: str = "score",
         drop_conv_basis_col: bool = False,
+        drop_empty_columns: bool | int = False,
         method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_reml",
         method_kwargs: dict | None = None,
         use_glm_init: bool = True,
@@ -321,28 +327,11 @@ class GAM:
         self.use_scipy = use_scipy
         self.convergence_criterion = convergence_criterion
         self.drop_conv_basis_col = drop_conv_basis_col
+        self.drop_empty_columns = drop_empty_columns
+        resolve_min_obs(drop_empty_columns)  # fail now, not at fit time
         self.n_simpson_sample = int(1e4)
         self.use_glm_init = use_glm_init
         self.nan_handling = nan_handling
-
-        # Identifiability is applied per basis component to match how the design matrix is built:
-        # BSplineConv leaves follow ``drop_conv_basis_col``; other leaves drop the last column.
-        self._apply_identifiability_column = tuple(
-            _make_identifiability_dropper(
-                b,
-                square=False,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-            )
-            for b in self.basis
-        )
-        self._apply_identifiability_square = tuple(
-            _make_identifiability_dropper(
-                b,
-                square=True,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-            )
-            for b in self.basis
-        )
 
     def initialize_params(
         self,
@@ -434,15 +423,27 @@ class GAM:
         return (coef, intercept)
 
     def _build_penalty_handler(self, penalty_tree: list) -> PenaltyHandler:
-        """Construct a PenaltyHandler from the penalty tensor list."""
+        """
+        Construct a PenaltyHandler from the penalty tensor list.
+
+        Components that are not ``MultiplicativeBasis`` use the single-matrix
+        path, rebuilding any null-space penalty from the possibly masked energy
+        matrix. Unmasked tensor products use the Kronecker-sum path. Masked tensor
+        products use the general path because arbitrary masks break that structure.
+        """
         ph = PenaltyHandler()
-        for S_tensor, basis_comp in zip(penalty_tree, self.basis):
-            id_fn = (
-                DROP_LAST_COL
-                if _should_drop_basis_col(basis_comp, self.drop_conv_basis_col)
-                else IDENTITY
-            )
-            if isinstance(basis_comp, MultiplicativeBasis):
+        for S_tensor, info in zip(penalty_tree, self._component_infos(), strict=True):
+            basis_comp = info.basis
+            id_fn = DROP_LAST_COL if info.drops_identifiability_column else IDENTITY
+            # single can use the fast path
+            if not isinstance(basis_comp, MultiplicativeBasis):
+                ph.add(
+                    S_tensor[0],
+                    penalize_null_space=True,
+                    identifiability_fn=id_fn,
+                )
+            # unmasked tensor product can use the fast path
+            elif not info.is_masked:
                 factors = compute_energy_penalty_factors(
                     basis_comp, self.n_simpson_sample
                 )
@@ -451,10 +452,11 @@ class GAM:
                     penalize_null_space=True,
                     identifiability_fn=id_fn,
                 )
+            # masked tensor product falls back to general
             else:
                 ph.add(
-                    S_tensor[0],
-                    penalize_null_space=True,
+                    S_tensor,
+                    penalize_null_space=False,
                     identifiability_fn=id_fn,
                 )
         return ph
@@ -550,30 +552,65 @@ class GAM:
         """
         Compute the penalty tensor tree for all smooth terms.
 
-        Delegates to ``compute_energy_penalty_tensor``.
+        Remove empty rows and columns before measuring each penalty's null
+        space. The identifiability column is still removed downstream.
         """
-        return compute_energy_penalty_tensor(
-            self.basis, self.n_simpson_sample, penalize_null_space=True
+        return [
+            compute_energy_penalty_tensor_additive_component(
+                info.basis,
+                self.n_simpson_sample,
+                penalize_null_space=True,
+                keep=info.nonempty_mask,
+            )
+            for info in self._component_infos()
+        ]
+
+    @property
+    def min_obs(self) -> int | None:
+        """
+        The non-zero count a column needs to survive, or None when off.
+
+        Resolved from ``drop_empty_columns`` on every read, so that changing
+        that attribute after construction takes effect at the next fit.
+        """
+        return resolve_min_obs(self.drop_empty_columns)
+
+    def _component_infos(self) -> tuple[BasisComponentInfo, ...]:
+        """Return the prepared layout, or an unmasked layout before preparation."""
+        if hasattr(self, "component_infos_"):
+            return self.component_infos_
+        return _get_basis_component_infos(
+            self.basis, drop_conv_basis_col=self.drop_conv_basis_col
+        )
+
+    @property
+    def _apply_identifiability_column(self):
+        """Static column transforms matching the component layout."""
+        return tuple(
+            DROP_LAST_COL if info.drops_identifiability_column else IDENTITY
+            for info in self._component_infos()
+        )
+
+    @property
+    def _apply_identifiability_square(self):
+        """Static square-matrix transforms matching the component layout."""
+        return tuple(
+            DROP_LAST_ROW_COL if info.drops_identifiability_column else IDENTITY
+            for info in self._component_infos()
         )
 
     def _compute_raw_design_matrix(
         self,
         inputs: tuple[ArrayLike, ...],
-        setup_basis: bool,
     ) -> jnp.ndarray:
-        """Build an uncentered design matrix with its NaNs intact."""
-        if setup_basis:
-            X = compute_features_identifiable(
-                self.basis,
-                *inputs,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-            )
-        else:
-            X = _compute_features_identifiable(
-                self.basis,
-                *inputs,
-                drop_conv_basis_col=self.drop_conv_basis_col,
-            )
+        """
+        Build an uncentered design matrix with its NaNs intact.
+
+        The basis must already be set up. ``fit`` sets it up once, and
+        prediction reuses the basis state learned during fit.
+        """
+        infos = self._component_infos()
+        X = reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
         return jnp.asarray(X)
 
     def _fit_design_matrix(
@@ -587,12 +624,36 @@ class GAM:
         This is the only design-matrix path that calls ``basis.setup_basis``.
         Prediction must reuse this fitted basis state and centering.
         """
-        X_raw = self._compute_raw_design_matrix(inputs, setup_basis=True)
+        self.basis.setup_basis(*inputs)
+        # Evaluate the basis once. Detection needs the full-width blocks, and
+        # the design is those same blocks with columns removed.
+        unmasked = _get_basis_component_infos(
+            self.basis, drop_conv_basis_col=self.drop_conv_basis_col
+        )
+        blocks = _compute_full_width_blocks(unmasked, *inputs)
+        min_obs = self.min_obs
+        if min_obs is None:
+            infos = unmasked
+        else:
+            # Count observations before centering and only on fitting rows.
+            # Supported bases put NaNs across an entire component row, so
+            # full-width and reduced designs select the same fitting rows.
+            kept_rows = np.asarray(
+                kept_rows_for_fit(np.hstack(blocks), y, self.nan_handling)
+            )
+            infos = _get_basis_component_infos(
+                self.basis,
+                drop_conv_basis_col=self.drop_conv_basis_col,
+                blocks=[block[kept_rows] for block in blocks],
+                min_obs=min_obs,
+            )
+        X_raw = jnp.asarray(reduce_component_blocks(blocks, infos))
         X, y, feature_mean = apply_nan_policy_for_fit(
             X_raw,
             y,
             self.nan_handling,
         )
+        self.component_infos_ = infos
         self.feature_mean_ = feature_mean
         if y is None:  # y was supplied, so this is an internal invariant.
             raise RuntimeError("NaN policy unexpectedly returned no response.")
@@ -612,7 +673,7 @@ class GAM:
             raise AttributeError(
                 "GAM instance is not fitted yet. Call fit before predict."
             )
-        X_raw = self._compute_raw_design_matrix(inputs, setup_basis=False)
+        X_raw = self._compute_raw_design_matrix(inputs)
         return apply_nan_policy_for_transform(
             X_raw,
             self.feature_mean_,
@@ -774,10 +835,7 @@ class GAM:
         component: int | str,
     ) -> BasisComponentInfo:
         """Resolve a component index or basis label to component metadata."""
-        infos = _get_basis_component_infos(
-            self.basis,
-            drop_conv_basis_col=self.drop_conv_basis_col,
-        )
+        infos = self._component_infos()
         if isinstance(component, str):
             for info in infos:
                 if info.basis.label == component:
@@ -1071,7 +1129,16 @@ class GAM:
                 UserWarning,
                 stacklevel=2,
             )
-            X_raw = self._compute_raw_design_matrix(xi, setup_basis=True)
+            # A model that is not fitted has no mask, even if an earlier fit
+            # raised after it stored one. Build the full design here.
+            self.basis.setup_basis(*xi)
+            X_raw = jnp.asarray(
+                _compute_features_identifiable(
+                    self.basis,
+                    *xi,
+                    drop_conv_basis_col=self.drop_conv_basis_col,
+                )
+            )
             X_smooths, _, _ = apply_nan_policy_for_fit(X_raw, None, self.nan_handling)
             X = prepend_ones_for_intercept(X_smooths)
             beta = None
@@ -1128,19 +1195,14 @@ class GAM:
 
         info = self._resolve_basis_component(component_index)
 
-        if len(xi) != info.input_slice.stop - info.input_slice.start:
+        if len(xi) != info.n_inputs:
             raise ValueError(
                 f"component_index {component_index} expects "
-                f"{info.input_slice.stop - info.input_slice.start} input array(s), "
+                f"{info.n_inputs} input array(s), "
                 f"got {len(xi)}."
             )
         # TODO: Why is this called fX? isn't it X_i?
-        fX = _compute_features_identifiable(
-            info.basis,
-            *xi,
-            drop_conv_basis_col=self.drop_conv_basis_col,
-        )
-        fX = jnp.asarray(fX)
+        fX = jnp.asarray(info.compute_reduced_features(*xi))
 
         nan_filter = jnp.asarray(
             jnp.sum(jnp.isnan(jnp.asarray(xi)), axis=0),

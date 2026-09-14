@@ -540,6 +540,7 @@ def compute_energy_penalty_tensor_additive_component(
     basis_component: BSplineEval | MultiplicativeBasis,
     n_samples: int = 10**4,
     penalize_null_space: bool = True,
+    keep: np.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""
     Define a penalty tensor for an additive component.
@@ -552,6 +553,11 @@ def compute_energy_penalty_tensor_additive_component(
         Number of samples for the numerical approximation of the integral.
     penalize_null_space:
         Boolean, if true penalize the null space of every energy penalty component.
+    keep:
+        Optional boolean mask over the basis functions of this component. Rows
+        and columns of the empty columns are removed before the null space is
+        measured, so the null-space term describes the reduced penalty. The
+        term is left out when the reduced penalty is already full rank.
 
 
     Returns
@@ -568,6 +574,13 @@ def compute_energy_penalty_tensor_additive_component(
     """
     one_dim_pen = compute_energy_penalty_factors(basis_component, n_samples)
     out = ndim_tensor_product_basis_penalty(*one_dim_pen)
+    if keep is not None and not np.all(keep):
+        # Slice before measuring the null space. A reduced energy penalty is
+        # usually full rank. A sliced original null-space projector can still be
+        # nonzero, but not actually penalize anything. Rebuild that projector
+        # below to define the reduced model.
+        index = jnp.asarray(np.flatnonzero(np.asarray(keep)))
+        out = out[:, index][:, :, index]
     if penalize_null_space:
         # In GAMs one penalizes the null space of a linear combinations of positive-semidefinite
         # matrices with positive coefficients (a convex cone). The null space of any matrix in the interior
@@ -591,6 +604,7 @@ def compute_energy_penalty_tensor(
     basis: BSplineEval | MultiplicativeBasis | AdditiveBasis,
     n_sample: int = 10**4,
     penalize_null_space: bool = True,
+    keep_masks: list[np.ndarray] | None = None,
 ) -> list[jnp.ndarray]:
     """
     Create an energy penalty for each additive component.
@@ -603,6 +617,9 @@ def compute_energy_penalty_tensor(
         Number of samples for the numerical approximation of the integral.
     penalize_null_space:
         Boolean, if true penalize the null space of every energy penalty component.
+    keep_masks:
+        Optional list with one boolean mask per additive component, marking the
+        columns that are not empty. Default None keeps every column.
 
     Returns
     -------
@@ -611,9 +628,12 @@ def compute_energy_penalty_tensor(
     """
     return [
         compute_energy_penalty_tensor_additive_component(
-            bas, n_sample, penalize_null_space=penalize_null_space
+            bas,
+            n_sample,
+            penalize_null_space=penalize_null_space,
+            keep=None if keep_masks is None else keep_masks[index],
         )
-        for bas in basis
+        for index, bas in enumerate(basis)
     ]
 
 

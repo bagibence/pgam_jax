@@ -72,14 +72,45 @@ def _center(X: jax.Array) -> tuple[jax.Array, jax.Array]:
     return X - feature_mean, feature_mean
 
 
+def _kept_rows(
+    X_raw: jax.Array,
+    valid_y_rows: jax.Array,
+    nan_handling: NanHandling,
+) -> jax.Array:
+    """Return the rows that reach the solver under this policy."""
+    if nan_handling == "zero":
+        # all rows of X will be valid after zero-filling
+        kept_rows = valid_y_rows
+    elif nan_handling == "drop":
+        kept_rows = valid_y_rows & ~_rows_with_nan(X_raw)
+    else:
+        assert_never(nan_handling)
+    _raise_on_no_rows_kept(kept_rows, nan_handling=nan_handling)
+    return kept_rows
+
+
+def kept_rows_for_fit(X_raw, y, nan_handling: NanHandling) -> jax.Array:
+    """
+    Return the rows that GAM.fit will keep, without building the design.
+
+    Empty-column detection needs these rows before centering, because
+    subtracting a column mean turns a sparse column into a dense one.
+    """
+    X_raw = _as_design_matrix(X_raw)
+    nan_handling = validate_nan_handling(nan_handling)
+    if y is None:
+        valid_y_rows = jnp.ones(X_raw.shape[0], dtype=bool)
+    else:
+        valid_y_rows = get_valid_y_rows(y, n_rows=X_raw.shape[0])
+    return _kept_rows(X_raw, valid_y_rows, nan_handling)
+
+
 def _fit_zero(
     X_raw: jax.Array,
     valid_y_rows: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Keep response-valid rows and zero-fill their design NaNs."""
-    # all rows of X will be valid after zero-filling
-    kept_rows = valid_y_rows
-    _raise_on_no_rows_kept(kept_rows, nan_handling="zero")
+    kept_rows = _kept_rows(X_raw, valid_y_rows, "zero")
     X, feature_mean = _center(_zero_fill(X_raw[kept_rows]))
     return X, feature_mean, kept_rows
 
@@ -89,9 +120,7 @@ def _fit_drop(
     valid_y_rows: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Keep only rows valid in both the response and raw design."""
-    valid_X_rows = ~_rows_with_nan(X_raw)
-    kept_rows = valid_y_rows & valid_X_rows
-    _raise_on_no_rows_kept(kept_rows, nan_handling="drop")
+    kept_rows = _kept_rows(X_raw, valid_y_rows, "drop")
     X, feature_mean = _center(X_raw[kept_rows])
     return X, feature_mean, kept_rows
 

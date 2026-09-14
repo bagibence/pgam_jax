@@ -53,7 +53,9 @@ def _baseline_general_ph(basis, *, drop_conv_basis_col=False):
     for b, S in zip(basis, penalty_tree):
         id_fn = (
             DROP_LAST_COL
-            if _should_drop_basis_col(b, drop_conv_basis_col)
+            if _should_drop_basis_col(
+                b, drop_conv_basis_col=drop_conv_basis_col, removed_nonempty=False
+            )
             else IDENTITY
         )
         ph.add(S, penalize_null_space=False, identifiability_fn=id_fn)
