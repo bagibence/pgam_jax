@@ -26,8 +26,8 @@ from scipy import stats as sts
 
 from ._identifiable_features import (
     BasisComponentInfo,
-    _compute_full_width_blocks,
     _compute_features_identifiable,
+    _compute_full_width_blocks,
     _get_basis_component_infos,
     reduce_component_blocks,
     resolve_min_obs,

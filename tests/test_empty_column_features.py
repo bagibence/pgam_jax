@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 from pgam_jax._identifiable_features import (
-    _compute_full_width_blocks,
     _compute_features_identifiable,
+    _compute_full_width_blocks,
     _get_basis_component_infos,
     compute_features_identifiable,
     reduce_component_blocks,
