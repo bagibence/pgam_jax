@@ -163,6 +163,12 @@ gam = GAM(basis, drop_empty_columns=True)
 gam = GAM(basis, drop_empty_columns=20)
 ```
 
+If the threshold removes a nonempty evaluation-basis column for the component,
+all its surviving columns are retained without the usual additional identifiability drop.
+The survivors need not sum to one, so dropping another column could remove
+a direction that the model can identify. A single survivor is allowed in
+this case. Removing only zero columns preserves the existing drop rule.
+
 After the fit, `gam.component_infos_` holds one layout record per smooth:
 its basis, input slice, full-width nonempty mask, identifiability decision,
 and fitted coefficient slice. Feature construction and penalties use these

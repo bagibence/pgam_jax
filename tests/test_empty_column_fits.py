@@ -203,9 +203,14 @@ class TestDegenerateInputs:
         with pytest.raises(ValueError, match="keeps 0 column"):
             gam.fit(xi, y)
 
-    def test_a_single_surviving_column_is_rejected_not_crashed(self):
+    @pytest.mark.parametrize("threshold, expected_width", [(400, 1), (375, 2), (26, 6)])
+    @pytest.mark.parametrize("method", ["pql_gcv", "pql_reml"])
+    def test_nonconstant_survivors_are_retained(
+        self, threshold, expected_width, method
+    ):
         """
-        One survivor plus the identifiability drop leaves a zero-width block.
+        Threshold masking leaves independent columns alongside the intercept.
+        The resulting model must retain those directions and fit successfully.
 
         Without the guard this reached the penalty eigendecomposition and died
         with "zero-size array to reduction operation max", which says nothing
@@ -215,17 +220,17 @@ class TestDegenerateInputs:
         rng = np.random.default_rng(0)
         x = rng.uniform(0.02, 0.45, 400)
         y = jnp.asarray(rng.poisson(1.0, 400).astype(float))
-        gam = GAM(_bspline(10), drop_empty_columns=400)
-        with pytest.raises(ValueError, match="keeps 1 column"):
-            gam.fit((x,), y)
-
-    def test_two_surviving_columns_still_fit(self):
-        rng = np.random.default_rng(0)
-        x = rng.uniform(0.02, 0.45, 400)
-        y = jnp.asarray(rng.poisson(1.0, 400).astype(float))
-        gam = _fit(_bspline(10), (x,), y, 375)
-        assert gam.component_infos_[0].n_kept == 2
-        assert gam.coef_.shape[0] == 1
+        gam = _fit(_bspline(10), (x,), y, threshold, method=method)
+        info = gam.component_infos_[0]
+        raw = info.basis._compute_features(x)[:, info.nonempty_mask]
+        assert (
+            np.linalg.matrix_rank(np.column_stack((np.ones(len(x)), raw)))
+            == expected_width + 1
+        )
+        assert gam.coef_.shape == (expected_width,)
+        assert gam.cov_beta_.shape == (expected_width + 1,) * 2
+        assert np.all(np.isfinite(gam.predict((x,))))
+        assert all(np.all(np.isfinite(v)) for v in gam.smooth_compute((x,), 0))
 
     def test_a_stale_mask_does_not_leak_into_prefit_concurvity(self):
         """

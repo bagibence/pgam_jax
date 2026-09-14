@@ -184,6 +184,59 @@ def _penalty_from_tree(S_tensor, rho):
 class TestMaskedSqrtIsCorrect:
     """``compute_sqrt`` must factor the masked, identifiability-reduced penalty."""
 
+    def test_threshold_tensor_penalty_keeps_all_survivors(self):
+        rng = np.random.default_rng(0)
+        xi = tuple(rng.uniform(0.02, 0.45, 400) for _ in range(2))
+        gam = _prepared(_bspline(8) * _bspline(8), xi, np.ones(400), 100)
+        info = gam.component_infos_[0]
+        assert not info.drops_identifiability_column
+        tree = gam._get_penalty_tree()
+        sqrt, logdet = gam._build_penalty_handler(tree).build()
+        rho = [jnp.asarray([0.3, -0.7])]
+        S = np.einsum("i,ijk->jk", np.exp(rho[0]), tree[0])
+        B = np.asarray(sqrt(rho))
+        assert B.shape[1] == info.n_kept
+        np.testing.assert_allclose(B.T @ B, S, atol=1e-8)
+        values, gradients = logdet(rho)
+        np.testing.assert_allclose(values[0], np.linalg.slogdet(S)[1])
+        expected_grad = np.exp(rho[0]) * np.einsum(
+            "ab,iba->i", np.linalg.inv(S), tree[0]
+        )
+        np.testing.assert_allclose(gradients[0], expected_grad, rtol=1e-8)
+
+    @pytest.mark.parametrize("lam", [1.0, 1e-6])
+    def test_nearly_dependent_survivors_match_dense_penalized_solve(self, lam):
+        x = np.random.default_rng(0).uniform(0.02, 0.45, 400)
+        gam = GAM(_bspline(10), drop_empty_columns=26)
+        X, _ = gam._fit_design_matrix((x,), np.ones(len(x)))
+        info = gam.component_infos_[0]
+        assert not info.drops_identifiability_column
+        assert np.linalg.cond(X) > 1e4
+
+        full = _prepared(_bspline(10), (x,), np.ones(len(x)), False)
+        # The full tree's first entry is the energy penalty, before its null term.
+        S = np.asarray(full._get_penalty_tree()[0][0])
+        S = S[np.ix_(info.nonempty_mask, info.nonempty_mask)]
+        tree = gam._get_penalty_tree()
+        sqrt, logdet = gam._build_penalty_handler(tree).build()
+        rho = [jnp.asarray([np.log(lam)])]
+        B = np.asarray(sqrt(rho))
+        np.testing.assert_allclose(B.T @ B, lam * S, rtol=1e-9, atol=1e-10)
+        values, gradients = logdet(rho)
+        np.testing.assert_allclose(values[0], np.linalg.slogdet(lam * S)[1])
+        np.testing.assert_allclose(gradients[0], [S.shape[0]])
+
+        target = np.sin(5 * x)
+        target -= target.mean()
+        augmented = np.vstack((X, B))
+        beta = np.linalg.lstsq(
+            augmented, np.concatenate((target, np.zeros(B.shape[0]))), rcond=None
+        )[0]
+        expected = np.linalg.solve(
+            np.asarray(X).T @ X + lam * S, np.asarray(X).T @ target
+        )
+        np.testing.assert_allclose(beta, expected, rtol=1e-7, atol=1e-8)
+
     @pytest.mark.parametrize("inputs_fn", [_island_inputs, _spread_inputs])
     def test_sqrt_reproduces_the_penalty(self, tensor_basis, inputs_fn):
         xi, counts = inputs_fn()

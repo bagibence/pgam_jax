@@ -123,6 +123,27 @@ class TestDetectionIsOff:
 
 
 class TestTheSurvivorGuard:
+    @pytest.mark.parametrize("convolution", [False, True])
+    @pytest.mark.parametrize("drop_conv", [False, True])
+    def test_nonempty_removal_preserves_explicit_convolution_rule(
+        self, convolution, drop_conv
+    ):
+        block = np.ones((3, 4))
+        block[1:, 0] = 0.0
+        basis = _conv_basis(4) if convolution else _eval_basis(4)
+        info = _from_block(basis, block, min_obs=2, drop_conv_basis_col=drop_conv)
+        assert info.drops_identifiability_column == (convolution and drop_conv)
+        assert info.identifiable_feature_slice.stop == 3 - int(
+            convolution and drop_conv
+        )
+
+    def test_threshold_removing_only_zeros_preserves_identifiability_drop(self):
+        block = np.ones((3, 4))
+        block[:, 0] = 0.0
+        info = _from_block(_eval_basis(4), block, min_obs=2)
+        assert info.drops_identifiability_column
+        assert info.identifiable_feature_slice == slice(0, 2)
+
     def test_a_fully_empty_component_raises_and_names_its_index(self):
         with pytest.raises(ValueError, match="component 1 keeps 0 column"):
             _from_block(_eval_basis(4), np.zeros((3, 4)), index=1)

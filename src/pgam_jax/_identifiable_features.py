@@ -71,7 +71,10 @@ class BasisComponentInfo:
         The caller selects the fitting rows before supplying ``block``.
         ``min_obs=None`` keeps every column and does not require a block.
         Otherwise, NaNs count as zero, matching the zero-fill NaN policy.
+        Removing a nonempty evaluation column disables the additional
+        identifiability drop. Zero-only removal preserves the existing rule.
         """
+        removed_nonempty = False
         if min_obs is None:
             mask = np.ones(basis.n_basis_funcs, dtype=bool)
         else:
@@ -83,9 +86,15 @@ class BasisComponentInfo:
                     f"Feature block for component {index} must be two-dimensional "
                     f"with {basis.n_basis_funcs} columns, got {block.shape}."
                 )
-            mask = np.sum(np.abs(block) > 0, axis=0) >= min_obs
+            counts = np.sum(np.abs(block) > 0, axis=0)
+            mask = counts >= min_obs
+            removed_nonempty = bool(np.any((counts > 0) & ~mask))
 
-        drops_column = _should_drop_basis_col(basis, drop_conv_basis_col)
+        drops_column = _should_drop_basis_col(
+            basis,
+            drop_conv_basis_col=drop_conv_basis_col,
+            removed_nonempty=removed_nonempty,
+        )
         needed = 1 + int(drops_column)
         n_kept = int(mask.sum())
         if n_kept < needed:
@@ -155,18 +164,24 @@ class BasisComponentInfo:
 
 def _should_drop_basis_col(
     basis,
+    *,
     drop_conv_basis_col: bool,
+    removed_nonempty: bool,
 ) -> bool:
     """
     Return whether this basis component should drop its last column.
 
-    Evaluation bases always drop, convolutional bases drop if ``drop_conv_basis_col`` is True.
+    Without masking or masking only all-zero columns, evaluation bases drop
+    and convolutional bases drop if ``drop_conv_basis_col`` is True.
+    When threshold masking removes nonempty columns, there is no need to drop
+    for evaluation bases either, so it gets disabled.
+
     Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
     but the option is added for matching the original implementation if required.
     """
     if isinstance(basis, nmo.basis._basis_mixin.ConvBasisMixin):
         return drop_conv_basis_col
-    return True
+    return not removed_nonempty
 
 
 def _compute_full_width_blocks(infos, *inputs) -> list[np.ndarray]:
@@ -254,7 +269,5 @@ def _compute_features_identifiable(
     *inputs,
     drop_conv_basis_col: bool,
 ):
-    infos = _get_basis_component_infos(
-        basis, drop_conv_basis_col=drop_conv_basis_col
-    )
+    infos = _get_basis_component_infos(basis, drop_conv_basis_col=drop_conv_basis_col)
     return reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)

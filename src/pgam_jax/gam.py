@@ -200,6 +200,11 @@ class GAM:
         column. ``True`` drops a column that has no non-zero entry. An integer
         sets that threshold directly, as ``min_obs``. Default is False.
 
+        If a nonempty evaluation-basis column is removed for the component,
+        the last column doesn't have to be dropped for identifiability anymore,
+        so that automatic dropping is disabled.
+        The explicit convolutional column drop option is unchanged.
+
         A basis built over a full covariate range produces empty columns
         whenever the data cover only part of that range. Dropping columns
         reduces the coefficient space and changes the penalty model: removed
