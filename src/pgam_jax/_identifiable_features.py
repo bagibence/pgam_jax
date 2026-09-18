@@ -16,7 +16,7 @@ def resolve_min_obs(drop_empty_columns: bool | int) -> int | None:
     ``False`` disables dropping and returns None. ``True`` means a threshold of
     1. An integer sets the threshold directly.
     """
-    if isinstance(drop_empty_columns, bool):
+    if isinstance(drop_empty_columns, (bool, np.bool_)):
         return 1 if drop_empty_columns else None
     if isinstance(drop_empty_columns, (int, np.integer)):
         min_obs = int(drop_empty_columns)
