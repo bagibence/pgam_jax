@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
+from conftest import unmasked_component_infos
 
 from pgam_jax import GAM
 from pgam_jax._identifiable_features import _should_drop_basis_col
@@ -42,13 +43,16 @@ def _bsp_conv(n=10, window=51):
 def _routed_ph(basis, *, drop_conv_basis_col=False):
     """Handler built the way GAM.fit() builds it, without fitting."""
     gam = GAM(basis, drop_conv_basis_col=drop_conv_basis_col)
-    return gam._build_penalty_handler(gam._get_penalty_tree())
+    component_infos = unmasked_component_infos(gam)
+    return gam._build_penalty_handler(
+        gam._get_penalty_tree(component_infos), component_infos
+    )
 
 
 def _baseline_general_ph(basis, *, drop_conv_basis_col=False):
     """Today's behaviour: every component routed through ph.add as GENERAL."""
     gam = GAM(basis, drop_conv_basis_col=drop_conv_basis_col)
-    penalty_tree = gam._get_penalty_tree()
+    penalty_tree = gam._get_penalty_tree(unmasked_component_infos(gam))
     ph = PenaltyHandler()
     for b, S in zip(basis, penalty_tree):
         id_fn = (

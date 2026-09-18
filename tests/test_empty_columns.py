@@ -181,13 +181,13 @@ class TestDetectionOverComponents:
         basis = _eval_basis(4) + _eval_basis(5)
         blocks = [np.ones((4, 4)), np.ones((4, 5))]
         blocks[1][:, 1] = 0.0
-        infos = _get_basis_component_infos(
+        component_infos = _get_basis_component_infos(
             basis, drop_conv_basis_col=False, blocks=blocks, min_obs=1
         )
-        assert len(infos) == 2
-        np.testing.assert_array_equal(infos[0].nonempty_mask, [True] * 4)
+        assert len(component_infos) == 2
+        np.testing.assert_array_equal(component_infos[0].nonempty_mask, [True] * 4)
         np.testing.assert_array_equal(
-            infos[1].nonempty_mask, [True, False, True, True, True]
+            component_infos[1].nonempty_mask, [True, False, True, True, True]
         )
 
     def test_the_failing_component_is_named(self):

@@ -9,7 +9,10 @@ import pytest
 from nemos.inverse_link_function_utils import exp
 from scipy.optimize._numdiff import approx_derivative
 
-from pgam_jax._identifiable_features import compute_features_identifiable
+from pgam_jax._identifiable_features import (
+    _get_basis_component_infos,
+    compute_features_identifiable,
+)
 from pgam_jax._laplace_reml_fit import fit_beta  # noqa: F401 — re-exported for tests
 from pgam_jax._laplace_reml_vbeta import vbeta_and_logdet
 from pgam_jax._penalty_handler import PenaltyHandler
@@ -233,3 +236,10 @@ def any_columns_dropped(gam):
 def n_columns_dropped(gam):
     """Total number of full-basis columns removed as empty, over all components."""
     return sum(info.n_dropped for info in gam.component_infos_)
+
+
+def unmasked_component_infos(gam):
+    """Component layout with every column kept, as used before a fit."""
+    return _get_basis_component_infos(
+        gam.basis, drop_conv_basis_col=gam.drop_conv_basis_col
+    )

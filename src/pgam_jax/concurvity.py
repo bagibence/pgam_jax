@@ -290,18 +290,17 @@ def term_blocks_for_gam(gam: GAM) -> list[TermBlock]:
     Build term blocks using the GAM's fitted column layout.
 
     Before fitting, use the unmasked layout, as ``GAM.concurvity`` does.
-    A mask left by an unsuccessful initial fit is ignored. The +1 shifts
-    account for the prepended intercept column.
+    The +1 shifts account for the prepended intercept column.
     """
 
     if hasattr(gam, "coef_"):
-        infos = gam.component_infos_
+        component_infos = gam.component_infos_
     else:
-        infos = _get_basis_component_infos(
+        component_infos = _get_basis_component_infos(
             gam.basis, drop_conv_basis_col=gam.drop_conv_basis_col
         )
     blocks = [TermBlock(label="para", start=0, stop=0)]
-    for info in infos:
+    for info in component_infos:
         s = info.identifiable_feature_slice
         blocks.append(
             TermBlock(

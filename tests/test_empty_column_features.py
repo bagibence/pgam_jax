@@ -59,9 +59,11 @@ def _detected_infos(basis, widths, empty=None, drop_conv_basis_col=False):
     )
 
 
-def _masked_features(infos, *inputs):
+def _masked_features(component_infos, *inputs):
     """Reduce the real feature blocks with an already detected layout."""
-    return reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
+    return reduce_component_blocks(
+        _compute_full_width_blocks(component_infos, *inputs), component_infos
+    )
 
 
 class TestComponentFeatureBlocks:
@@ -97,8 +99,8 @@ class TestMaskedFeatures:
         without = _compute_features_identifiable(
             mixed_basis, *inputs, drop_conv_basis_col=False
         )
-        infos = _detected_infos(mixed_basis, [6, 7, 20])
-        with_all_true = _masked_features(infos, *inputs)
+        component_infos = _detected_infos(mixed_basis, [6, 7, 20])
+        with_all_true = _masked_features(component_infos, *inputs)
         np.testing.assert_array_equal(without, with_all_true)
 
     def test_mask_is_applied_before_the_identifiability_drop(
@@ -111,10 +113,10 @@ class TestMaskedFeatures:
         )
 
         # Component 1 loses the column the identifiability rule would have taken.
-        infos = _detected_infos(additive_basis, [6, 7], {0: [2], 1: [6]})
-        m0, m1 = (info.nonempty_mask for info in infos)
+        component_infos = _detected_infos(additive_basis, [6, 7], {0: [2], 1: [6]})
+        m0, m1 = (info.nonempty_mask for info in component_infos)
 
-        got = _masked_features(infos, *xi)
+        got = _masked_features(component_infos, *xi)
         expected = np.hstack([blocks[0][:, m0][:, :-1], blocks[1][:, m1][:, :-1]])
         np.testing.assert_array_equal(got, expected)
         assert got.shape[1] == (5 - 1) + (6 - 1)
@@ -156,18 +158,22 @@ class TestComponentInfos:
         assert info.is_masked is True
 
     def test_slices_shrink_with_the_mask(self, mixed_basis):
-        infos = _detected_infos(mixed_basis, [6, 7, 20], {0: [1], 2: list(range(5))})
+        component_infos = _detected_infos(
+            mixed_basis, [6, 7, 20], {0: [1], 2: list(range(5))}
+        )
         widths = [
             i.identifiable_feature_slice.stop - i.identifiable_feature_slice.start
-            for i in infos
+            for i in component_infos
         ]
         assert widths == [5 - 1, 7 - 1, 15 - 1]
-        starts = [i.identifiable_feature_slice.start for i in infos]
+        starts = [i.identifiable_feature_slice.start for i in component_infos]
         assert starts == [0, 4, 10]
 
     def test_input_slices_are_unchanged_by_the_mask(self, mixed_basis):
-        infos = _detected_infos(mixed_basis, [6, 7, 20], {0: [1], 2: list(range(5))})
-        assert [(i.input_slice.start, i.input_slice.stop) for i in infos] == [
+        component_infos = _detected_infos(
+            mixed_basis, [6, 7, 20], {0: [1], 2: list(range(5))}
+        )
+        assert [(i.input_slice.start, i.input_slice.stop) for i in component_infos] == [
             (0, 1),
             (1, 2),
             (2, 4),
@@ -196,10 +202,10 @@ class TestMaskingIsARestriction:
         )
 
         # Component 1 loses the column the unmasked rule would have taken.
-        infos = _detected_infos(additive_basis, [6, 7], {0: [1, 4], 1: [6]})
-        m0, m1 = (info.nonempty_mask for info in infos)
+        component_infos = _detected_infos(additive_basis, [6, 7], {0: [1, 4], 1: [6]})
+        m0, m1 = (info.nonempty_mask for info in component_infos)
 
-        masked = _masked_features(infos, *xi)
+        masked = _masked_features(component_infos, *xi)
         expected = np.hstack(
             [
                 blocks[0][:, self._kept_indices(m0)],
@@ -216,8 +222,8 @@ class TestMaskingIsARestriction:
         unmasked = _compute_features_identifiable(
             additive_basis, *xi, drop_conv_basis_col=False
         )
-        infos = _detected_infos(additive_basis, [6, 7], {0: [2], 1: [3]})
-        masked = _masked_features(infos, *xi)
+        component_infos = _detected_infos(additive_basis, [6, 7], {0: [2], 1: [3]})
+        masked = _masked_features(component_infos, *xi)
         for j in range(masked.shape[1]):
             hits = np.all(np.isclose(unmasked, masked[:, [j]]), axis=0)
             assert (

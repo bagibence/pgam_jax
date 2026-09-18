@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
+from conftest import unmasked_component_infos
 
 from pgam_jax import GAM
 from pgam_jax.concurvity import TermBlock, concurvity, term_blocks_for_gam
@@ -285,7 +286,7 @@ def test_two_dimensional_smooth_term_blocks():
         TermBlock("te(b,c)", 6, 20),
     ]
     # The blocks must cover the design matrix exactly.
-    X_smooths = gam._compute_raw_design_matrix(xi)
+    X_smooths = gam._compute_raw_design_matrix(xi, unmasked_component_infos(gam))
     assert X_smooths.shape[1] + 1 == sum(b.ncol for b in blocks)
 
     assert list(df.index) == ["para", "s(a)", "te(b,c)"]

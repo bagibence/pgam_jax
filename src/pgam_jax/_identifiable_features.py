@@ -188,14 +188,17 @@ def _should_drop_basis_col(
     return not removed_nonempty
 
 
-def _compute_full_width_blocks(infos, *inputs) -> list[np.ndarray]:
+def _compute_full_width_blocks(component_infos, *inputs) -> list[np.ndarray]:
     """Evaluate full-width blocks using the component records' input slices."""
-    n_expected = sum(info.n_inputs for info in infos)
+    n_expected = sum(info.n_inputs for info in component_infos)
     if len(inputs) != n_expected:
         raise ValueError(
             f"This basis expects {n_expected} input array(s), got {len(inputs)}."
         )
-    return [info.basis._compute_features(*inputs[info.input_slice]) for info in infos]
+    return [
+        info.basis._compute_features(*inputs[info.input_slice])
+        for info in component_infos
+    ]
 
 
 def _get_basis_component_infos(
@@ -215,7 +218,7 @@ def _get_basis_component_infos(
     components = tuple(basis)
     if blocks is not None and len(blocks) != len(components):
         raise ValueError("Expected one feature block per basis component.")
-    infos = []
+    component_infos = []
     input_start = 0
     feature_start = 0
     for index, component in enumerate(components):
@@ -228,10 +231,10 @@ def _get_basis_component_infos(
             block=None if blocks is None else blocks[index],
             min_obs=min_obs,
         )
-        infos.append(info)
+        component_infos.append(info)
         input_start = info.input_slice.stop
         feature_start = info.identifiable_feature_slice.stop
-    return tuple(infos)
+    return tuple(component_infos)
 
 
 def compute_features_identifiable(
@@ -245,9 +248,9 @@ def compute_features_identifiable(
     The returned matrix has one column dropped per eval-basis component to
     remove collinearity with the intercept, but is NOT mean-centered. Callers
     that want a usable design must subtract the per-column means of the
-    training matrix. ``GAM._fit_design_matrix`` does this and stores the
-    means as ``feature_mean_`` for reuse at prediction time
-    (``GAM._transform_design_matrix``).
+    training matrix. ``GAM._fit_design_matrix`` does this and returns the
+    means, and ``GAM.fit`` stores them as ``feature_mean_`` for reuse at
+    prediction time (``GAM._transform_design_matrix_with_policy``).
 
     Without that centering, smooth columns remain correlated with the
     intercept, which both leaves the model only weakly identifiable in
@@ -261,10 +264,13 @@ def compute_features_identifiable(
     )
 
 
-def reduce_component_blocks(blocks, infos):
+def reduce_component_blocks(blocks, component_infos):
     """Reduce full-width blocks using their matching component records."""
     return np.hstack(
-        [info.reduce_features(block) for info, block in zip(infos, blocks, strict=True)]
+        [
+            info.reduce_features(block)
+            for info, block in zip(component_infos, blocks, strict=True)
+        ]
     )
 
 
@@ -273,5 +279,9 @@ def _compute_features_identifiable(
     *inputs,
     drop_conv_basis_col: bool,
 ):
-    infos = _get_basis_component_infos(basis, drop_conv_basis_col=drop_conv_basis_col)
-    return reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
+    component_infos = _get_basis_component_infos(
+        basis, drop_conv_basis_col=drop_conv_basis_col
+    )
+    return reduce_component_blocks(
+        _compute_full_width_blocks(component_infos, *inputs), component_infos
+    )

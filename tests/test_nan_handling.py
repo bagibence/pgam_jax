@@ -23,11 +23,19 @@ def _eval_basis(label=None):
     )
 
 
+def _store_fit_design(gam, xi, y):
+    """Build the fit design and store its layout and means, as ``fit`` does."""
+    X, y_aligned, component_infos, feature_mean = gam._fit_design_matrix(xi, y)
+    gam.component_infos_ = component_infos
+    gam.feature_mean_ = feature_mean
+    return X, y_aligned
+
+
 def _prepare_fitted_state(nan_handling):
     gam = GAM(_eval_basis(), nan_handling=nan_handling)
     x_train = np.linspace(0.0, 1.0, 40)
     y_train = jnp.arange(x_train.size, dtype=float)
-    X, _ = gam._fit_design_matrix((x_train,), y_train)
+    X, _ = _store_fit_design(gam, (x_train,), y_train)
     gam.coef_ = jnp.linspace(0.05, 0.15, X.shape[1])
     gam.intercept_ = jnp.array([0.1])
     gam.scale_ = jnp.array(1.0)
@@ -45,12 +53,12 @@ def test_default_zero_matches_legacy_zero_fill_then_center_behavior():
     x[4] = np.nan
     y = jnp.arange(x.size, dtype=float)
 
-    X, y_aligned = gam._fit_design_matrix((x,), y)
-    X_raw = gam._compute_raw_design_matrix((x,))
+    X, y_aligned, component_infos, feature_mean = gam._fit_design_matrix((x,), y)
+    X_raw = gam._compute_raw_design_matrix((x,), component_infos)
     X_zero = jnp.where(jnp.isnan(X_raw), 0.0, X_raw)
 
     assert gam.nan_handling == "zero"
-    np.testing.assert_allclose(gam.feature_mean_, X_zero.mean(axis=0))
+    np.testing.assert_allclose(feature_mean, X_zero.mean(axis=0))
     np.testing.assert_allclose(X, X_zero - X_zero.mean(axis=0))
     np.testing.assert_allclose(y_aligned, y)
 
@@ -61,15 +69,15 @@ def test_gam_fit_design_omits_nan_response_before_centering(nan_handling):
     x = np.linspace(0.0, 1.0, 20)
     y = jnp.arange(x.size, dtype=float).at[5].set(jnp.nan)
 
-    X, y_aligned = gam._fit_design_matrix((x,), y)
-    X_raw = gam._compute_raw_design_matrix((x,))
+    X, y_aligned, component_infos, feature_mean = gam._fit_design_matrix((x,), y)
+    X_raw = gam._compute_raw_design_matrix((x,), component_infos)
     expected_X, expected_y, expected_feature_mean = apply_nan_policy_for_fit(
         X_raw, y, nan_handling
     )
 
     np.testing.assert_allclose(X, expected_X)
     np.testing.assert_allclose(y_aligned, expected_y)
-    np.testing.assert_allclose(gam.feature_mean_, expected_feature_mean)
+    np.testing.assert_allclose(feature_mean, expected_feature_mean)
     assert X.shape[0] == x.size - 1
 
 
@@ -81,14 +89,14 @@ def test_drop_conv_filters_the_built_design_without_changing_history():
     x = np.arange(20.0)
     y = jnp.arange(x.size, dtype=float).at[10].set(jnp.nan)
 
-    X, y_aligned = gam._fit_design_matrix((x,), y)
-    X_raw = gam._compute_raw_design_matrix((x,))
+    X, y_aligned, component_infos, feature_mean = gam._fit_design_matrix((x,), y)
+    X_raw = gam._compute_raw_design_matrix((x,), component_infos)
     valid_y_rows = get_valid_y_rows(y, n_rows=X_raw.shape[0])
     kept_rows = valid_y_rows & ~jnp.any(jnp.isnan(X_raw), axis=1)
     expected_uncentered = X_raw[kept_rows]
 
     np.testing.assert_allclose(
-        gam.feature_mean_,
+        feature_mean,
         expected_uncentered.mean(axis=0),
     )
     np.testing.assert_allclose(
@@ -169,7 +177,8 @@ def test_drop_postfit_concurvity_matches_manually_filtered_design():
     gam = GAM(basis, nan_handling="drop")
     x1_train = np.linspace(0.0, 1.0, 80)
     x2_train = np.linspace(1.0, 0.0, 80) ** 2
-    X_train, _ = gam._fit_design_matrix(
+    X_train, _ = _store_fit_design(
+        gam,
         (x1_train, x2_train),
         jnp.ones(x1_train.size),
     )
@@ -209,7 +218,7 @@ def test_all_invalid_drop_behaviors():
         nmo.basis.BSplineConv(n_basis_funcs=5, window_size=8),
         nan_handling="drop",
     )
-    X_train, _ = gam._fit_design_matrix((np.arange(30.0),), jnp.ones(30))
+    X_train, _ = _store_fit_design(gam, (np.arange(30.0),), jnp.ones(30))
     gam.coef_ = jnp.linspace(0.05, 0.15, X_train.shape[1])
     gam.intercept_ = jnp.array([0.1])
     gam.scale_ = jnp.array(1.0)

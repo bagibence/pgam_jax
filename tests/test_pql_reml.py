@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
+from conftest import unmasked_component_infos
 from jax.flatten_util import ravel_pytree
 
 from pgam_jax import GAM
@@ -189,8 +190,9 @@ def _routed_reml_setup(make_basis, seed=0, n_obs=300):
     """
     rng = np.random.default_rng(seed)
     gam = GAM(make_basis(), method="pql_reml")
-    penalty_tree = gam._get_penalty_tree()
-    ph = gam._build_penalty_handler(penalty_tree)
+    component_infos = unmasked_component_infos(gam)
+    penalty_tree = gam._get_penalty_tree(component_infos)
+    ph = gam._build_penalty_handler(penalty_tree, component_infos)
     compute_sqrt, compute_log_det_and_grad = ph.build()
 
     rho = [jnp.array(rng.uniform(-1.0, 1.0, size=p.rho_len)) for p in ph._penalties]
@@ -203,8 +205,10 @@ def _routed_reml_setup(make_basis, seed=0, n_obs=300):
     reml_fn = reml_compute_factory(
         compute_sqrt=compute_sqrt,
         compute_log_det_and_grad=compute_log_det_and_grad,
-        apply_identifiability_columns=gam._apply_identifiability_column,
-        apply_identifiability=gam._apply_identifiability_square,
+        apply_identifiability_columns=gam._apply_identifiability_column(
+            component_infos
+        ),
+        apply_identifiability=gam._apply_identifiability_square(component_infos),
     )
     return reml_fn, rho, penalty_tree, Xw, Q, R, y
 

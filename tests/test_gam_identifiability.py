@@ -9,6 +9,7 @@ the WLS step inside the PQL outer loop fails with a contracting-dim mismatch.
 import nemos as nmo
 import numpy as np
 import pytest
+from conftest import unmasked_component_infos
 
 from pgam_jax import GAM
 from pgam_jax._identifiable_features import compute_features_identifiable
@@ -47,14 +48,20 @@ def _expected_n_cols(basis, drop_conv_basis_col):
     # build a fresh basis for each case
     [
         lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
-        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
+        lambda: (
+            nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+            + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+        ),
         lambda: nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51),
-        lambda: nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
-        + nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51),
-        lambda: nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
-        + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0)),
+        lambda: (
+            nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+            + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+            + nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
+        ),
+        lambda: (
+            nmo.basis.BSplineConv(n_basis_funcs=10, window_size=51)
+            + nmo.basis.BSplineEval(n_basis_funcs=10, order=4, bounds=(-5.0, 5.0))
+        ),
     ],
     ids=["eval", "eval+eval", "conv", "eval+eval+conv", "conv+eval"],
 )
@@ -123,23 +130,26 @@ def test_per_leaf_identifiability_is_a_tuple_of_callables(
         drop_conv_basis_col=drop_conv_basis_col,
     )
 
-    assert isinstance(gam._apply_identifiability_column, tuple)
-    assert isinstance(gam._apply_identifiability_square, tuple)
-    assert len(gam._apply_identifiability_column) == 2
-    assert len(gam._apply_identifiability_square) == 2
+    component_infos = unmasked_component_infos(gam)
+    column_transforms = gam._apply_identifiability_column(component_infos)
+    square_transforms = gam._apply_identifiability_square(component_infos)
+    assert isinstance(column_transforms, tuple)
+    assert isinstance(square_transforms, tuple)
+    assert len(column_transforms) == 2
+    assert len(square_transforms) == 2
 
     # tuples must be hashable for jit static-arg caching
-    hash(gam._apply_identifiability_column)
-    hash(gam._apply_identifiability_square)
+    hash(column_transforms)
+    hash(square_transforms)
 
     arr = np.ones((4, 10))
     sq = np.ones((4, 10, 10))
     # eval leaf drops the last column / row+col
-    assert gam._apply_identifiability_column[0](arr).shape == (4, 9)
-    assert gam._apply_identifiability_square[0](sq).shape == (4, 9, 9)
+    assert column_transforms[0](arr).shape == (4, 9)
+    assert square_transforms[0](sq).shape == (4, 9, 9)
     # conv leaf follows the constructor flag
-    assert gam._apply_identifiability_column[1](arr).shape == (4, expected_conv_cols)
-    assert gam._apply_identifiability_square[1](sq).shape == (
+    assert column_transforms[1](arr).shape == (4, expected_conv_cols)
+    assert square_transforms[1](sq).shape == (
         4,
         expected_conv_cols,
         expected_conv_cols,
@@ -167,7 +177,7 @@ def test_predict_reuses_fitted_basis_and_training_centering():
 
     assert pred.shape == x_pred.shape
     transformed = gam._transform_design_matrix_with_policy((x_pred,))
-    uncentered = gam._compute_raw_design_matrix((x_pred,))
+    uncentered = gam._compute_raw_design_matrix((x_pred,), gam.component_infos_)
     np.testing.assert_allclose(
         np.asarray(transformed),
         np.asarray(uncentered) - feature_mean,

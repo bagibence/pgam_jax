@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
 import pytest
+from conftest import unmasked_component_infos
 from jax.flatten_util import ravel_pytree
 
 from pgam_jax import GAM
@@ -45,8 +46,9 @@ def _gcv_setup(make_basis, seed=0, n_obs=300):
     """
     rng = np.random.default_rng(seed)
     gam = GAM(make_basis(), method="pql_gcv")
-    penalty_tree = gam._get_penalty_tree()
-    ph = gam._build_penalty_handler(penalty_tree)
+    component_infos = unmasked_component_infos(gam)
+    penalty_tree = gam._get_penalty_tree(component_infos)
+    ph = gam._build_penalty_handler(penalty_tree, component_infos)
     compute_sqrt, _ = ph.build()
 
     rho = [jnp.array(rng.uniform(-1.0, 1.0, size=p.rho_len)) for p in ph._penalties]
@@ -59,8 +61,8 @@ def _gcv_setup(make_basis, seed=0, n_obs=300):
 
     gcv_fn = gcv_compute_factory(
         compute_sqrt,
-        gam._apply_identifiability_column,
-        gam._apply_identifiability_square,
+        gam._apply_identifiability_column(component_infos),
+        gam._apply_identifiability_square(component_infos),
         GAMMA,
     )
     return gcv_fn, rho, penalty_tree, Xw, Q, R, y

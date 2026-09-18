@@ -269,9 +269,10 @@ class GAM:
     dof_resid_ :
         Residual degrees of freedom ``n_obs − edf_`` (available after ``fit``).
     component_infos_ :
-        Tuple of component layouts rebuilt during fit preparation. Each records
-        the basis, input slice, full-width nonempty mask, identifiability
-        decision, and fitted coefficient slice. Masks are read-only.
+        Tuple of component layouts built from the training data (available
+        after ``fit``). Each records the basis, input slice, full-width
+        nonempty mask, identifiability decision, and fitted coefficient slice.
+        Masks are read-only.
     """
 
     def __init__(
@@ -422,7 +423,11 @@ class GAM:
 
         return (coef, intercept)
 
-    def _build_penalty_handler(self, penalty_tree: list) -> PenaltyHandler:
+    def _build_penalty_handler(
+        self,
+        penalty_tree: list,
+        component_infos: tuple[BasisComponentInfo, ...],
+    ) -> PenaltyHandler:
         """
         Construct a PenaltyHandler from the penalty tensor list.
 
@@ -432,7 +437,7 @@ class GAM:
         products use the general path because arbitrary masks break that structure.
         """
         ph = PenaltyHandler()
-        for S_tensor, info in zip(penalty_tree, self._component_infos(), strict=True):
+        for S_tensor, info in zip(penalty_tree, component_infos, strict=True):
             basis_comp = info.basis
             id_fn = DROP_LAST_COL if info.drops_identifiability_column else IDENTITY
             # single can use the fast path
@@ -461,21 +466,23 @@ class GAM:
                 )
         return ph
 
-    def _make_inner_func(self, penalty_tree, compute_sqrt, compute_log_det_and_grad):
+    def _make_inner_func(
+        self, penalty_tree, compute_sqrt, compute_log_det_and_grad, component_infos
+    ):
         """Build the PQL inner-loop smoothing-parameter objective for ``method``."""
         if self.method == "pql_gcv":
             return gcv_compute_factory(
                 compute_sqrt,
-                self._apply_identifiability_column,
-                self._apply_identifiability_square,
+                self._apply_identifiability_column(component_infos),
+                self._apply_identifiability_square(component_infos),
                 1.5,
             )
         if self.method == "pql_reml":
             return reml_compute_factory(
                 compute_sqrt,
                 compute_log_det_and_grad,
-                self._apply_identifiability_column,
-                self._apply_identifiability_square,
+                self._apply_identifiability_column(component_infos),
+                self._apply_identifiability_square(component_infos),
             )
 
         raise ValueError(
@@ -491,6 +498,7 @@ class GAM:
         compute_log_det_and_grad,
         init_params,
         init_regularizer_strength,
+        component_infos,
     ):
         """
         Direct Laplace-REML fit: optimise rho via the Laplace-approximated REML.
@@ -512,7 +520,7 @@ class GAM:
         # row/col zero. Same construction _pql_reml uses for its gradient.
         penalty_blocks = compute_penalty_blocks(
             penalty_tree,
-            apply_identifiability=self._apply_identifiability_square,
+            apply_identifiability=self._apply_identifiability_square(component_infos),
             shift_by=1,
         )
         S_all = jnp.concatenate(jax.tree_util.tree_leaves(penalty_blocks), axis=0)
@@ -548,7 +556,9 @@ class GAM:
         )
         return (beta_opt[1:], beta_opt[:1]), rhos_opt, n_iter
 
-    def _get_penalty_tree(self) -> list[jnp.ndarray]:
+    def _get_penalty_tree(
+        self, component_infos: tuple[BasisComponentInfo, ...]
+    ) -> list[jnp.ndarray]:
         """
         Compute the penalty tensor tree for all smooth terms.
 
@@ -562,7 +572,7 @@ class GAM:
                 penalize_null_space=True,
                 keep=info.nonempty_mask,
             )
-            for info in self._component_infos()
+            for info in component_infos
         ]
 
     @property
@@ -575,33 +585,26 @@ class GAM:
         """
         return resolve_min_obs(self.drop_empty_columns)
 
-    def _component_infos(self) -> tuple[BasisComponentInfo, ...]:
-        """Return the prepared layout, or an unmasked layout before preparation."""
-        if hasattr(self, "component_infos_"):
-            return self.component_infos_
-        return _get_basis_component_infos(
-            self.basis, drop_conv_basis_col=self.drop_conv_basis_col
-        )
-
-    @property
-    def _apply_identifiability_column(self):
+    @staticmethod
+    def _apply_identifiability_column(component_infos: tuple[BasisComponentInfo, ...]):
         """Static column transforms matching the component layout."""
         return tuple(
             DROP_LAST_COL if info.drops_identifiability_column else IDENTITY
-            for info in self._component_infos()
+            for info in component_infos
         )
 
-    @property
-    def _apply_identifiability_square(self):
+    @staticmethod
+    def _apply_identifiability_square(component_infos: tuple[BasisComponentInfo, ...]):
         """Static square-matrix transforms matching the component layout."""
         return tuple(
             DROP_LAST_ROW_COL if info.drops_identifiability_column else IDENTITY
-            for info in self._component_infos()
+            for info in component_infos
         )
 
     def _compute_raw_design_matrix(
         self,
         inputs: tuple[ArrayLike, ...],
+        component_infos: tuple[BasisComponentInfo, ...],
     ) -> jnp.ndarray:
         """
         Build an uncentered design matrix with its NaNs intact.
@@ -609,20 +612,34 @@ class GAM:
         The basis must already be set up. ``fit`` sets it up once, and
         prediction reuses the basis state learned during fit.
         """
-        infos = self._component_infos()
-        X = reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
+        X = reduce_component_blocks(
+            _compute_full_width_blocks(component_infos, *inputs), component_infos
+        )
         return jnp.asarray(X)
 
     def _fit_design_matrix(
         self,
         inputs: tuple[ArrayLike, ...],
         y: jnp.ndarray,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray, tuple[BasisComponentInfo, ...], jnp.ndarray]:
         """
-        Apply the fitted NaN policy and cache the resulting column means.
+        Build the training design and return it with its layout and column means.
 
         This is the only design-matrix path that calls ``basis.setup_basis``.
-        Prediction must reuse this fitted basis state and centering.
+        Apart from that basis state, it sets nothing on ``self``. ``fit``
+        stores the layout and the means. Prediction must reuse this fitted
+        basis state, layout, and centering.
+
+        Returns
+        -------
+        X :
+            Centered design matrix, shape ``(n_kept_rows, n_features)``.
+        y :
+            Response restricted to the kept rows.
+        component_infos :
+            Component layouts detected on the fitting rows.
+        feature_mean :
+            Column means used for centering, shape ``(n_features,)``.
         """
         self.basis.setup_basis(*inputs)
         # Evaluate the basis once. Detection needs the full-width blocks, and
@@ -633,7 +650,7 @@ class GAM:
         blocks = _compute_full_width_blocks(unmasked, *inputs)
         min_obs = self.min_obs
         if min_obs is None:
-            infos = unmasked
+            component_infos = unmasked
         else:
             # Count observations before centering and only on fitting rows.
             # Supported bases put NaNs across an entire component row, so
@@ -641,23 +658,21 @@ class GAM:
             kept_rows = np.asarray(
                 kept_rows_for_fit(np.hstack(blocks), y, self.nan_handling)
             )
-            infos = _get_basis_component_infos(
+            component_infos = _get_basis_component_infos(
                 self.basis,
                 drop_conv_basis_col=self.drop_conv_basis_col,
                 blocks=[block[kept_rows] for block in blocks],
                 min_obs=min_obs,
             )
-        X_raw = jnp.asarray(reduce_component_blocks(blocks, infos))
+        X_raw = jnp.asarray(reduce_component_blocks(blocks, component_infos))
         X, y, feature_mean = apply_nan_policy_for_fit(
             X_raw,
             y,
             self.nan_handling,
         )
-        self.component_infos_ = infos
-        self.feature_mean_ = feature_mean
         if y is None:  # y was supplied, so this is an internal invariant.
             raise RuntimeError("NaN policy unexpectedly returned no response.")
-        return X, y
+        return X, y, component_infos, feature_mean
 
     def _transform_design_matrix_with_policy(
         self,
@@ -673,7 +688,7 @@ class GAM:
             raise AttributeError(
                 "GAM instance is not fitted yet. Call fit before predict."
             )
-        X_raw = self._compute_raw_design_matrix(inputs)
+        X_raw = self._compute_raw_design_matrix(inputs, self.component_infos_)
         return apply_nan_policy_for_transform(
             X_raw,
             self.feature_mean_,
@@ -835,20 +850,22 @@ class GAM:
         component: int | str,
     ) -> BasisComponentInfo:
         """Resolve a component index or basis label to component metadata."""
-        infos = self._component_infos()
+        component_infos = self.component_infos_
         if isinstance(component, str):
-            for info in infos:
+            for info in component_infos:
                 if info.basis.label == component:
                     return info
 
-            available_labels = ", ".join(repr(info.basis.label) for info in infos)
+            available_labels = ", ".join(
+                repr(info.basis.label) for info in component_infos
+            )
             raise ValueError(
                 f"No smooth component with label {component!r} was found. "
                 f"Available labels: {available_labels}."
             )
 
         # if component is an index
-        return infos[component]
+        return component_infos[component]
 
     # TODO: Do we need to take X in fit? or is this fine?
     # TODO: Accept the initial regularizer_strength here or in the constructor?
@@ -885,7 +902,8 @@ class GAM:
         :
             The fitted model, with ``coef_``, ``intercept_``, ``regularizer_strength_``,
             ``n_iter_``, ``cov_beta_``, ``cov_beta_freq_``, ``scale_``, ``dof_resid_``,
-            ``feature_mean_``, and ``penalized_information_rank_`` set.
+            ``feature_mean_``, ``component_infos_``, and
+            ``penalized_information_rank_`` set.
         """
         # TODO: Handle different types if accepting xi instead of X
         if not isinstance(xi, tuple):
@@ -902,15 +920,15 @@ class GAM:
         # float is the default float dtype: float64 with x64 on, float32 with
         # x64 off (warned above). Mixed dtypes crash the jaxopt GLM init.
         y = y.astype(float)
-        X, y = self._fit_design_matrix(xi, y)
+        X, y, component_infos, feature_mean = self._fit_design_matrix(xi, y)
         warn_if_not_float64(
             "GAM.fit",
             {"design matrix": X},
             advice="Cast the inputs to float64.",
         )
 
-        penalty_tree = self._get_penalty_tree()
-        ph = self._build_penalty_handler(penalty_tree)
+        penalty_tree = self._get_penalty_tree(component_infos)
+        ph = self._build_penalty_handler(penalty_tree, component_infos)
         compute_sqrt, compute_log_det_and_grad = ph.build()
 
         if init_regularizer_strength is None:
@@ -934,6 +952,7 @@ class GAM:
                 compute_log_det_and_grad,
                 init_params,
                 init_regularizer_strength,
+                component_infos,
             )
         else:
             opt_coef, opt_pen, n_iter = pql_outer_iteration(
@@ -945,7 +964,10 @@ class GAM:
                 self.observation_model,
                 self.variance_function,
                 self._make_inner_func(
-                    penalty_tree, compute_sqrt, compute_log_det_and_grad
+                    penalty_tree,
+                    compute_sqrt,
+                    compute_log_det_and_grad,
+                    component_infos,
                 ),
                 compute_sqrt,
                 fisher_scoring=False,  # use observed information, not expected
@@ -956,6 +978,11 @@ class GAM:
                 convergence_criterion=self.convergence_criterion,
             )
 
+        # Store the layout and centering together with the coefficients, so a
+        # fit that raises earlier cannot leave them out of step with coef_.
+        # The basis state set by setup_basis is not undone on failure.
+        self.component_infos_ = component_infos
+        self.feature_mean_ = feature_mean
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
         self.n_iter_ = n_iter
@@ -1129,8 +1156,7 @@ class GAM:
                 UserWarning,
                 stacklevel=2,
             )
-            # A model that is not fitted has no mask, even if an earlier fit
-            # raised after it stored one. Build the full design here.
+            # A model that is not fitted has no mask. Build the full design here.
             self.basis.setup_basis(*xi)
             X_raw = jnp.asarray(
                 _compute_features_identifiable(

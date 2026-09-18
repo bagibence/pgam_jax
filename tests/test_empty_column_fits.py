@@ -28,6 +28,10 @@ def _fit(basis, xi, y, drop_empty_columns, method="pql_gcv", **kwargs):
     return gam
 
 
+def _raise_injected_failure(*args, **kwargs):
+    raise RuntimeError("injected failure")
+
+
 def _spread_1d(n=400, seed=5):
     rng = np.random.default_rng(seed)
     x = rng.uniform(0.02, 0.98, n)
@@ -86,7 +90,10 @@ class TestAFullyActiveDesignIsUnchanged:
         y = rng.uniform(0.02, 0.98, n)
         counts = jnp.asarray(rng.poisson(1.5, n).astype(float))
         gam = _fit(_bspline(6) * _bspline(6), (x, y), counts, True)
-        ph = gam._build_penalty_handler(gam._get_penalty_tree())
+        component_infos = gam.component_infos_
+        ph = gam._build_penalty_handler(
+            gam._get_penalty_tree(component_infos), component_infos
+        )
         assert isinstance(ph._penalties[0], _KroneckerWithNullPenalty)
 
 
@@ -232,30 +239,39 @@ class TestDegenerateInputs:
         assert np.all(np.isfinite(gam.predict((x,))))
         assert all(np.all(np.isfinite(v)) for v in gam.smooth_compute((x,), 0))
 
-    def test_a_stale_mask_does_not_leak_into_prefit_concurvity(self):
+    def test_a_failed_first_fit_stores_no_layout(self, monkeypatch):
         """
-        Concurvity before a fit must use the full basis, mask or no mask.
+        A fit that raises after building the design leaves the model unfitted.
 
-        A fit that raises after ``_fit_design_matrix`` leaves
-        ``component_infos_`` set while ``coef_`` is absent. The pre-fit branch
-        must ignore it, or the design and the term blocks disagree in width.
+        The layout and the centering means are stored only together with the
+        coefficients, so no partial fitted state remains.
         """
-        from pgam_jax._identifiable_features import _get_basis_component_infos
+        xi, y = _partial_1d()
+        gam = GAM(_bspline(12), drop_empty_columns=True)
+        monkeypatch.setattr(gam, "_get_penalty_tree", _raise_injected_failure)
+        with pytest.raises(RuntimeError, match="injected failure"):
+            gam.fit(xi, y)
+        assert not hasattr(gam, "component_infos_")
+        assert not hasattr(gam, "feature_mean_")
 
-        xi, _ = _spread_1d()
-        gam = GAM(_bspline(10), drop_empty_columns=True)
-        stale_block = np.ones((8, 10))
-        stale_block[:, :4] = 0.0
-        gam.component_infos_ = _get_basis_component_infos(
-            gam.basis, drop_conv_basis_col=False, blocks=[stale_block], min_obs=1
-        )
-        assert not hasattr(gam, "coef_")
-        assert sum(block.ncol for block in term_blocks_for_gam(gam)) == 10
+    def test_a_failed_refit_keeps_the_previous_layout(self, monkeypatch):
+        """
+        A refit that raises keeps the layout that matches the stored coefficients.
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            out = gam.concurvity(xi)
-        assert set(out) == {"worst", "estimate"}
+        The second data set removes no columns. If the failed refit stored its
+        layout, that layout would not match the coefficients of the first fit.
+        """
+        narrow, y_narrow = _partial_1d(hi=0.35)
+        wide, y_wide = _spread_1d()
+        gam = _fit(_bspline(12), narrow, y_narrow, True)
+        component_infos, feature_mean = gam.component_infos_, gam.feature_mean_
+        assert n_columns_dropped(gam) > 0
+
+        monkeypatch.setattr(gam, "_get_penalty_tree", _raise_injected_failure)
+        with pytest.raises(RuntimeError, match="injected failure"):
+            gam.fit(wide, y_wide)
+        assert gam.component_infos_ is component_infos
+        assert gam.feature_mean_ is feature_mean
 
     def test_refitting_recomputes_the_mask(self):
         narrow, y_narrow = _partial_1d(hi=0.35)
