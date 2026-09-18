@@ -600,6 +600,7 @@ def compute_energy_penalty_tensor_additive_component(
     return out
 
 
+# TODO: Not used anymore. Remove it and references to it in a cleanup step
 def compute_energy_penalty_tensor(
     basis: BSplineEval | MultiplicativeBasis | AdditiveBasis,
     n_sample: int = 10**4,
