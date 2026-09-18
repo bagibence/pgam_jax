@@ -98,18 +98,22 @@ class BasisComponentInfo:
         needed = 1 + int(drops_column)
         n_kept = int(mask.sum())
         if n_kept < needed:
-            raise ValueError(
-                f"Basis component {index} keeps {n_kept} column(s) at "
-                f"min_obs={min_obs}, but it needs {needed}. "
-                + (
-                    "One more column comes off that component for "
-                    "identifiability, so a single survivor leaves it empty. "
-                    if drops_column
-                    else ""
-                )
-                + "Lower min_obs, use a smaller basis for that covariate, "
-                "or remove the component."
+            message = (
+                f"Basis component {index} drops all columns at min_obs={min_obs}."
+                if n_kept == 0
+                else f"Basis component {index} keeps 1 column at min_obs={min_obs}."
             )
+            if drops_column and n_kept == 1:
+                message += (
+                    " Identifiability would remove that column,"
+                    " leaving that component empty."
+                )
+            message += (
+                " Lower min_obs, use a smaller basis for that covariate,"
+                " or remove the component."
+            )
+            raise ValueError(message)
+
         mask.setflags(write=False)
         return cls(
             index=index,

@@ -145,7 +145,7 @@ class TestTheSurvivorGuard:
         assert info.identifiable_feature_slice == slice(0, 2)
 
     def test_a_fully_empty_component_raises_and_names_its_index(self):
-        with pytest.raises(ValueError, match="component 1 keeps 0 column"):
+        with pytest.raises(ValueError, match="component 1 drops all columns"):
             _from_block(_eval_basis(4), np.zeros((3, 4)), index=1)
 
     def test_one_survivor_is_rejected_when_a_column_is_dropped_after(self):
@@ -158,7 +158,7 @@ class TestTheSurvivorGuard:
     def test_the_message_explains_the_identifiability_drop(self):
         block = np.zeros((3, 4))
         block[:, 0] = 1.0
-        with pytest.raises(ValueError, match="identifiability"):
+        with pytest.raises(ValueError, match="Identifiability"):
             _from_block(_eval_basis(4), block)
 
     def test_one_survivor_is_fine_when_no_column_is_dropped_after(self):
