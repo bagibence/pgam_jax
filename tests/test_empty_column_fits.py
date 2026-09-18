@@ -200,7 +200,7 @@ class TestDegenerateInputs:
     def test_an_impossible_min_obs_raises(self):
         xi, y = _partial_1d()
         gam = GAM(_bspline(8), drop_empty_columns=10**6)
-        with pytest.raises(ValueError, match="keeps 0 column"):
+        with pytest.raises(ValueError, match="drops all columns"):
             gam.fit(xi, y)
 
     @pytest.mark.parametrize("threshold, expected_width", [(400, 1), (375, 2), (26, 6)])
