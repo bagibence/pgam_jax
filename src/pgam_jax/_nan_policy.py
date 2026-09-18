@@ -89,6 +89,8 @@ def _kept_rows(
     return kept_rows
 
 
+# TODO: This will need a better design. Consider passing blocks instead of X_raw
+# Have a clear boundary between numpy and jax, or at least minimize conversion
 def kept_rows_for_fit(X_raw, y, nan_handling: NanHandling) -> jax.Array:
     """
     Return the rows that GAM.fit will keep, without building the design.
@@ -96,8 +98,10 @@ def kept_rows_for_fit(X_raw, y, nan_handling: NanHandling) -> jax.Array:
     Empty-column detection needs these rows before centering, because
     subtracting a column mean turns a sparse column into a dense one.
     """
-    X_raw = _as_design_matrix(X_raw)
     nan_handling = validate_nan_handling(nan_handling)
+
+    if nan_handling != "zero":
+        X_raw = _as_design_matrix(X_raw)
     if y is None:
         valid_y_rows = jnp.ones(X_raw.shape[0], dtype=bool)
     else:
