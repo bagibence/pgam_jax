@@ -128,6 +128,31 @@ def test_compute_cov_beta_edf_matches_u1_calculation():
     np.testing.assert_allclose(edf1_from_F, edf1_from_U1, rtol=1e-12, atol=1e-12)
 
 
+def test_edf_by_component_sums_to_total_edf():
+    """Per-component EDFs plus the intercept term add up to edf_."""
+    rng = np.random.default_rng(0)
+    n = 200
+    x1 = rng.uniform(0, 10, n)
+    x2 = rng.uniform(0, 10, n)
+    eta = 0.5 + np.sin(0.6 * x1) + 0.3 * np.cos(0.4 * x2)
+    y = rng.poisson(np.exp(eta)).astype(float)
+
+    gam = GAM(_additive_basis(), maxiter=3)
+    gam.fit((x1, x2), y)
+
+    edf_by_component = gam.edf_by_component_
+    intercept_edf = gam._edf_by_coef[0]  # intercept adds 1 to the EDF
+    np.testing.assert_allclose(intercept_edf, 1.0, rtol=1e-12)
+    assert edf_by_component.shape == (2,)
+    np.testing.assert_allclose(
+        intercept_edf + edf_by_component[0] + edf_by_component[1],
+        gam.edf_,
+        rtol=1e-12,
+    )
+    for i in range(2):
+        np.testing.assert_allclose(gam.edf_of_component(i), edf_by_component[i])
+
+
 def test_smooth_significance_requires_fitted_model():
     gam = GAM(_basis())
 
