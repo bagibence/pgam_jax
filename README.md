@@ -48,10 +48,11 @@ pip install -e ".[dev,notebooks]"
 
 ## Quick Start
 
-The easiest way to try `pgam_jax` is the walkthrough notebook in `examples/quick_start.ipynb`.
-It generates synthetic nonlinear Poisson data, fits a `GAM`, and visualizes the recovered rate surfaces.
+The easiest way to try `pgam_jax` is the walkthrough notebook in `examples/01_fit_one_smooth.ipynb`.
+It generates synthetic Poisson counts from one tuning curve, fits a `GAM` with a single smooth, and compares it with an unpenalized GLM.
 
-To see how to use model temporal responses, see `examples/quick_start_temporal.ipynb` which is similar to the [original implementation's tutorial](https://github.com/BalzaniEdoardo/PGAM/blob/main/PGAM_Tutorial.ipynb).
+To see how to model several inputs and temporal responses, see `examples/02_fit_position_and_event_smooths.ipynb`.
+It fits smooths for position, a correlated nuisance input, and an event history, then inspects concurvity, effective degrees of freedom, and p-values.
 
 Install with the required dependencies, then launch Jupyter Lab:
 ```bash
