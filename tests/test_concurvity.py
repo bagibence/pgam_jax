@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 
 from pgam_jax import GAM
-from pgam_jax.concurvity import TermBlock, concurvity, term_blocks_for_gam
+from pgam_jax.concurvity import TermBlock, concurvity, term_blocks_from_infos
 
 # Seed shared by the scenario data generators. Each scenario gets its own
 # fresh Generator so the fits are independent of test execution order
@@ -278,7 +278,7 @@ def test_two_dimensional_smooth_term_blocks():
     # Column layout: intercept, then 6 - 1 columns for s(a), then
     # 4 * 4 - 1 for the tensor term (one column dropped per component
     # for identifiability).
-    blocks = term_blocks_for_gam(gam)
+    blocks = term_blocks_from_infos(gam._component_infos())
     assert blocks == [
         TermBlock("para", 0, 0),
         TermBlock("s(a)", 1, 5),

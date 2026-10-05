@@ -10,8 +10,9 @@ import pytest
 from conftest import any_columns_dropped, n_columns_dropped
 
 from pgam_jax import GAM
+from pgam_jax._identifiable_features import _get_basis_component_infos
 from pgam_jax._penalty_handler import _KroneckerWithNullPenalty
-from pgam_jax.concurvity import TermBlock, term_blocks_for_gam
+from pgam_jax.concurvity import TermBlock, concurvity, term_blocks_from_infos
 
 jax.config.update("jax_enable_x64", True)
 
@@ -97,7 +98,7 @@ class TestMaskingShrinksTheModel:
         basis = _bspline(12) + _bspline(6)
         gam = _fit(basis, (*xi, second), y, True)
 
-        blocks = term_blocks_for_gam(gam)
+        blocks = term_blocks_from_infos(gam.component_infos_)
         assert blocks[0] == TermBlock("para", 0, 0)
         assert blocks[1].ncol < 11
         assert blocks[2].ncol == 5
@@ -234,14 +235,12 @@ class TestDegenerateInputs:
 
     def test_a_stale_mask_does_not_leak_into_prefit_concurvity(self):
         """
-        Concurvity before a fit must use the full basis, mask or no mask.
+        Concurvity before a fit must recompute its mask from the supplied inputs.
 
         A fit that raises after ``_fit_design_matrix`` leaves
         ``component_infos_`` set while ``coef_`` is absent. The pre-fit branch
         must ignore it, or the design and the term blocks disagree in width.
         """
-        from pgam_jax._identifiable_features import _get_basis_component_infos
-
         xi, _ = _spread_1d()
         gam = GAM(_bspline(10), drop_empty_columns=True)
         stale_block = np.ones((8, 10))
@@ -250,12 +249,16 @@ class TestDegenerateInputs:
             gam.basis, drop_conv_basis_col=False, blocks=[stale_block], min_obs=1
         )
         assert not hasattr(gam, "coef_")
-        assert sum(block.ncol for block in term_blocks_for_gam(gam)) == 10
 
+        # A model that never saw the stale mask gives the reference result.
+        fresh = GAM(_bspline(10), drop_empty_columns=True)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            out = gam.concurvity(xi)
-        assert set(out) == {"worst", "estimate"}
+            expected = fresh.concurvity(xi)
+            actual = gam.concurvity(xi)
+        assert set(actual) == {"worst", "estimate"}
+        for measure in expected:
+            np.testing.assert_allclose(actual[measure], expected[measure])
 
     def test_refitting_recomputes_the_mask(self):
         narrow, y_narrow = _partial_1d(hi=0.35)
@@ -295,3 +298,52 @@ class TestIslandRecovery:
         mu_on = np.asarray(on.predict(xi))
         mu_off = np.asarray(off.predict(xi))
         np.testing.assert_allclose(mu_on, mu_off, rtol=0.15)
+
+
+@pytest.mark.parametrize("drop_empty_columns", [False, True, 26])
+@pytest.mark.parametrize("nan_handling", ["zero", "drop"])
+@pytest.mark.parametrize("full", [False, True])
+def test_prefit_concurvity_respects_column_selection(
+    drop_empty_columns, nan_handling, full
+):
+    rng = np.random.default_rng(0)
+    x1 = rng.uniform(0.02, 0.45, 400)
+    x2 = rng.uniform(0.02, 0.98, 400)
+    x2[:80] = np.nan
+    gam = GAM(
+        _bspline(10) + _bspline(8),
+        drop_empty_columns=drop_empty_columns,
+        nan_handling=nan_handling,
+    )
+    gam.basis.setup_basis(x1, x2)
+    raw_blocks = [b._compute_features(x) for b, x in zip(gam.basis, (x1, x2))]
+    if nan_handling == "drop":
+        valid = ~np.isnan(np.hstack(raw_blocks)).any(axis=1)
+        raw_blocks = [b[valid] for b in raw_blocks]
+    reduced = []
+    terms = [TermBlock("para", 0, 0)]
+    start = 1
+    for raw in raw_blocks:
+        counts = np.sum(np.abs(raw) > 0, axis=0)
+        keep = (
+            counts >= int(drop_empty_columns)
+            if drop_empty_columns
+            else np.ones(raw.shape[1], bool)
+        )
+        block = raw[:, keep]
+        if not np.any((counts > 0) & ~keep):
+            block = block[:, :-1]
+        block = np.nan_to_num(block)
+        reduced.append(block)
+        terms.append(TermBlock(str(start), start, start + block.shape[1] - 1))
+        start += block.shape[1]
+    smooths = jnp.asarray(np.hstack(reduced))
+    smooths = smooths - smooths.mean(axis=0)
+    design = jnp.column_stack([jnp.ones(smooths.shape[0]), smooths])
+    expected = concurvity(jnp.asarray(design), terms, full=full)
+    with pytest.warns(UserWarning, match="GAM is not fitted"):
+        actual = gam.concurvity((x1, x2), full=full)
+    for measure in expected:
+        np.testing.assert_allclose(actual[measure], expected[measure], atol=1e-12)
+    assert not hasattr(gam, "component_infos_")
+    assert not hasattr(gam, "feature_mean_")

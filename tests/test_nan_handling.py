@@ -11,7 +11,7 @@ from pgam_jax._nan_policy import (
 )
 from pgam_jax._utils import prepend_ones_for_intercept
 from pgam_jax.concurvity import concurvity as low_level_concurvity
-from pgam_jax.concurvity import term_blocks_for_gam
+from pgam_jax.concurvity import term_blocks_from_infos
 
 
 def _eval_basis(label=None):
@@ -185,7 +185,7 @@ def test_drop_postfit_concurvity_matches_manually_filtered_design():
     beta = jnp.concatenate([gam.intercept_, gam.coef_])
     expected = low_level_concurvity(
         X,
-        term_blocks_for_gam(gam),
+        term_blocks_from_infos(gam.component_infos_),
         beta=beta,
     )
 

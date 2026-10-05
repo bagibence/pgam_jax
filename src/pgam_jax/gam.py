@@ -26,7 +26,6 @@ from scipy import stats as sts
 
 from ._identifiable_features import (
     BasisComponentInfo,
-    _compute_features_identifiable,
     _compute_full_width_blocks,
     _get_basis_component_infos,
     reduce_component_blocks,
@@ -57,7 +56,7 @@ from ._utils import (
     warn_if_x64_disabled,
 )
 from .concurvity import concurvity as _concurvity
-from .concurvity import term_blocks_for_gam
+from .concurvity import term_blocks_from_infos
 from .iterative_optim import (
     VALID_CONVERGENCE_CRITERIA,
     model_constructors_for_weights_and_pseudo_data,
@@ -613,16 +612,16 @@ class GAM:
         X = reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
         return jnp.asarray(X)
 
-    def _fit_design_matrix(
+    def _prepare_design_matrix(
         self,
         inputs: tuple[ArrayLike, ...],
-        y: jnp.ndarray,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        y: jnp.ndarray | None = None,
+    ) -> tuple[jnp.ndarray, tuple[BasisComponentInfo, ...]]:
         """
-        Apply the fitted NaN policy and cache the resulting column means.
+        Set up the basis and select columns using the applicable input rows.
 
-        This is the only design-matrix path that calls ``basis.setup_basis``.
-        Prediction must reuse this fitted basis state and centering.
+        Return the raw design and its layout without caching fitted state.
+        With no response, column counts use only the design NaN policy.
         """
         self.basis.setup_basis(*inputs)
         # Evaluate the basis once. Detection needs the full-width blocks, and
@@ -648,6 +647,15 @@ class GAM:
                 min_obs=min_obs,
             )
         X_raw = jnp.asarray(reduce_component_blocks(blocks, infos))
+        return X_raw, infos
+
+    def _fit_design_matrix(
+        self,
+        inputs: tuple[ArrayLike, ...],
+        y: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Prepare the fitting design and cache its layout and column means."""
+        X_raw, infos = self._prepare_design_matrix(inputs, y)
         X, y, feature_mean = apply_nan_policy_for_fit(
             X_raw,
             y,
@@ -1057,7 +1065,8 @@ class GAM:
           :math:`\hat{\boldsymbol{\beta}}`) and emits a ``UserWarning`` noting
           that ``observed`` is unavailable. Side effect: ``basis.setup_basis``
           is called on ``xi`` to make the basis usable for evaluation; a
-          later ``fit(xi_train, …)`` will overwrite this state.
+          later ``fit(xi_train, …)`` will overwrite this state. Columns are
+          selected using ``drop_empty_columns`` on the supplied inputs.
         - **After** ``fit``: returns all three measures using the cached
           ``feature_mean_`` and the fitted coefficients.
 
@@ -1119,6 +1128,7 @@ class GAM:
             X_smooths = X_transformed[valid_X_rows]
             X = prepend_ones_for_intercept(X_smooths)
             beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
+            blocks = term_blocks_from_infos(self.component_infos_)
         else:
             # Pre-fit: set up the basis on `xi` and center on-the-fly.
             # No β yet, so the underlying call skips the `observed` measure.
@@ -1129,20 +1139,12 @@ class GAM:
                 UserWarning,
                 stacklevel=2,
             )
-            # A model that is not fitted has no mask, even if an earlier fit
-            # raised after it stored one. Build the full design here.
-            self.basis.setup_basis(*xi)
-            X_raw = jnp.asarray(
-                _compute_features_identifiable(
-                    self.basis,
-                    *xi,
-                    drop_conv_basis_col=self.drop_conv_basis_col,
-                )
-            )
+            # Recompute the layout on xi, ignoring any unsuccessful fit's mask.
+            X_raw, infos = self._prepare_design_matrix(xi)
+            blocks = term_blocks_from_infos(infos)
             X_smooths, _, _ = apply_nan_policy_for_fit(X_raw, None, self.nan_handling)
             X = prepend_ones_for_intercept(X_smooths)
             beta = None
-        blocks = term_blocks_for_gam(self)
         return _concurvity(X, blocks, beta=beta, full=full, as_dataframe=as_dataframe)
 
     def _raise_if_not_fitted(self):
