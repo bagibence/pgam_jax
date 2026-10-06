@@ -12,6 +12,10 @@ import pytest
 
 from pgam_jax import GAM
 from pgam_jax._identifiable_features import compute_features_identifiable
+from pgam_jax.penalty_utils import (
+    identifiability_column_fns_per_component,
+    identifiability_square_fns_per_component,
+)
 
 
 @pytest.fixture
@@ -123,23 +127,27 @@ def test_per_leaf_identifiability_is_a_tuple_of_callables(
         drop_conv_basis_col=drop_conv_basis_col,
     )
 
-    assert isinstance(gam._apply_identifiability_column, tuple)
-    assert isinstance(gam._apply_identifiability_square, tuple)
-    assert len(gam._apply_identifiability_column) == 2
-    assert len(gam._apply_identifiability_square) == 2
+    infos = gam._unmasked_component_infos()
+    column_fns = identifiability_column_fns_per_component(infos)
+    square_fns = identifiability_square_fns_per_component(infos)
+
+    assert isinstance(column_fns, tuple)
+    assert isinstance(square_fns, tuple)
+    assert len(column_fns) == 2
+    assert len(square_fns) == 2
 
     # tuples must be hashable for jit static-arg caching
-    hash(gam._apply_identifiability_column)
-    hash(gam._apply_identifiability_square)
+    hash(column_fns)
+    hash(square_fns)
 
     arr = np.ones((4, 10))
     sq = np.ones((4, 10, 10))
     # eval leaf drops the last column / row+col
-    assert gam._apply_identifiability_column[0](arr).shape == (4, 9)
-    assert gam._apply_identifiability_square[0](sq).shape == (4, 9, 9)
+    assert column_fns[0](arr).shape == (4, 9)
+    assert square_fns[0](sq).shape == (4, 9, 9)
     # conv leaf follows the constructor flag
-    assert gam._apply_identifiability_column[1](arr).shape == (4, expected_conv_cols)
-    assert gam._apply_identifiability_square[1](sq).shape == (
+    assert column_fns[1](arr).shape == (4, expected_conv_cols)
+    assert square_fns[1](sq).shape == (
         4,
         expected_conv_cols,
         expected_conv_cols,
@@ -167,7 +175,7 @@ def test_predict_reuses_fitted_basis_and_training_centering():
 
     assert pred.shape == x_pred.shape
     transformed = gam._transform_design_matrix_with_policy((x_pred,))
-    uncentered = gam._compute_raw_design_matrix((x_pred,))
+    uncentered = gam._compute_raw_design_matrix((x_pred,), gam.component_infos_)
     np.testing.assert_allclose(
         np.asarray(transformed),
         np.asarray(uncentered) - feature_mean,

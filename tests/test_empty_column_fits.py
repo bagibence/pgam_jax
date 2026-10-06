@@ -10,7 +10,6 @@ import pytest
 from conftest import any_columns_dropped, n_columns_dropped
 
 from pgam_jax import GAM
-from pgam_jax._identifiable_features import _get_basis_component_infos
 from pgam_jax._penalty_handler import _KroneckerWithNullPenalty
 from pgam_jax.concurvity import TermBlock, concurvity, term_blocks_from_infos
 
@@ -87,7 +86,9 @@ class TestAFullyActiveDesignIsUnchanged:
         y = rng.uniform(0.02, 0.98, n)
         counts = jnp.asarray(rng.poisson(1.5, n).astype(float))
         gam = _fit(_bspline(6) * _bspline(6), (x, y), counts, True)
-        ph = gam._build_penalty_handler(gam._get_penalty_tree())
+        ph = gam._build_penalty_handler(
+            gam._get_penalty_tree(gam.component_infos_), gam.component_infos_
+        )
         assert isinstance(ph._penalties[0], _KroneckerWithNullPenalty)
 
 
@@ -233,33 +234,6 @@ class TestDegenerateInputs:
         assert np.all(np.isfinite(gam.predict((x,))))
         assert all(np.all(np.isfinite(v)) for v in gam.smooth_compute((x,), 0))
 
-    def test_a_stale_mask_does_not_leak_into_prefit_concurvity(self):
-        """
-        Concurvity before a fit must recompute its mask from the supplied inputs.
-
-        A fit that raises after ``_fit_design_matrix`` leaves
-        ``component_infos_`` set while ``coef_`` is absent. The pre-fit branch
-        must ignore it, or the design and the term blocks disagree in width.
-        """
-        xi, _ = _spread_1d()
-        gam = GAM(_bspline(10), drop_empty_columns=True)
-        stale_block = np.ones((8, 10))
-        stale_block[:, :4] = 0.0
-        gam.component_infos_ = _get_basis_component_infos(
-            gam.basis, drop_conv_basis_col=False, blocks=[stale_block], min_obs=1
-        )
-        assert not hasattr(gam, "coef_")
-
-        # A model that never saw the stale mask gives the reference result.
-        fresh = GAM(_bspline(10), drop_empty_columns=True)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            expected = fresh.concurvity(xi)
-            actual = gam.concurvity(xi)
-        assert set(actual) == {"worst", "estimate"}
-        for measure in expected:
-            np.testing.assert_allclose(actual[measure], expected[measure])
-
     def test_refitting_recomputes_the_mask(self):
         narrow, y_narrow = _partial_1d(hi=0.35)
         wide, y_wide = _spread_1d()
@@ -271,6 +245,88 @@ class TestDegenerateInputs:
             gam.fit(wide, y_wide)
         assert dropped_first > 0
         assert n_columns_dropped(gam) == 0
+
+
+_FITTED_ATTRIBUTES = (
+    "component_infos_",
+    "feature_mean_",
+    "coef_",
+    "intercept_",
+    "regularizer_strength_",
+    "cov_beta_",
+    "scale_",
+    "n_iter_",
+    "dof_resid_",
+)
+
+
+def _fail(*_args, **_kwargs):
+    raise RuntimeError("injected failure")
+
+
+def _break_fit(monkeypatch, failing_step):
+    """Make one step of ``GAM.fit`` raise."""
+    if failing_step == "solver":
+        monkeypatch.setattr("pgam_jax.gam.pql_outer_iteration", _fail)
+    elif failing_step == "covariance":
+        monkeypatch.setattr(GAM, "_compute_cov_beta_from_fit_state", _fail)
+    else:
+        raise NotImplementedError(f"Unknown failing step: {failing_step!r}")
+
+
+@pytest.mark.parametrize("failing_step", ["solver", "covariance"])
+class TestAFailedFitStoresNothing:
+    """
+    ``fit`` stores fitted state only after every step succeeded.
+
+    The column layout depends on the data. A layout stored before a later step
+    raises would disagree in width with the coefficients of the previous fit.
+    """
+
+    def test_a_failed_first_fit_leaves_the_model_unfitted(
+        self, monkeypatch, failing_step
+    ):
+        xi, y = _partial_1d()
+        gam = GAM(_bspline(12), drop_empty_columns=True, method="pql_gcv")
+        _break_fit(monkeypatch, failing_step)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(RuntimeError, match="injected failure"):
+                gam.fit(xi, y)
+        stored = [name for name in _FITTED_ATTRIBUTES if hasattr(gam, name)]
+        assert stored == []
+
+    def test_a_failed_refit_keeps_the_previous_fit(self, monkeypatch, failing_step):
+        narrow, y_narrow = _partial_1d(hi=0.35)
+        wide, y_wide = _spread_1d()
+        gam = _fit(_bspline(12), narrow, y_narrow, True)
+        assert n_columns_dropped(gam) > 0
+        before = {name: getattr(gam, name) for name in _FITTED_ATTRIBUTES}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            prediction = np.asarray(gam.predict(narrow))
+            smooth = [np.asarray(v) for v in gam.smooth_compute(narrow, 0)]
+            concurvity_before = gam.concurvity(narrow)
+
+        # The wide inputs drop no column, so their layout has another width.
+        _break_fit(monkeypatch, failing_step)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(RuntimeError, match="injected failure"):
+                gam.fit(wide, y_wide)
+
+        for name, value in before.items():
+            assert getattr(gam, name) is value, name
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            np.testing.assert_array_equal(np.asarray(gam.predict(narrow)), prediction)
+            for actual, expected in zip(gam.smooth_compute(narrow, 0), smooth):
+                np.testing.assert_array_equal(np.asarray(actual), expected)
+            concurvity_after = gam.concurvity(narrow)
+        for measure, expected in concurvity_before.items():
+            np.testing.assert_array_equal(
+                np.asarray(concurvity_after[measure]), np.asarray(expected)
+            )
 
 
 @pytest.mark.slow

@@ -278,14 +278,15 @@ def test_two_dimensional_smooth_term_blocks():
     # Column layout: intercept, then 6 - 1 columns for s(a), then
     # 4 * 4 - 1 for the tensor term (one column dropped per component
     # for identifiability).
-    blocks = term_blocks_from_infos(gam._component_infos())
+    infos = gam._unmasked_component_infos()
+    blocks = term_blocks_from_infos(infos)
     assert blocks == [
         TermBlock("para", 0, 0),
         TermBlock("s(a)", 1, 5),
         TermBlock("te(b,c)", 6, 20),
     ]
     # The blocks must cover the design matrix exactly.
-    X_smooths = gam._compute_raw_design_matrix(xi)
+    X_smooths = gam._compute_raw_design_matrix(xi, infos)
     assert X_smooths.shape[1] + 1 == sum(b.ncol for b in blocks)
 
     assert list(df.index) == ["para", "s(a)", "te(b,c)"]

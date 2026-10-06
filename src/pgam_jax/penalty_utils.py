@@ -1,5 +1,5 @@
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
@@ -10,6 +10,7 @@ from nemos.basis import AdditiveBasis, BSplineEval, MultiplicativeBasis
 from nemos.tree_utils import pytree_map_and_reduce
 from scipy import sparse
 
+from ._identifiable_features import BasisComponentInfo
 from ._nemos_compat import get_n_inputs
 from .config import config
 
@@ -27,6 +28,34 @@ def DROP_LAST_ROW_COL(x):
 def IDENTITY(x):
     """Return the input unchanged."""
     return x
+
+
+def identifiability_column_fns_per_component(
+    infos: Sequence[BasisComponentInfo],
+) -> tuple[Callable, ...]:
+    """
+    Return one square-root penalty transform per component.
+
+    The result is a tuple, so it is hashable and can be a static jit argument.
+    """
+    return tuple(
+        DROP_LAST_COL if info.drops_identifiability_column else IDENTITY
+        for info in infos
+    )
+
+
+def identifiability_square_fns_per_component(
+    infos: Sequence[BasisComponentInfo],
+) -> tuple[Callable, ...]:
+    """
+    Return one square penalty transform per component.
+
+    The result is a tuple, so it is hashable and can be a static jit argument.
+    """
+    return tuple(
+        DROP_LAST_ROW_COL if info.drops_identifiability_column else IDENTITY
+        for info in infos
+    )
 
 
 def prepend_zeros_for_intercept(sqrt_penalty: jnp.ndarray) -> jnp.ndarray:
