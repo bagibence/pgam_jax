@@ -53,6 +53,8 @@ It generates synthetic nonlinear Poisson data, fits a `GAM`, and visualizes the 
 
 To see how to use model temporal responses, see `examples/quick_start_temporal.ipynb` which is similar to the [original implementation's tutorial](https://github.com/BalzaniEdoardo/PGAM/blob/main/PGAM_Tutorial.ipynb).
 
+For a worked example of dropping empty basis columns, see `examples/island_column_masking.ipynb`. It fits a 2-D place field on data that covers only part of the arena.
+
 Install with the required dependencies, then launch Jupyter Lab:
 ```bash
 uv sync --extra dev --extra notebooks

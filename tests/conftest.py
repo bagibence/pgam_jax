@@ -220,3 +220,16 @@ def gamma_gam_problem_phi2():
         y_draw=lambda rng, mu: rng.gamma(2.0, mu / 2.0),
         phi=2.0,
     )
+
+
+# ─── Empty-column inspection ──────────────────────────────────────────────────
+
+
+def any_columns_dropped(gam):
+    """Whether any fitted basis component lost columns as empty."""
+    return any(info.is_masked for info in gam.component_infos_)
+
+
+def n_columns_dropped(gam):
+    """Total number of full-basis columns removed as empty, over all components."""
+    return sum(info.n_dropped for info in gam.component_infos_)

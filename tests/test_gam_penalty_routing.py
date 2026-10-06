@@ -42,18 +42,21 @@ def _bsp_conv(n=10, window=51):
 def _routed_ph(basis, *, drop_conv_basis_col=False):
     """Handler built the way GAM.fit() builds it, without fitting."""
     gam = GAM(basis, drop_conv_basis_col=drop_conv_basis_col)
-    return gam._build_penalty_handler(gam._get_penalty_tree())
+    infos = gam._unmasked_component_infos()
+    return gam._build_penalty_handler(gam._get_penalty_tree(infos), infos)
 
 
 def _baseline_general_ph(basis, *, drop_conv_basis_col=False):
     """Today's behaviour: every component routed through ph.add as GENERAL."""
     gam = GAM(basis, drop_conv_basis_col=drop_conv_basis_col)
-    penalty_tree = gam._get_penalty_tree()
+    penalty_tree = gam._get_penalty_tree(gam._unmasked_component_infos())
     ph = PenaltyHandler()
     for b, S in zip(basis, penalty_tree):
         id_fn = (
             DROP_LAST_COL
-            if _should_drop_basis_col(b, drop_conv_basis_col)
+            if _should_drop_basis_col(
+                b, drop_conv_basis_col=drop_conv_basis_col, removed_nonempty=False
+            )
             else IDENTITY
         )
         ph.add(S, penalize_null_space=False, identifiability_fn=id_fn)
