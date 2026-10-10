@@ -432,6 +432,21 @@ class GAM:
         path, rebuilding any null-space penalty from the possibly masked energy
         matrix. Unmasked tensor products use the Kronecker-sum path. Masked tensor
         products use the general path because arbitrary masks break that structure.
+
+        Parameters
+        ----------
+        penalty_tree :
+            List of penalty tensors for each smooth component.
+        infos :
+            Info for each smooth component holding info about:
+                - identifiability column dropping
+                - the kind of basis used for the component
+                - whether the columns are masked
+            These infos are used for selecting the appropriate way to add the penalty.
+
+        Returns
+        -------
+        PenaltyHandler ready to build compute_sqrt and log_det_and_grad for the whole model.
         """
         ph = PenaltyHandler()
         for S_tensor, info in zip(penalty_tree, infos, strict=True):
@@ -582,6 +597,7 @@ class GAM:
         """
         return resolve_min_obs(self.drop_empty_columns)
 
+    # TODO: This is used in one place. Remove?
     def _unmasked_component_infos(self) -> tuple[BasisComponentInfo, ...]:
         """Return the layout that keeps every basis column."""
         return _get_basis_component_infos(
@@ -649,11 +665,13 @@ class GAM:
         ``fit`` stores the layout and the means only after it succeeds.
         """
         X_raw, infos = self._prepare_design_matrix(inputs, y)
-        X, y, feature_mean = apply_nan_policy_for_fit(
-            X_raw,
-            y,
-            self.nan_handling,
-        )
+        # TODO: Consider merging this call into _prepare_design_matrix and removing
+        # _fit_design_matrix. Both callers of _prepare_design_matrix apply the NaN
+        # policy right after it.
+        # TODO: Let apply_nan_policy_for_fit accept precomputed kept_rows.
+        # With column dropping on, _prepare_design_matrix already selects the rows,
+        # so they are selected twice.
+        X, y, feature_mean = apply_nan_policy_for_fit(X_raw, y, self.nan_handling)
         if y is None:  # y was supplied, so this is an internal invariant.
             raise RuntimeError("NaN policy unexpectedly returned no response.")
         return X, y, infos, feature_mean
@@ -829,10 +847,7 @@ class GAM:
         """Alternative effective degrees of freedom, Wood's ``edf1 = 2·tr(F) - tr(F²)``."""
         return jnp.sum(self._edf1_by_coef)
 
-    def _resolve_basis_component(
-        self,
-        component: int | str,
-    ) -> BasisComponentInfo:
+    def _resolve_basis_component(self, component: int | str) -> BasisComponentInfo:
         """Resolve a component index or basis label to fitted component metadata."""
         infos = self.component_infos_
         if isinstance(component, str):
