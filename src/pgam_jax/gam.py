@@ -597,7 +597,6 @@ class GAM:
         """
         return resolve_min_obs(self.drop_empty_columns)
 
-    # TODO: This is used in one place. Remove?
     def _unmasked_component_infos(self) -> tuple[BasisComponentInfo, ...]:
         """Return the layout that keeps every basis column."""
         return _get_basis_component_infos(

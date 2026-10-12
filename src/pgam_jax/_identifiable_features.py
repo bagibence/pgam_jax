@@ -158,7 +158,6 @@ class BasisComponentInfo:
         BasisComponentInfo for layout bookkeeping for a smooth component.
         """
         removed_nonempty = False
-        # TODO: Should min_obs == 0 also be included?
         if min_obs is None:
             mask = np.ones(basis.n_basis_funcs, dtype=bool)
         else:
@@ -246,7 +245,14 @@ class BasisComponentInfo:
         return int(np.flatnonzero(self.nonempty_mask)[-1])
 
     def reduce_features(self, block: np.ndarray) -> np.ndarray:
-        """Remove empty columns, then the identifiability column."""
+        """
+        Drop (near-)empty columns, then the identifiability column from a full-width feature block.
+
+        Near-empty columns are given by ``nonempty_mask``, then the last remaining
+        column is dropped for identifiability.
+
+        Used by ``compure_reduced_features`` and ``reduce_component_blocks``.
+        """
         if self.is_masked:
             block = block[:, self.nonempty_mask]
         if self.drops_identifiability_column:
@@ -254,7 +260,7 @@ class BasisComponentInfo:
         return block
 
     def compute_reduced_features(self, *inputs) -> np.ndarray:
-        """Transform inputs into features, then apply column-dropping."""
+        """Transform the component's inputs into features, then apply column-dropping."""
         return self.reduce_features(self.basis._compute_features(*inputs))
 
 
@@ -368,9 +374,8 @@ def _get_basis_component_infos(
     return tuple(infos)
 
 
-# TODO: Not used anymore?
 # after masking, replaced by BasisComponentInfo.reduce_features
-# TODO: Why do the test still call this?
+# TODO: Move to a test helper or remove?
 def compute_features_identifiable(
     basis,
     *inputs,
@@ -399,13 +404,13 @@ def compute_features_identifiable(
 
 
 def reduce_component_blocks(blocks, infos):
-    """Reduce full-width blocks using their matching component records."""
+    """Drop columns from full-width blocks using their matching component records."""
     return np.hstack(
         [info.reduce_features(block) for info, block in zip(infos, blocks, strict=True)]
     )
 
 
-# TODO: Not used anymore?
+# TODO: Move to a test helper or remove?
 def _compute_features_identifiable(
     basis,
     *inputs,
