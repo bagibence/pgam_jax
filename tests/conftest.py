@@ -232,4 +232,4 @@ def any_columns_dropped(gam):
 
 def n_columns_dropped(gam):
     """Total number of full-basis columns removed as empty, over all components."""
-    return sum(info.n_dropped for info in gam.component_infos_)
+    return sum(info.n_empty for info in gam.component_infos_)

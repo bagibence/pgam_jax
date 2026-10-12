@@ -62,8 +62,8 @@ class TestDetection:
         info = _from_block(_eval_basis(4), np.ones((3, 4)))
         np.testing.assert_array_equal(info.nonempty_mask, [True] * 4)
         assert info.is_masked is False
-        assert info.n_kept == 4
-        assert info.n_dropped == 0
+        assert info.n_nonempty == 4
+        assert info.n_empty == 0
 
     def test_an_all_zero_column_is_empty(self):
         block = np.ones((3, 4))
@@ -71,7 +71,7 @@ class TestDetection:
         info = _from_block(_eval_basis(4), block)
         np.testing.assert_array_equal(info.nonempty_mask, [True, False, True, True])
         assert info.is_masked is True
-        assert info.n_dropped == 1
+        assert info.n_empty == 1
 
     def test_min_obs_above_one_drops_sparse_columns(self):
         block = np.ones((3, 4))
@@ -107,7 +107,7 @@ class TestDetectionIsOff:
     def test_no_min_obs_keeps_every_column(self):
         info = _from_block(_eval_basis(5), None, min_obs=None)
         np.testing.assert_array_equal(info.nonempty_mask, [True] * 5)
-        assert info.n_dropped == 0
+        assert info.n_empty == 0
 
     def test_a_missing_block_is_rejected(self):
         with pytest.raises(ValueError, match="requires a training feature block"):

@@ -211,7 +211,7 @@ class BasisComponentInfo:
         )
 
     @property
-    def n_kept(self) -> int:
+    def n_nonempty(self) -> int:
         """
         Number of columns left after the (near-)empty column drop.
 
@@ -220,13 +220,13 @@ class BasisComponentInfo:
         return int(self.nonempty_mask.sum())
 
     @property
-    def n_dropped(self) -> int:
+    def n_empty(self) -> int:
         """
         Number of columns removed as (near-)empty from the full-width feature matrix.
 
         Does not count the identifiability column.
         """
-        return self.nonempty_mask.size - self.n_kept
+        return self.nonempty_mask.size - self.n_nonempty
 
     @property
     def n_inputs(self) -> int:

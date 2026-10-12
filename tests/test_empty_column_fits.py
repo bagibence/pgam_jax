@@ -124,8 +124,8 @@ class TestMaskingShrinksTheModel:
         off = _fit(_bspline(12), xi, y, False)
         assert any_columns_dropped(on)
         assert on.coef_.shape[0] < off.coef_.shape[0]
-        n_kept = on.component_infos_[0].n_kept
-        assert on.coef_.shape[0] == n_kept - 1
+        n_nonempty = on.component_infos_[0].n_nonempty
+        assert on.coef_.shape[0] == n_nonempty - 1
 
     def test_the_covariance_matches_the_coefficients(self):
         xi, y = _partial_1d()

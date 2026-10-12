@@ -82,8 +82,8 @@ class TestDetectionOnATensorBasis:
         off = _prepared(tensor_basis, xi, counts, drop_empty_columns=False)
         X_on, *_ = on._fit_design_matrix(xi, counts)
         X_off, *_ = off._fit_design_matrix(xi, counts)
-        n_kept = on.component_infos_[0].n_kept
-        assert X_on.shape[1] == n_kept - 1
+        n_nonempty = on.component_infos_[0].n_nonempty
+        assert X_on.shape[1] == n_nonempty - 1
         assert X_off.shape[1] == 64 - 1
         assert X_on.shape[1] < X_off.shape[1]
 
@@ -92,7 +92,7 @@ class TestMaskedPenaltyTree:
     def test_tree_is_sliced_to_the_kept_columns(self, tensor_basis):
         xi, counts = _island_inputs()
         gam = _prepared(tensor_basis, xi, counts, drop_empty_columns=True)
-        k = gam.component_infos_[0].n_kept
+        k = gam.component_infos_[0].n_nonempty
         tree = gam._get_penalty_tree(gam.component_infos_)
         assert len(tree) == 1
         assert tree[0].shape[1:] == (k, k)
@@ -173,7 +173,7 @@ class TestPenaltyHandlerRouting:
             id_fn = IDENTITY
         gam = _prepared(_bspline(8), (x,), np.ones(len(x)), min_obs)
         info = gam.component_infos_[0]
-        assert info.n_dropped == 1
+        assert info.n_empty == 1
         assert info.drops_identifiability_column == drop_identifiability
         tree = gam._get_penalty_tree(gam.component_infos_)
         assert tree[0].shape == (2, 7, 7)
@@ -254,7 +254,7 @@ class TestMaskedSqrtIsCorrect:
         rho = [jnp.asarray([0.3, -0.7])]
         S = np.einsum("i,ijk->jk", np.exp(rho[0]), tree[0])
         B = np.asarray(sqrt(rho))
-        assert B.shape[1] == info.n_kept
+        assert B.shape[1] == info.n_nonempty
         np.testing.assert_allclose(B.T @ B, S, atol=1e-8)
         values, gradients = logdet(rho)
         np.testing.assert_allclose(values[0], np.linalg.slogdet(S)[1])

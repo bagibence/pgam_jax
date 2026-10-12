@@ -153,8 +153,8 @@ class TestComponentInfos:
 
     def test_counts_follow_the_mask(self):
         (info,) = _detected_infos(_bspline(6), [6], {0: [1, 4, 5]})
-        assert info.n_kept == 3
-        assert info.n_dropped == 3
+        assert info.n_nonempty == 3
+        assert info.n_empty == 3
         assert info.is_masked is True
 
     def test_slices_shrink_with_the_mask(self, mixed_basis):
