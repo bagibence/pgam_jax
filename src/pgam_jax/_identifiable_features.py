@@ -251,7 +251,7 @@ class BasisComponentInfo:
         Near-empty columns are given by ``nonempty_mask``, then the last remaining
         column is dropped for identifiability.
 
-        Used by ``compure_reduced_features`` and ``reduce_component_blocks``.
+        Used by ``compute_reduced_features`` and ``reduce_component_blocks``.
         """
         if self.is_masked:
             block = block[:, self.nonempty_mask]
