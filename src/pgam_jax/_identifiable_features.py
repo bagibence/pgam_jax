@@ -37,10 +37,28 @@ def resolve_min_obs(drop_empty_columns: bool | int) -> int | None:
 @dataclass(frozen=True, eq=False)
 class BasisComponentInfo:
     """
-    Layout of one smooth in the full basis, design matrix, and fitted coefficient vector.
+    Layout record of one smooth component of a GAM.
 
-    Used to wrap the basis of each smooth component, compute features, apply transformations,
-    then keep track of its place within the full model.
+    ``GAM.basis`` is a sum of components, one per smooth term. Each component turns its
+    inputs into a block of ``basis.n_basis_funcs`` feature columns.
+    But the fit does not use all columns. It can drop columns with fewer than ``min_obs``
+    nonzero entries in the fit rows (called (near-)empty below) and a column to remove
+    collinearity with the intercept.
+    Which columns remain depends on the training data, so the width and position of each
+    block in the design matrix cannot be read from the basis alone. Dropping a column
+    from the design matrix also removes a coefficient and a row and column from the
+    component's penalty matrices. This record keeps those in sync.
+
+    During a fit, ``GAM._prepare_design_matrix`` builds one record per component with
+    ``_get_basis_component_infos``. The tuple of records is then passed along the fit
+    and is used to build the design matrix and penalties.
+
+    When ``GAM.fit`` succeeds, the tuple is stored as ``GAM.component_infos_``.
+    Per-component methods reuse it for indexing. Prediction reuses it to drop the same
+    columns from the new inputs that the fit dropped from the training data so the
+    columns of the design matrix line up with the fitted coefficients.
+
+    Records are immutable. A new fit builds new ones.
 
     Attributes
     ----------
@@ -49,17 +67,37 @@ class BasisComponentInfo:
     basis :
         Basis transforming the inputs of this component.
     input_slice :
-        Which elements of the input tuple it transforms.
+        Which elements of the input tuple this component's basis transforms.
     identifiable_feature_slice :
-        For indexing into the resulting design matrix and coefficients
-        (without the intercept).
+        For indexing into the design matrix and coefficients (without the intercept).
+        Applies after (near-)empty columns and the identifiability column are dropped.
     nonempty_mask :
-        Boolean mask marking non-empty columns in the full basis, before
-        columns are dropped for identifiability.
+        Boolean mask over the full-width columns of this component (all
+        ``basis.n_basis_funcs`` columns, before any column drop).
+        True marks columns to keep when dropping (near-)empty columns.
+        Used by:
+        - ``reduce_features`` to drop columns when computing features from inputs
+          to build design matrices.
+        - ``GAM._get_penalty_tree`` to drop corresponding columns and rows from
+          the penalty matrix.
+        - ``GAM._build_penalty_handler``, through ``is_masked``, to decide if
+          tensor-product components can take the fast penalty path.
     drops_identifiability_column :
-        Whether a column will be dropped for identifiability.
-        Usually true, but can be false for convolutional bases or if
-        thresholding already dropped non-zero columns.
+        Whether a column will be dropped for identifiability in ``reduce_features``.
+        - Evaluation bases: True, unless a near-empty column that was not all zero was
+          dropped. Then the remaining columns are no longer collinear with the intercept
+          and the drop is not needed.
+        - Convolutional bases: equal to ``GAM.drop_conv_basis_col``, which is False by
+          default. See the ``GAM`` class docstring for context.
+
+    See Also
+    --------
+    _get_basis_component_infos
+    _compute_full_width_feature_blocks
+    reduce_component_blocks
+    GAM._prepare_design_matrix
+    GAM._get_penalty_tree
+    GAM._build_penalty_handler
     """
 
     index: int
@@ -174,12 +212,20 @@ class BasisComponentInfo:
 
     @property
     def n_kept(self) -> int:
-        """Number of nonempty columns, before the identifiability constraint."""
+        """
+        Number of columns left after the (near-)empty column drop.
+
+        Still counts the identifiability column, if one will be dropped.
+        """
         return int(self.nonempty_mask.sum())
 
     @property
     def n_dropped(self) -> int:
-        """Number of full-basis columns removed as empty."""
+        """
+        Number of columns removed as (near-)empty from the full-width feature matrix.
+
+        Does not count the identifiability column.
+        """
         return self.nonempty_mask.size - self.n_kept
 
     @property
@@ -189,12 +235,12 @@ class BasisComponentInfo:
 
     @property
     def is_masked(self) -> bool:
-        """Whether any full-basis columns were removed as empty."""
+        """Whether any columns were removed as (near-)empty from the full-width features."""
         return not bool(self.nonempty_mask.all())
 
     @property
     def identifiability_column(self) -> int | None:
-        """Full-basis index of the last survivor, or None without a constraint."""
+        """Full-width index of the last survivor, or None without a constraint."""
         if not self.drops_identifiability_column:
             return None
         return int(np.flatnonzero(self.nonempty_mask)[-1])
