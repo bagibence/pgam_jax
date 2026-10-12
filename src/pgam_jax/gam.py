@@ -26,7 +26,7 @@ from scipy import stats as sts
 
 from ._identifiable_features import (
     BasisComponentInfo,
-    _compute_full_width_blocks,
+    _compute_full_width_feature_blocks,
     _get_basis_component_infos,
     reduce_component_blocks,
     resolve_min_obs,
@@ -615,7 +615,9 @@ class GAM:
         The basis must already be set up. ``fit`` sets it up once, and
         prediction reuses the basis state and the layout learned during fit.
         """
-        X = reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
+        X = reduce_component_blocks(
+            _compute_full_width_feature_blocks(infos, *inputs), infos
+        )
         return jnp.asarray(X)
 
     def _prepare_design_matrix(
@@ -633,7 +635,7 @@ class GAM:
         # Evaluate the basis once. Detection needs the full-width blocks, and
         # the design is those same blocks with columns removed.
         unmasked = self._unmasked_component_infos()
-        blocks = _compute_full_width_blocks(unmasked, *inputs)
+        blocks = _compute_full_width_feature_blocks(unmasked, *inputs)
         min_obs = self.min_obs
         if min_obs is None:
             infos = unmasked

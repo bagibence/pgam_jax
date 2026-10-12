@@ -234,8 +234,7 @@ def _should_drop_basis_col(
     return not removed_nonempty
 
 
-# TODO: rename to _compute_full_width_feature_blocks
-def _compute_full_width_blocks(
+def _compute_full_width_feature_blocks(
     infos: tuple[BasisComponentInfo, ...], *inputs: np.ndarray
 ) -> list[np.ndarray]:
     """
@@ -367,4 +366,6 @@ def _compute_features_identifiable(
     drop_conv_basis_col: bool,
 ):
     infos = _get_basis_component_infos(basis, drop_conv_basis_col=drop_conv_basis_col)
-    return reduce_component_blocks(_compute_full_width_blocks(infos, *inputs), infos)
+    return reduce_component_blocks(
+        _compute_full_width_feature_blocks(infos, *inputs), infos
+    )
