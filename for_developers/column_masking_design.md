@@ -89,9 +89,9 @@ the reduced penalty still has a null space. A masked component has one fewer
 smoothing parameter when masking eliminates a null-space term present in the
 unmasked component. Otherwise, the number need not change.
 
-Because `coef_` and `cov_beta_` are reduced, `test_smooth_significance` and
-`concurvity` answer a question restricted to the observed region. They warn
-when a mask is active.
+`test_smooth_significance` and `concurvity` use the reduced model defined by
+the retained columns. Neither currently emits a dedicated warning when
+column masking is active. A masking warning is planned as a follow-up.
 
 Dropping empty columns is not only a computation saving. It also changes the
 model. In an unmasked fit the coefficients of empty columns are free, and the

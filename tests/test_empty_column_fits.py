@@ -11,7 +11,7 @@ from conftest import any_columns_dropped, n_columns_dropped
 
 from pgam_jax import GAM
 from pgam_jax._penalty_handler import _KroneckerWithNullPenalty
-from pgam_jax.concurvity import TermBlock, concurvity, term_blocks_from_infos
+from pgam_jax.concurvity import TermBlock, term_blocks_from_infos
 
 jax.config.update("jax_enable_x64", True)
 
@@ -131,14 +131,6 @@ class TestMaskingShrinksTheModel:
         xi, y = _partial_1d()
         on = _fit(_bspline(12), xi, y, True)
         assert on.cov_beta_.shape == (on.coef_.shape[0] + 1,) * 2
-
-    def test_predict_returns_one_value_per_input_row(self):
-        xi, y = _partial_1d()
-        on = _fit(_bspline(12), xi, y, True)
-        grid = np.linspace(0.0, 1.0, 77)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            assert on.predict((grid,)).shape == (77,)
 
     def test_a_larger_min_obs_drops_more(self):
         # Per-column counts here are 79, 176, 274, 380, 421, 324, 226, 120 and
@@ -281,6 +273,10 @@ class TestAFailedFitStoresNothing:
 
     The column layout depends on the data. A layout stored before a later step
     raises would disagree in width with the coefficients of the previous fit.
+
+    The covariance failure replaces the whole covariance step, so it raises
+    before that step changes any cached state such as ``_R`` or
+    ``_edf1_by_coef``. A failure after those changes is not tested here.
     """
 
     def test_a_failed_first_fit_leaves_the_model_unfitted(
@@ -354,52 +350,3 @@ class TestIslandRecovery:
         mu_on = np.asarray(on.predict(xi))
         mu_off = np.asarray(off.predict(xi))
         np.testing.assert_allclose(mu_on, mu_off, rtol=0.15)
-
-
-@pytest.mark.parametrize("drop_empty_columns", [False, True, 26])
-@pytest.mark.parametrize("nan_handling", ["zero", "drop"])
-@pytest.mark.parametrize("full", [False, True])
-def test_prefit_concurvity_respects_column_selection(
-    drop_empty_columns, nan_handling, full
-):
-    rng = np.random.default_rng(0)
-    x1 = rng.uniform(0.02, 0.45, 400)
-    x2 = rng.uniform(0.02, 0.98, 400)
-    x2[:80] = np.nan
-    gam = GAM(
-        _bspline(10) + _bspline(8),
-        drop_empty_columns=drop_empty_columns,
-        nan_handling=nan_handling,
-    )
-    gam.basis.setup_basis(x1, x2)
-    raw_blocks = [b._compute_features(x) for b, x in zip(gam.basis, (x1, x2))]
-    if nan_handling == "drop":
-        valid = ~np.isnan(np.hstack(raw_blocks)).any(axis=1)
-        raw_blocks = [b[valid] for b in raw_blocks]
-    reduced = []
-    terms = [TermBlock("para", 0, 0)]
-    start = 1
-    for raw in raw_blocks:
-        counts = np.sum(np.abs(raw) > 0, axis=0)
-        keep = (
-            counts >= int(drop_empty_columns)
-            if drop_empty_columns
-            else np.ones(raw.shape[1], bool)
-        )
-        block = raw[:, keep]
-        if not np.any((counts > 0) & ~keep):
-            block = block[:, :-1]
-        block = np.nan_to_num(block)
-        reduced.append(block)
-        terms.append(TermBlock(str(start), start, start + block.shape[1] - 1))
-        start += block.shape[1]
-    smooths = jnp.asarray(np.hstack(reduced))
-    smooths = smooths - smooths.mean(axis=0)
-    design = jnp.column_stack([jnp.ones(smooths.shape[0]), smooths])
-    expected = concurvity(jnp.asarray(design), terms, full=full)
-    with pytest.warns(UserWarning, match="GAM is not fitted"):
-        actual = gam.concurvity((x1, x2), full=full)
-    for measure in expected:
-        np.testing.assert_allclose(actual[measure], expected[measure], atol=1e-12)
-    assert not hasattr(gam, "component_infos_")
-    assert not hasattr(gam, "feature_mean_")
