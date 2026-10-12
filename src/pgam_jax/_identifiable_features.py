@@ -33,7 +33,7 @@ def resolve_min_obs(drop_empty_columns: bool | int) -> int | None:
     )
 
 
-# TODO: Should we have a class for the full design / basis that holds a list/tuple of these? Or would that only have the two functions below?
+# TODO: Consider having a class for the full design / basis that wraps a tuple of these
 @dataclass(frozen=True, eq=False)
 class BasisComponentInfo:
     """
