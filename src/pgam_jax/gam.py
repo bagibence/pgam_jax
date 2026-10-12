@@ -848,6 +848,38 @@ class GAM:
         """Alternative effective degrees of freedom, Wood's ``edf1 = 2·tr(F) - tr(F²)``."""
         return jnp.sum(self._edf1_by_coef)
 
+    def edf_of_component(self, component_index: int | str) -> JaxFloatScalar:
+        """
+        Effective degrees of freedom of one smooth component.
+
+        Sum of the diagonal of ``F = (X'WX + S_λ)⁻¹ X'WX`` over the coefficients
+        of the selected smooth. The intercept is not part of any component, so the
+        per-component values plus 1 for the intercept term add up to ``edf_``.
+
+        Parameters
+        ----------
+        component_index :
+            Label or index of the smooth component.
+
+        Returns
+        -------
+        :
+            Effective degrees of freedom of the component.
+        """
+        self._raise_if_not_fitted()
+        info = self._resolve_basis_component(component_index)
+        s = info.identifiable_feature_slice
+        # +1 because index 0 of _edf_by_coef is the intercept
+        return jnp.sum(self._edf_by_coef[s.start + 1 : s.stop + 1])
+
+    @property
+    def edf_by_component_(self) -> jnp.ndarray:
+        """Effective degrees of freedom of each smooth component, shape ``(n_components,)``."""
+        self._raise_if_not_fitted()
+        return jnp.stack(
+            [self.edf_of_component(info.index) for info in self.component_infos_]
+        )
+
     def _resolve_basis_component(self, component: int | str) -> BasisComponentInfo:
         """Resolve a component index or basis label to fitted component metadata."""
         infos = self.component_infos_
