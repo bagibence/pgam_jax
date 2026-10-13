@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import Sequence
 
 import nemos as nmo
 import numpy as np
@@ -6,72 +9,385 @@ import numpy as np
 from ._nemos_compat import get_n_inputs
 
 
-@dataclass(frozen=True)
+def resolve_min_obs(drop_empty_columns: bool | int) -> int | None:
+    """
+    Turn the user-facing flag into a ``min_obs`` threshold for column dropping.
+
+    ``False`` disables dropping and returns None.
+    ``True`` means a threshold of 1.
+    An integer sets the threshold directly.
+    """
+    if isinstance(drop_empty_columns, (bool, np.bool_)):
+        return 1 if drop_empty_columns else None
+    if isinstance(drop_empty_columns, (int, np.integer)):
+        min_obs = int(drop_empty_columns)
+        if min_obs < 1:
+            raise ValueError(
+                f"drop_empty_columns must be at least 1 when given as an "
+                f"integer, got {min_obs}."
+            )
+        return min_obs
+    raise TypeError(
+        f"drop_empty_columns must be a bool or int, got "
+        f"{type(drop_empty_columns).__name__}."
+    )
+
+
+# TODO: Consider having a class for the full design / basis that wraps a tuple of these
+@dataclass(frozen=True, eq=False)
 class BasisComponentInfo:
-    """Slices for one component after identifiability column dropping."""
+    """
+    Layout record of one smooth component of a GAM.
+
+    ``GAM.basis`` is a sum of components, one per smooth term. Each component turns its
+    inputs into a block of ``basis.n_basis_funcs`` feature columns.
+    But the fit does not use all columns. It can drop columns with fewer than ``min_obs``
+    nonzero entries in the fit rows (called (near-)empty below) and a column to remove
+    collinearity with the intercept.
+    Which columns remain depends on the training data, so the width and position of each
+    block in the design matrix cannot be read from the basis alone. Dropping a column
+    from the design matrix also removes a coefficient and a row and column from the
+    component's penalty matrices. This record keeps those in sync.
+
+    During a fit, ``GAM._prepare_design_matrix`` builds one record per component with
+    ``_get_basis_component_infos``. The tuple of records is then passed along the fit
+    and is used to build the design matrix and penalties.
+
+    When ``GAM.fit`` succeeds, the tuple is stored as ``GAM.component_infos_``.
+    Per-component methods reuse it for indexing. Prediction reuses it to drop the same
+    columns from the new inputs that the fit dropped from the training data so the
+    columns of the design matrix line up with the fitted coefficients.
+
+    Records are immutable. A new fit builds new ones.
+
+    Attributes
+    ----------
+    index :
+        Index within the full basis / which block of the design matrix.
+    basis :
+        Basis transforming the inputs of this component.
+    input_slice :
+        Which elements of the input tuple this component's basis transforms.
+    identifiable_feature_slice :
+        For indexing into the design matrix and coefficients (without the intercept).
+        Applies after (near-)empty columns and the identifiability column are dropped.
+    nonempty_mask :
+        Boolean mask over the full-width columns of this component (all
+        ``basis.n_basis_funcs`` columns, before any column drop).
+        True marks columns to keep when dropping (near-)empty columns.
+        Used by:
+        - ``reduce_features`` to drop columns when computing features from inputs
+          to build design matrices.
+        - ``GAM._get_penalty_tree`` to drop corresponding columns and rows from
+          the penalty matrix.
+        - ``GAM._build_penalty_handler``, through ``is_masked``, to decide if
+          tensor-product components can take the fast penalty path.
+    drops_identifiability_column :
+        Whether a column will be dropped for identifiability in ``reduce_features``.
+        - Evaluation bases: True, unless a near-empty column that was not all zero was
+          dropped. Then the remaining columns are no longer collinear with the intercept
+          and the drop is not needed.
+        - Convolutional bases: equal to ``GAM.drop_conv_basis_col``, which is False by
+          default. See the ``GAM`` class docstring for context.
+
+    See Also
+    --------
+    _get_basis_component_infos
+    _compute_full_width_feature_blocks
+    reduce_component_blocks
+    GAM._prepare_design_matrix
+    GAM._get_penalty_tree
+    GAM._build_penalty_handler
+    """
 
     index: int
     basis: object
     input_slice: slice
     identifiable_feature_slice: slice
+    nonempty_mask: np.ndarray
+    drops_identifiability_column: bool
+
+    @classmethod
+    def from_block(
+        cls,
+        basis,
+        *,
+        index: int,
+        input_start: int,
+        feature_start: int,
+        drop_conv_basis_col: bool,
+        block: np.ndarray | None = None,
+        min_obs: int | None = None,
+    ) -> BasisComponentInfo:
+        """
+        Build a component layout record from an uncentered training feature block.
+
+        Parameters
+        ----------
+        basis :
+            Basis transforming the inputs of this component.
+        index :
+            Index within the full basis / which block of the design matrix.
+        input_start :
+            First index in the tuple of inputs to the full basis pointing
+            to the first input that this component transforms.
+        feature_start :
+            Start of the slice indexing into the resulting design matrix
+            and coefficients (without intercept).
+            After column drops for identifiability and empty-column drops.
+        drop_conv_basis_col :
+            Whether to drop columns for convolutional bases for identifiability.
+            GAM-level setting set on GAM construction.
+            Passed down to ``_should_drop_basis_col``.
+        block :
+            Design matrix block of the component.
+            Used for checking for columns with fewer than ``min_obs`` nonzero elements.
+            Uncentered, before column drops.
+            Its rows are pre-selected by the caller. E.g. ``_prepare_design_matrix`` selects
+            rows for fitting by checking the NaN-policy.
+            NaNs count as zero, matching the zero-fill NaN policy.
+        min_obs :
+            Minimum number of non-zero elements required for keeping a column from ``block``.
+            If None, ``block`` is not required and all columns are kept.
+            If >1 and removes columns that are not exactly zero, the identifiability column
+            drop for evaluation bases is not needed anymore and is disabled.
+            If only all-zero columns are removed, the identifiability column rule is unchanged.
+
+        Returns
+        -------
+        BasisComponentInfo for layout bookkeeping for a smooth component.
+        """
+        removed_nonempty = False
+        if min_obs is None:
+            mask = np.ones(basis.n_basis_funcs, dtype=bool)
+        else:
+            if block is None:
+                raise ValueError("Column detection requires a training feature block.")
+            block = np.asarray(block)
+            if block.ndim != 2 or block.shape[1] != basis.n_basis_funcs:
+                raise ValueError(
+                    f"Feature block for component {index} must be two-dimensional "
+                    f"with {basis.n_basis_funcs} columns, got {block.shape}."
+                )
+            counts = np.sum(np.abs(block) > 0, axis=0)
+            mask = counts >= min_obs
+            removed_nonempty = bool(np.any((counts > 0) & ~mask))
+
+        drops_column = _should_drop_basis_col(
+            basis,
+            drop_conv_basis_col=drop_conv_basis_col,
+            removed_nonempty=removed_nonempty,
+        )
+        needed = 1 + int(drops_column)
+        n_kept = int(mask.sum())
+        if n_kept < needed:
+            message = (
+                f"Basis component {index} drops all columns at min_obs={min_obs}."
+                if n_kept == 0
+                else f"Basis component {index} keeps 1 column at min_obs={min_obs}."
+            )
+            if drops_column and n_kept == 1:
+                message += (
+                    " Identifiability would remove that column,"
+                    " leaving that component empty."
+                )
+            message += (
+                " Lower min_obs, use a smaller basis for that covariate,"
+                " or remove the component."
+            )
+            raise ValueError(message)
+
+        mask.setflags(write=False)
+        return cls(
+            index=index,
+            basis=basis,
+            input_slice=slice(input_start, input_start + get_n_inputs(basis)),
+            identifiable_feature_slice=slice(
+                feature_start, feature_start + n_kept - int(drops_column)
+            ),
+            nonempty_mask=mask,
+            drops_identifiability_column=drops_column,
+        )
+
+    @property
+    def n_nonempty(self) -> int:
+        """
+        Number of columns left after the (near-)empty column drop.
+
+        Still counts the identifiability column, if one will be dropped.
+        """
+        return int(self.nonempty_mask.sum())
+
+    @property
+    def n_empty(self) -> int:
+        """
+        Number of columns removed as (near-)empty from the full-width feature matrix.
+
+        Does not count the identifiability column.
+        """
+        return self.nonempty_mask.size - self.n_nonempty
+
+    @property
+    def n_inputs(self) -> int:
+        """Number of input arrays consumed by this component."""
+        return self.input_slice.stop - self.input_slice.start
+
+    @property
+    def is_masked(self) -> bool:
+        """Whether any columns were removed as (near-)empty from the full-width features."""
+        return not bool(self.nonempty_mask.all())
+
+    @property
+    def identifiability_column(self) -> int | None:
+        """Full-width index of the last survivor, or None without a constraint."""
+        if not self.drops_identifiability_column:
+            return None
+        return int(np.flatnonzero(self.nonempty_mask)[-1])
+
+    def reduce_features(self, block: np.ndarray) -> np.ndarray:
+        """
+        Drop (near-)empty columns, then the identifiability column from a full-width feature block.
+
+        Near-empty columns are given by ``nonempty_mask``, then the last remaining
+        column is dropped for identifiability.
+
+        Used by ``compute_reduced_features`` and ``reduce_component_blocks``.
+        """
+        if self.is_masked:
+            block = block[:, self.nonempty_mask]
+        if self.drops_identifiability_column:
+            block = block[:, :-1]
+        return block
+
+    def compute_reduced_features(self, *inputs) -> np.ndarray:
+        """Transform the component's inputs into features, then apply column-dropping."""
+        return self.reduce_features(self.basis._compute_features(*inputs))
 
 
 def _should_drop_basis_col(
     basis,
+    *,
     drop_conv_basis_col: bool,
+    removed_nonempty: bool,
 ) -> bool:
     """
     Return whether this basis component should drop its last column.
 
-    Evaluation bases always drop, convolutional bases drop if ``drop_conv_basis_col`` is True.
+    Without masking or masking only all-zero columns, evaluation bases drop
+    and convolutional bases drop if ``drop_conv_basis_col`` is True.
+    When threshold masking removes nonempty columns, there is no need to drop
+    for evaluation bases either, so it gets disabled.
+
     Convolution doesn't create linearly dependent columns, so in theory there is no need to drop,
     but the option is added for matching the original implementation if required.
     """
     if isinstance(basis, nmo.basis._basis_mixin.ConvBasisMixin):
         return drop_conv_basis_col
-    return True
+    return not removed_nonempty
+
+
+def _compute_full_width_feature_blocks(
+    infos: tuple[BasisComponentInfo, ...], *inputs: np.ndarray
+) -> list[np.ndarray]:
+    """
+    Evaluate full-width blocks of the design matrix.
+
+    Each block corresponds to a smooth and the list of blocks returned
+    can be used to build the full design matrix.
+    Full-width means without any column drop, computing features from inputs
+    with bases.
+
+    Parameters
+    ----------
+    infos :
+        Tuple of BasisComponentInfo, one for each smooth term.
+        Used for routing the inputs to the corresponding basis component.
+    inputs :
+        All inputs of the model.
+
+    Returns
+    -------
+    A list of arrays, one for each smooth.
+    """
+    n_expected = sum(info.n_inputs for info in infos)
+    if len(inputs) != n_expected:
+        raise ValueError(
+            f"This basis expects {n_expected} input array(s), got {len(inputs)}."
+        )
+    return [info.basis._compute_features(*inputs[info.input_slice]) for info in infos]
 
 
 def _get_basis_component_infos(
     basis,
     *,
     drop_conv_basis_col: bool,
-) -> list[BasisComponentInfo]:
-    """Return component slices matching the identifiable feature matrix columns."""
+    blocks: Sequence[np.ndarray] | None = None,
+    min_obs: int | None = None,
+) -> tuple[BasisComponentInfo, ...]:
+    """
+    Build bookkeeping for smooth components of a GAM from a basis.
+
+    With ``min_obs`` and ``blocks`` set, detect empty columns directly from full-width
+    training blocks whose rows have already been selected for fitting.
+    Otherwise, build an unmasked layout.
+
+    Parameters
+    ----------
+    basis :
+        Full basis.
+    drop_conv_basis_col :
+        Whether to drop columns for convolutional bases.
+        See GAM class docstring for more info.
+    blocks :
+        Evaluated features of each component before any column dropping.
+        Used to detect (near-)empty columns.
+    min_obs :
+        If given, drop columns with fewer observations than this in each block.
+        If None, ``blocks`` is not required and all columns are kept.
+        If >1 and removes columns that are not exactly zero, the identifiability column
+        drop for evaluation bases is not needed anymore and is disabled.
+        If only all-zero columns are removed, the identifiability column rule is unchanged.
+
+    Returns
+    -------
+    Tuple of one BasisComponentInfo for each smooth component.
+    """
+    components = tuple(basis)
+    if blocks is not None and len(blocks) != len(components):
+        raise ValueError("Expected one feature block per basis component.")
     infos = []
     input_start = 0
-    out_start = 0
-    for index, component in enumerate(basis):
-        n_inputs = get_n_inputs(component)
-
-        n_outputs = component.n_basis_funcs
-        if _should_drop_basis_col(component, drop_conv_basis_col):
-            n_outputs -= 1
-
-        infos.append(
-            BasisComponentInfo(
-                index=index,
-                basis=component,
-                input_slice=slice(input_start, input_start + n_inputs),
-                identifiable_feature_slice=slice(out_start, out_start + n_outputs),
-            )
+    feature_start = 0
+    for index, component in enumerate(components):
+        info = BasisComponentInfo.from_block(
+            component,
+            index=index,
+            input_start=input_start,
+            feature_start=feature_start,
+            drop_conv_basis_col=drop_conv_basis_col,
+            block=None if blocks is None else blocks[index],
+            min_obs=min_obs,
         )
-        input_start += n_inputs
-        out_start += n_outputs
-    return infos
+        infos.append(info)
+        input_start = info.input_slice.stop
+        feature_start = info.identifiable_feature_slice.stop
+    return tuple(infos)
 
 
+# after masking, replaced by BasisComponentInfo.reduce_features
+# TODO: Move to a test helper or remove?
 def compute_features_identifiable(
     basis,
     *inputs,
     drop_conv_basis_col: bool,
 ):
-    """Build the identifiability-constrained design matrix, **uncentered**.
+    """
+    Build the identifiability-constrained design matrix, **uncentered**.
 
     The returned matrix has one column dropped per eval-basis component to
-    remove collinearity with the intercept, but is NOT mean-centered.  Callers
+    remove collinearity with the intercept, but is NOT mean-centered. Callers
     that want a usable design must subtract the per-column means of the
-    training matrix.  ``GAM._fit_design_matrix`` does this and stores the
+    training matrix. ``GAM._fit_design_matrix`` does this and stores the
     means as ``feature_mean_`` for reuse at prediction time
     (``GAM._transform_design_matrix``).
 
@@ -87,27 +403,20 @@ def compute_features_identifiable(
     )
 
 
-# TODO: Should this be a method in nemos basis classes?
+def reduce_component_blocks(blocks, infos):
+    """Drop columns from full-width blocks using their matching component records."""
+    return np.hstack(
+        [info.reduce_features(block) for info, block in zip(infos, blocks, strict=True)]
+    )
+
+
+# TODO: Move to a test helper or remove?
 def _compute_features_identifiable(
     basis,
     *inputs,
     drop_conv_basis_col: bool,
 ):
-    if isinstance(basis, nmo.basis.AdditiveBasis):
-        n1 = get_n_inputs(basis.basis1)
-        x1 = _compute_features_identifiable(
-            basis.basis1,
-            *inputs[:n1],
-            drop_conv_basis_col=drop_conv_basis_col,
-        )
-        x2 = _compute_features_identifiable(
-            basis.basis2,
-            *inputs[n1:],
-            drop_conv_basis_col=drop_conv_basis_col,
-        )
-        return np.hstack([x1, x2])
-    else:
-        X = basis._compute_features(*inputs)
-        if _should_drop_basis_col(basis, drop_conv_basis_col):
-            return X[:, :-1]
-        return X
+    infos = _get_basis_component_infos(basis, drop_conv_basis_col=drop_conv_basis_col)
+    return reduce_component_blocks(
+        _compute_full_width_feature_blocks(infos, *inputs), infos
+    )

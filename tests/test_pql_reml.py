@@ -20,7 +20,11 @@ from jax.flatten_util import ravel_pytree
 from pgam_jax import GAM
 from pgam_jax._penalty_handler import PenaltyHandler
 from pgam_jax._pql_reml import reml_compute_factory
-from pgam_jax.penalty_utils import IDENTITY
+from pgam_jax.penalty_utils import (
+    IDENTITY,
+    identifiability_column_fns_per_component,
+    identifiability_square_fns_per_component,
+)
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -189,8 +193,9 @@ def _routed_reml_setup(make_basis, seed=0, n_obs=300):
     """
     rng = np.random.default_rng(seed)
     gam = GAM(make_basis(), method="pql_reml")
-    penalty_tree = gam._get_penalty_tree()
-    ph = gam._build_penalty_handler(penalty_tree)
+    infos = gam._unmasked_component_infos()
+    penalty_tree = gam._get_penalty_tree(infos)
+    ph = gam._build_penalty_handler(penalty_tree, infos)
     compute_sqrt, compute_log_det_and_grad = ph.build()
 
     rho = [jnp.array(rng.uniform(-1.0, 1.0, size=p.rho_len)) for p in ph._penalties]
@@ -203,8 +208,8 @@ def _routed_reml_setup(make_basis, seed=0, n_obs=300):
     reml_fn = reml_compute_factory(
         compute_sqrt=compute_sqrt,
         compute_log_det_and_grad=compute_log_det_and_grad,
-        apply_identifiability_columns=gam._apply_identifiability_column,
-        apply_identifiability=gam._apply_identifiability_square,
+        apply_identifiability_columns=identifiability_column_fns_per_component(infos),
+        apply_identifiability=identifiability_square_fns_per_component(infos),
     )
     return reml_fn, rho, penalty_tree, Xw, Q, R, y
 
