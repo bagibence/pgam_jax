@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from typing import Callable, Literal
 
 import jax
@@ -147,6 +148,46 @@ def _validate_eval_bases_have_bounds(basis) -> None:
     )
 
 
+@dataclass(frozen=True)
+class _FitDerivedQuantities:
+    """
+    Quantities derived from the fitted coefficients and smoothing parameters.
+
+    Returned by ``GAM._compute_fit_derived_quantities`` at the end of ``fit``.
+    ``p`` is the number of fitted coefficients, not counting the intercept.
+
+    Attributes
+    ----------
+    cov_beta :
+        Posterior covariance ``φ · (X'WX + S_λ)⁻¹``, shape ``(p+1, p+1)``.
+    scale :
+        Estimated dispersion φ̂ from ``observation_model.estimate_scale``.
+    penalized_information_rank :
+        Numerical rank of ``X'WX + S_λ``.
+    edf_by_coef :
+        Diagonal of ``F = (X'WX + S_λ)⁻¹ X'WX``, shape ``(p+1,)``.
+        Index 0 is the intercept.
+    edf1_by_coef :
+        Per-coefficient terms of Wood's ``edf1 = 2·tr(F) - tr(F²)``, shape ``(p+1,)``.
+    R :
+        R factor of ``QR(sqrt(W) X)`` with the intercept column, so ``R'R = X'WX``.
+    sqrt_penalty :
+        Square root of ``S_λ`` with a zero column for the intercept.
+    unscaled_freq_cov_root :
+        ``C' = (X'WX + S_λ)⁻¹ R'``. Used as ``C.T`` in ``_smooth_pval_penalized``.
+        The frequentist covariance of the coefficients is ``φ · C'C``.
+    """
+
+    cov_beta: jnp.ndarray
+    scale: JaxFloatScalar
+    penalized_information_rank: int
+    edf_by_coef: jnp.ndarray
+    edf1_by_coef: jnp.ndarray
+    R: jnp.ndarray
+    sqrt_penalty: jnp.ndarray
+    unscaled_freq_cov_root: jnp.ndarray
+
+
 class GAM:
     """
     Generalized Additive Model.
@@ -256,6 +297,10 @@ class GAM:
         Posterior covariance of the full coefficient vector ``[intercept, coef_]``
         treating smoothing parameters as fixed (available after ``fit``).
         Includes the dispersion factor: ``φ̂ · (X'WX + S_λ)⁻¹``.
+    penalized_information_rank_ :
+        Numerical rank of ``X'WX + S_λ`` (available after ``fit``). If it is below
+        the number of coefficients plus one for the intercept, ``cov_beta_`` and
+        the effective degrees of freedom use a generalized inverse.
     scale_ :
         Estimated dispersion parameter φ̂ (available after ``fit``).
         Poisson models always return 1.0; Gaussian/Gamma models will
@@ -706,21 +751,24 @@ class GAM:
         return [jnp.zeros(pen.shape[0]) for pen in penalty_tree]
 
     # TODO: Test against the original implementation
-    def _compute_cov_beta_from_fit_state(
+    def _compute_fit_derived_quantities(
         self,
         X: jnp.ndarray,
         y: jnp.ndarray,
         params: tuple[jnp.ndarray, jnp.ndarray],
         regularizer_strength: list[jnp.ndarray],
         compute_sqrt,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> _FitDerivedQuantities:
         """
-        Compute posterior covariance and dispersion scale after fitting.
+        Compute the covariances, dispersion scale, and EDF terms after fitting.
 
         This mirrors legacy PGAM's final refresh: recompute final IRLS weights
         from the returned coefficients, form QR(sqrt(W) X), then compute the
         generalized inverse of ``X.T W X + S_lambda`` via the SVD of
         ``[R; sqrt(S_lambda)]``.
+
+        This method sets nothing on ``self``. ``fit`` stores the result, so a
+        failure here leaves the previous fitted state intact.
 
         Parameters
         ----------
@@ -738,10 +786,8 @@ class GAM:
 
         Returns
         -------
-        cov_beta :
-            Posterior covariance ``φ · (X'WX + S_λ)⁻¹``, shape ``(p+1, p+1)``.
-        scale :
-            Estimated dispersion φ̂ from ``observation_model.estimate_scale``.
+        :
+            The quantities derived from the fit. See ``_FitDerivedQuantities`` for the fields.
         """
         coef, intercept = params
         n_obs = X.shape[0]
@@ -822,30 +868,35 @@ class GAM:
 
         # used as C.T in _smooth_pval_penalized
         unscaled_freq_cov_root = unscaled_cov_beta @ R.T
-        # frequentist covariance
-        cov_beta_freq = scale * unscaled_freq_cov_root @ unscaled_freq_cov_root.T
+        # The frequentist covariance of the coefficients (cov_beta_freq_) is not stored.
+        # It can be computed from this root as
+        #     scale * unscaled_freq_cov_root @ unscaled_freq_cov_root.T
+        # which equals scale * V @ (X.T @ W @ X) @ V, with V = unscaled_cov_beta.
+        # On a fitted model, the root is gam._fit_derived_quantities.unscaled_freq_cov_root
+        # and the scale is gam.scale_.
 
-        return (
-            cov_beta,
-            scale,
-            R,
-            sqrt_penalty,
-            penalized_information_rank,
-            edf_by_coef,
-            edf1_by_coef,
-            unscaled_freq_cov_root,
-            cov_beta_freq,
+        return _FitDerivedQuantities(
+            cov_beta=cov_beta,
+            scale=scale,
+            penalized_information_rank=penalized_information_rank,
+            edf_by_coef=edf_by_coef,
+            edf1_by_coef=edf1_by_coef,
+            R=R,
+            sqrt_penalty=sqrt_penalty,
+            unscaled_freq_cov_root=unscaled_freq_cov_root,
         )
 
     @property
     def edf_(self) -> JaxFloatScalar:
         """Effective degrees of freedom ``tr(F)``, where ``F = (X'WX + S_λ)⁻¹ X'WX``."""
-        return jnp.sum(self._edf_by_coef)
+        self._raise_if_not_fitted()
+        return jnp.sum(self._fit_derived_quantities.edf_by_coef)
 
     @property
     def edf1_(self) -> JaxFloatScalar:
         """Alternative effective degrees of freedom, Wood's ``edf1 = 2·tr(F) - tr(F²)``."""
-        return jnp.sum(self._edf1_by_coef)
+        self._raise_if_not_fitted()
+        return jnp.sum(self._fit_derived_quantities.edf1_by_coef)
 
     def edf_of_component(self, component_index: int | str) -> JaxFloatScalar:
         """
@@ -868,8 +919,10 @@ class GAM:
         self._raise_if_not_fitted()
         info = self._resolve_basis_component(component_index)
         s = info.identifiable_feature_slice
-        # +1 because index 0 of _edf_by_coef is the intercept
-        return jnp.sum(self._edf_by_coef[s.start + 1 : s.stop + 1])
+        # +1 because index 0 of edf_by_coef is the intercept
+        return jnp.sum(
+            self._fit_derived_quantities.edf_by_coef[s.start + 1 : s.stop + 1]
+        )
 
     @property
     def edf_by_component_(self) -> jnp.ndarray:
@@ -930,7 +983,7 @@ class GAM:
         -------
         :
             The fitted model, with ``coef_``, ``intercept_``, ``regularizer_strength_``,
-            ``n_iter_``, ``cov_beta_``, ``cov_beta_freq_``, ``scale_``, ``dof_resid_``,
+            ``n_iter_``, ``cov_beta_``, ``scale_``, ``dof_resid_``,
             ``feature_mean_``, and ``penalized_information_rank_`` set.
         """
         # TODO: Handle different types if accepting xi instead of X
@@ -1003,19 +1056,7 @@ class GAM:
                 convergence_criterion=self.convergence_criterion,
             )
 
-        # This is the last call in fit that can fail. self.xyz are only assigned after it returns,
-        # so a failure here or before leaves the previous fitted state intact.
-        (
-            self.cov_beta_,
-            self.scale_,
-            self._R,
-            self._sqrt_penalty,
-            self.penalized_information_rank_,
-            self._edf_by_coef,
-            self._edf1_by_coef,
-            self._unscaled_freq_cov_root,
-            self.cov_beta_freq_,
-        ) = self._compute_cov_beta_from_fit_state(
+        fit_derived_quantities = self._compute_fit_derived_quantities(
             X,
             y,
             opt_coef,
@@ -1023,12 +1064,20 @@ class GAM:
             compute_sqrt,
         )
 
+        # Store fitted state only here, after every step that can fail.
+        # A failed fit then leaves the previous fitted state intact.
         self.component_infos_ = infos
         self.feature_mean_ = feature_mean
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
         self.n_iter_ = n_iter
-
+        self.cov_beta_ = fit_derived_quantities.cov_beta
+        self.scale_ = fit_derived_quantities.scale
+        self.penalized_information_rank_ = (
+            fit_derived_quantities.penalized_information_rank
+        )
+        # Methods read the public values above from self, and the rest from here.
+        self._fit_derived_quantities = fit_derived_quantities
         self.dof_resid_ = X.shape[0] - self.edf_
 
         return self
@@ -1203,7 +1252,7 @@ class GAM:
         return _concurvity(X, blocks, beta=beta, full=full, as_dataframe=as_dataframe)
 
     def _raise_if_not_fitted(self):
-        if not hasattr(self, "cov_beta_"):
+        if not hasattr(self, "_fit_derived_quantities"):
             raise AttributeError("GAM instance is not fitted yet. Call fit first.")
 
     # TODO: Test against original implementation
@@ -1325,10 +1374,10 @@ class GAM:
         # TODO: Have a helper (property?) for this beta construction
         beta = jnp.concatenate([jnp.atleast_1d(self.intercept_), self.coef_])
         beta_j = beta[smooth_slice]
-        edf1_j = jnp.sum(self._edf1_by_coef[smooth_slice])
+        edf1_j = jnp.sum(self._fit_derived_quantities.edf1_by_coef[smooth_slice])
         V_beta_j = self.cov_beta_[smooth_slice, smooth_slice]
 
-        R_columns_j = self._R[:, smooth_slice]
+        R_columns_j = self._fit_derived_quantities.R[:, smooth_slice]
         R_j = jnp.linalg.qr(R_columns_j, mode="r")
         z_j = R_j @ beta_j
         C_j = R_j @ V_beta_j @ R_j.T
@@ -1436,22 +1485,8 @@ class GAM:
         :
             The p-value for the null hypothesis that the smooth is zero.
         """
-        required_attributes = (
-            "_R",
-            "_sqrt_penalty",
-            "cov_beta_freq_",
-            "coef_",
-            "intercept_",
-            "scale_",
-            "dof_resid_",
-        )
-        missing = [name for name in required_attributes if not hasattr(self, name)]
-        if missing:
-            raise AttributeError(
-                "GAM instance is not fitted or is missing fitted state. "
-                f"Missing attribute(s): {', '.join(missing)}. "
-                "Call `fit` first."
-            )
+        self._raise_if_not_fitted()
+        fit_derived_quantities = self._fit_derived_quantities
 
         component_info = self._resolve_basis_component(component_index)
         smooth_slice = slice(
@@ -1461,7 +1496,7 @@ class GAM:
         smooth_idx = jnp.arange(smooth_slice.start, smooth_slice.stop)
 
         n_j = len(smooth_idx)
-        n_coef = self._R.shape[1]
+        n_coef = fit_derived_quantities.R.shape[1]
 
         other_mask = jnp.ones(n_coef, dtype=bool).at[smooth_idx].set(False)
         other_idx = jnp.arange(n_coef)[other_mask]
@@ -1470,7 +1505,9 @@ class GAM:
         # for canonical links the observed and Fisher information are the same
 
         # augmented.T @ augmented = X.T @ W @ X + S_lambda
-        augmented = jnp.vstack([self._R, self._sqrt_penalty])
+        augmented = jnp.vstack(
+            [fit_derived_quantities.R, fit_derived_quantities.sqrt_penalty]
+        )
         # move the smooth's columns to the end
         permuted = augmented[:, jnp.concatenate([other_idx, smooth_idx])]
         R_augmented = jnp.linalg.qr(permuted, mode="r")
@@ -1510,7 +1547,7 @@ class GAM:
         # T = sum_i evals_i * q_i**2
         # so T is a weighted sum of chisq_1 variables.
 
-        C_T = self._unscaled_freq_cov_root[smooth_idx, :]
+        C_T = fit_derived_quantities.unscaled_freq_cov_root[smooth_idx, :]
         L_j = R_m @ C_T
         singular_values = jnp.linalg.svd(L_j, compute_uv=False)
         tol = max(L_j.shape) * jnp.finfo(singular_values.dtype).eps * singular_values[0]

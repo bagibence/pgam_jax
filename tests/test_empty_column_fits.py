@@ -247,8 +247,10 @@ _FITTED_ATTRIBUTES = (
     "regularizer_strength_",
     "cov_beta_",
     "scale_",
+    "penalized_information_rank_",
     "n_iter_",
     "dof_resid_",
+    "_fit_derived_quantities",
 )
 
 
@@ -261,7 +263,7 @@ def _break_fit(monkeypatch, failing_step):
     if failing_step == "solver":
         monkeypatch.setattr("pgam_jax.gam.pql_outer_iteration", _fail)
     elif failing_step == "covariance":
-        monkeypatch.setattr(GAM, "_compute_cov_beta_from_fit_state", _fail)
+        monkeypatch.setattr(GAM, "_compute_fit_derived_quantities", _fail)
     else:
         raise NotImplementedError(f"Unknown failing step: {failing_step!r}")
 
@@ -274,9 +276,9 @@ class TestAFailedFitStoresNothing:
     The column layout depends on the data. A layout stored before a later step
     raises would disagree in width with the coefficients of the previous fit.
 
-    The covariance failure replaces the whole covariance step, so it raises
-    before that step changes any cached state such as ``_R`` or
-    ``_edf1_by_coef``. A failure after those changes is not tested here.
+    The covariance failure replaces the whole covariance step. That step sets
+    nothing on the model and only returns its results, so a failure part way
+    through it leaves the same state as this replacement.
     """
 
     def test_a_failed_first_fit_leaves_the_model_unfitted(

@@ -732,7 +732,7 @@ def _assert_fitted_layout(gam, layout, mean, context):
 
     # The per-coefficient values are shared with the library. Only the slice
     # is under test. Entry 0 belongs to the intercept.
-    edf_by_coef = np.asarray(gam._edf_by_coef)
+    edf_by_coef = np.asarray(gam._fit_derived_quantities.edf_by_coef)
     assert edf_by_coef.shape == (width + 1,), context
     expected_edf = [edf_by_coef[1:][comp.coef_slice].sum() for comp in layout]
     for index, expected in enumerate(expected_edf):

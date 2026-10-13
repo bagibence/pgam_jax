@@ -96,17 +96,15 @@ def test_compute_cov_beta_edf_matches_u1_calculation():
         ]
     )
 
-    (_, _, _, _, _, gam._edf_by_coef, gam._edf1_by_coef, _, _) = (
-        gam._compute_cov_beta_from_fit_state(
-            X,
-            y,
-            params,
-            [jnp.array([0.0])],
-            lambda _: sqrt_penalty,
-        )
+    fit_derived_quantities = gam._compute_fit_derived_quantities(
+        X,
+        y,
+        params,
+        [jnp.array([0.0])],
+        lambda _: sqrt_penalty,
     )
-    edf1_from_F = jnp.sum(gam._edf1_by_coef)
-    edf_from_F = jnp.sum(gam._edf_by_coef)
+    edf1_from_F = jnp.sum(fit_derived_quantities.edf1_by_coef)
+    edf_from_F = jnp.sum(fit_derived_quantities.edf_by_coef)
 
     X_full = jnp.column_stack((jnp.ones(X.shape[0]), X))
     R = jnp.linalg.qr(X_full, mode="r")
@@ -143,7 +141,8 @@ def test_edf_by_component_sums_to_total_edf():
     gam.fit((x1, x2), y)
 
     edf_by_component = gam.edf_by_component_
-    intercept_edf = gam._edf_by_coef[0]  # intercept adds 1 to the EDF
+    # intercept adds 1 to the EDF
+    intercept_edf = gam._fit_derived_quantities.edf_by_coef[0]
     np.testing.assert_allclose(intercept_edf, 1.0, rtol=1e-12)
     assert edf_by_component.shape == (2,)
     np.testing.assert_allclose(
@@ -164,7 +163,7 @@ def test_smooth_significance_requires_fitted_model():
 
 def test_smooth_significance_delegates_and_warns(monkeypatch):
     gam = GAM(_basis())
-    gam.cov_beta_ = jnp.eye(1)
+    monkeypatch.setattr(gam, "_raise_if_not_fitted", lambda: None)
     selected_components = []
 
     def compute_p_value(component_index):
@@ -217,6 +216,21 @@ def test_null_smooth_is_not_significant():
     assert 0.1 < p_value_by_index <= 1.0
 
 
+@pytest.mark.parametrize(
+    "access",
+    [
+        pytest.param(lambda gam: gam.edf_, id="edf_"),
+        pytest.param(lambda gam: gam.edf1_, id="edf1_"),
+        pytest.param(
+            lambda gam: gam._smooth_pval_penalized(0), id="_smooth_pval_penalized"
+        ),
+    ],
+)
+def test_fit_derived_accessors_require_fitted_model(access):
+    with pytest.raises(AttributeError, match="not fitted"):
+        access(GAM(_basis()))
+
+
 @pytest.mark.parametrize("method", ["pql_gcv", "pql_reml"])
 def test_fit_runs_end_to_end(method):
     """End-to-end fit for each smoothing-parameter method, including REML."""
@@ -231,6 +245,8 @@ def test_fit_runs_end_to_end(method):
     assert np.all(np.isfinite(np.asarray(gam.coef_)))
     assert np.all(np.isfinite(np.asarray(gam.intercept_)))
     assert all(np.all(np.isfinite(np.asarray(r))) for r in gam.regularizer_strength_)
+    # full rank: 7 coefficients plus the intercept
+    assert gam.penalized_information_rank_ == 8
 
     pred = np.asarray(gam.predict((x,)))
     assert pred.shape == (len(y),)
