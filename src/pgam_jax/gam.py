@@ -722,10 +722,6 @@ class GAM:
         generalized inverse of ``X.T W X + S_lambda`` via the SVD of
         ``[R; sqrt(S_lambda)]``.
 
-        Besides returning ``cov_beta`` and ``scale``, it sets the following on ``self``:
-        ``_R``, ``_sqrt_penalty``, ``_edf_by_coef``, ``_edf1_by_coef``,
-        ``_unscaled_freq_cov_root``, ``cov_beta_freq_``, and ``penalized_information_rank_``.
-
         Parameters
         ----------
         X :
@@ -771,13 +767,8 @@ class GAM:
         Xw = X_full * jnp.sqrt(weights)[:, None]
         R = jnp.linalg.qr(Xw, mode="r")
 
-        # TODO: Return it instead?
-        # save for p-values
-        self._R = R
-
         sqrt_penalty = compute_sqrt(regularizer_strength)
         sqrt_penalty = prepend_zeros_for_intercept(sqrt_penalty)
-        self._sqrt_penalty = sqrt_penalty
 
         A = jnp.vstack((R, sqrt_penalty))
         _, singular_values, Vt = jnp.linalg.svd(A, full_matrices=False)
@@ -798,12 +789,12 @@ class GAM:
                 "nonfinite values."
             )
 
-        self.penalized_information_rank_ = int(jnp.sum(keep))
+        penalized_information_rank = int(jnp.sum(keep))
 
-        if self.penalized_information_rank_ < R.shape[1]:
+        if penalized_information_rank < R.shape[1]:
             warnings.warn(
                 "The penalized information matrix has numerical rank "
-                f"{self.penalized_information_rank_} "
+                f"{penalized_information_rank} "
                 f"for {R.shape[1]} coefficients. Covariance and effective "
                 "degrees of freedom use a generalized inverse.",
                 UserWarning,
@@ -817,12 +808,12 @@ class GAM:
         diag_F_sq = jnp.sum(F * F.T, axis=1)
 
         # they have an extra term for the intercept
-        self._edf_by_coef = diag_F
-        self._edf1_by_coef = 2 * diag_F - diag_F_sq
+        edf_by_coef = diag_F
+        edf1_by_coef = 2 * diag_F - diag_F_sq
 
         # dispersion: Poisson -> 1.0; Gaussian/Gamma -> Pearson χ²/dof
         scale = self.observation_model.estimate_scale(
-            y, mu, dof_resid=n_obs - self.edf_
+            y, mu, dof_resid=n_obs - edf_by_coef.sum()
         )
         scale = to_zero_dim_jax_array(scale)
 
@@ -830,13 +821,21 @@ class GAM:
         cov_beta = scale * unscaled_cov_beta
 
         # used as C.T in _smooth_pval_penalized
-        self._unscaled_freq_cov_root = unscaled_cov_beta @ R.T
+        unscaled_freq_cov_root = unscaled_cov_beta @ R.T
         # frequentist covariance
-        self.cov_beta_freq_ = (
-            scale * self._unscaled_freq_cov_root @ self._unscaled_freq_cov_root.T
-        )
+        cov_beta_freq = scale * unscaled_freq_cov_root @ unscaled_freq_cov_root.T
 
-        return cov_beta, scale
+        return (
+            cov_beta,
+            scale,
+            R,
+            sqrt_penalty,
+            penalized_information_rank,
+            edf_by_coef,
+            edf1_by_coef,
+            unscaled_freq_cov_root,
+            cov_beta_freq,
+        )
 
     @property
     def edf_(self) -> JaxFloatScalar:
@@ -1004,7 +1003,19 @@ class GAM:
                 convergence_criterion=self.convergence_criterion,
             )
 
-        cov_beta, scale = self._compute_cov_beta_from_fit_state(
+        # This is the last call in fit that can fail. self.xyz are only assigned after it returns,
+        # so a failure here or before leaves the previous fitted state intact.
+        (
+            self.cov_beta_,
+            self.scale_,
+            self._R,
+            self._sqrt_penalty,
+            self.penalized_information_rank_,
+            self._edf_by_coef,
+            self._edf1_by_coef,
+            self._unscaled_freq_cov_root,
+            self.cov_beta_freq_,
+        ) = self._compute_cov_beta_from_fit_state(
             X,
             y,
             opt_coef,
@@ -1012,16 +1023,12 @@ class GAM:
             compute_sqrt,
         )
 
-        # Store fitted state only here, after every step that can raise. A
-        # failed fit then leaves the previous fitted state intact.
-        # TODO: Do the same for things cached in the covariance estimation.
         self.component_infos_ = infos
         self.feature_mean_ = feature_mean
         self.coef_, self.intercept_ = opt_coef
         self.regularizer_strength_ = opt_pen
-        self.cov_beta_ = cov_beta
-        self.scale_ = scale
         self.n_iter_ = n_iter
+
         self.dof_resid_ = X.shape[0] - self.edf_
 
         return self
