@@ -27,7 +27,7 @@ classifiers = [
 # Define dependencies for the project
 dependencies = [
     "equinox>=0.13.1",
-    "jax>=0.11",
+    "jax>=0.11",                    # jaxlib 0.10.x with SciPy 1.18 crashes in batched eigh on Windows
     "jaxopt",
     "nemos",
     "numpy",
