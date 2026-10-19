@@ -6,6 +6,7 @@ The example notebooks import from this module.
 1. ``01_fit_one_smooth`` fits a PGAM to the tuning-curve dataset.
 2. ``02_fit_position_and_event_smooths`` fits the spatial, nuisance, and
    event model.
+3. ``03_circular_variables`` fits head direction cells with a cyclic basis.
 
 Every dataset has its own seed. A notebook can therefore run on its own and
 produce the same numbers on every run.
@@ -18,6 +19,9 @@ import scipy.stats as sts
 
 SEED_TUNING = 20260925
 SEED_TEMPORAL = 20260926
+# The jump of a non-cyclic fit at the wrap point varies a lot from seed to
+# seed. With this seed, its size is close to the median over seeds.
+SEED_HEAD_DIRECTION = 20260930
 
 TIME_BIN = 0.01
 
@@ -185,4 +189,88 @@ def make_temporal_dataset(
         true_rate=true_rate,
         event_kernel=event_kernel,
         time_bin=TIME_BIN,
+    )
+
+
+# Expected spike count of every head direction cell far from its preferred
+# direction, and the height of its peak above that baseline.
+HEAD_DIRECTION_BASELINE = 0.05
+HEAD_DIRECTION_PEAK = 0.6
+
+
+@dataclass
+class HeadDirectionCell:
+    """
+    Tuning parameters of one head direction cell.
+
+    A larger concentration gives a narrower peak.
+    """
+
+    name: str
+    preferred_direction_deg: float
+    concentration: float
+
+
+HEAD_DIRECTION_CELLS = (
+    HeadDirectionCell("sharp", preferred_direction_deg=90.0, concentration=8.0),
+    HeadDirectionCell("wide", preferred_direction_deg=160.0, concentration=1.5),
+)
+
+
+@dataclass
+class HeadDirectionData:
+    """Counts from head direction cells, one column per cell."""
+
+    cells: tuple
+    # Head direction in radians, in [-pi, pi).
+    angle: np.ndarray
+    # Spike counts, shape (n_samples, n_cells).
+    spikes: np.ndarray
+    # Expected spike count, shape (n_samples, n_cells).
+    true_count: np.ndarray
+    angle_grid: np.ndarray
+    # Expected spike count on the grid, shape (n_grid, n_cells).
+    true_count_grid: np.ndarray
+
+
+def head_direction_rate(angle, cell):
+    """
+    Ground-truth expected spike count of a head direction cell.
+
+    The peak has a von Mises shape and sits on top of a constant baseline. The
+    baseline makes the log-rate differ from a pure cosine, so a GLM with only
+    cos and sin features cannot fit it exactly.
+    """
+    preferred_direction = np.deg2rad(cell.preferred_direction_deg)
+    bump = np.exp(cell.concentration * (np.cos(angle - preferred_direction) - 1))
+    return HEAD_DIRECTION_BASELINE + HEAD_DIRECTION_PEAK * bump
+
+
+def make_head_direction_data(
+    n_samples=1000,
+    cells=HEAD_DIRECTION_CELLS,
+    seed=SEED_HEAD_DIRECTION,
+):
+    """
+    Build counts from head direction cells, all recorded at the same angles.
+
+    This is the dataset of the ``03_circular_variables`` notebook. Each sample
+    has an angle drawn uniformly around the circle.
+    """
+    rng = np.random.default_rng(seed)
+    angle = rng.uniform(-np.pi, np.pi, n_samples)
+    true_count = np.stack([head_direction_rate(angle, cell) for cell in cells], axis=1)
+    spikes = rng.poisson(true_count)
+
+    angle_grid = np.linspace(-np.pi, np.pi, 361)
+    true_count_grid = np.stack(
+        [head_direction_rate(angle_grid, cell) for cell in cells], axis=1
+    )
+    return HeadDirectionData(
+        cells=cells,
+        angle=angle,
+        spikes=spikes,
+        true_count=true_count,
+        angle_grid=angle_grid,
+        true_count_grid=true_count_grid,
     )

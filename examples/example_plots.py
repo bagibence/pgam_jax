@@ -620,3 +620,190 @@ def plot_predicted_and_true_rate(data, predicted_rate, n_bins=300):
     ax.set(xlabel="Time (s)", ylabel="Rate (spikes/s)")
     ax.legend(loc="upper left", bbox_to_anchor=(1, 1), frameon=False)
     return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# 03_circular_variables
+# ---------------------------------------------------------------------------
+
+
+def _close_circle(angle, values):
+    """Repeat the first point at the end, so that a line on a polar axis closes."""
+    return np.append(angle, angle[0]), np.append(values, values[0])
+
+
+def _binned_mean_count(angle, counts, n_angle_bins):
+    """
+    Average the spike counts inside bins of head direction.
+
+    Return the bin centers in radians and the mean count in each bin.
+    """
+    mean_count, edges, _ = binned_statistic(
+        angle, counts, "mean", bins=n_angle_bins, range=(-np.pi, np.pi)
+    )
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    return centers, mean_count
+
+
+def plot_head_direction_tuning(data, fitted_count_grid=None, n_angle_bins=36):
+    """
+    Draw the tuning of each cell, on a line in the top row and on a circle below.
+
+    Each column holds one cell. Every panel shows the binned mean count and the
+    true tuning curve. The top panels also mark the angle of each spike with a
+    tick along the bottom. Pass ``fitted_count_grid``, the expected count with
+    shape ``(n_grid, n_cells)``, to add the fitted tuning curves.
+
+    Return the figure and its axes ``ax``, an array of shape ``(2, n_cells)``.
+    """
+    n_cells = len(data.cells)
+    fig = plt.figure(figsize=(4.5 * n_cells, 8.0), constrained_layout=True)
+    grid = fig.add_gridspec(2, n_cells, height_ratios=[1.0, 1.3])
+    grid_deg = np.rad2deg(data.angle_grid)
+    ax = np.empty((2, n_cells), dtype=object)
+
+    # One tab10 color per cell. More than 10 cells raise an IndexError.
+    cell_colors = plt.get_cmap("tab10").colors
+    for column, cell in enumerate(data.cells):
+        color = cell_colors[column]
+        line_ax = fig.add_subplot(grid[0, column])
+        circle_ax = fig.add_subplot(grid[1, column], projection="polar")
+        ax[:, column] = line_ax, circle_ax
+
+        centers, binned_count = _binned_mean_count(
+            data.angle, data.spikes[:, column], n_angle_bins
+        )
+        true_count = data.true_count_grid[:, column]
+
+        line_ax.plot(
+            np.rad2deg(centers),
+            binned_count,
+            color=GRAY,
+            marker="o",
+            markersize=5,
+            linewidth=1.5,
+            label="Binned mean count",
+        )
+        line_ax.plot(
+            grid_deg,
+            true_count,
+            color="black",
+            linestyle="--",
+            linewidth=2.4,
+            label="True tuning curve",
+        )
+        spike_angles = np.repeat(data.angle, data.spikes[:, column])
+        line_ax.plot(
+            np.rad2deg(spike_angles),
+            np.zeros_like(spike_angles),
+            linestyle="none",
+            marker="|",
+            markersize=14,
+            color=color,
+            alpha=0.4,
+            label="Spike angles",
+        )
+
+        circle_ax.plot(
+            *_close_circle(centers, binned_count), color=GRAY, marker="o", markersize=4
+        )
+        circle_ax.plot(data.angle_grid, true_count, color="black", linestyle="--")
+
+        if fitted_count_grid is not None:
+            fitted_count = np.asarray(fitted_count_grid)[:, column]
+            line_ax.plot(grid_deg, fitted_count, color=color, linewidth=3, label="PGAM")
+            circle_ax.plot(data.angle_grid, fitted_count, color=color, linewidth=3)
+
+        line_ax.set(
+            xlabel="Head direction (deg)",
+            xticks=np.arange(-180, 181, 90),
+            xlim=(-185, 185),
+            title=f"{cell.name.capitalize()} cell",
+        )
+        circle_ax.set_rlabel_position(-22.5)
+        circle_ax.yaxis.set_major_locator(plt.MaxNLocator(3))
+        circle_ax.tick_params(labelsize=11)
+
+    ax[0, 0].set_ylabel("Expected count")
+    ax[0, 0].legend(loc="upper left", frameon=False, fontsize=11)
+    return fig, ax
+
+
+def _unroll_around_wrap_point(grid_deg, values):
+    """
+    Split a curve on [-180, 180] into two pieces that meet at 180 deg.
+
+    The first piece covers [120, 180]. The second piece covers [-180, -120],
+    moved by 360 deg to [180, 240]. Drawn side by side, the two pieces show the
+    curve on both sides of the wrap point. Return two (x, values) pairs.
+    """
+    before = grid_deg >= 120
+    after = grid_deg <= -120
+    return (grid_deg[before], values[before]), (grid_deg[after] + 360, values[after])
+
+
+def plot_cyclic_and_noncyclic_smooths(
+    angle_grid, true_log_rate, cyclic_smooth, noncyclic_smooth
+):
+    """
+    Draw a cyclic and a non-cyclic smooth of one cell, with their truth.
+
+    The left panel shows the full circle, from -180 to 180 deg. The right panel
+    centers the view on the wrap point at 180 deg, where the two ends of the
+    left panel meet. Each ``*_smooth`` argument is the ``(mean, low, high)``
+    triple that ``GAM.smooth_compute`` returns.
+    """
+    grid_deg = np.rad2deg(angle_grid)
+    # smooth_compute centers each smooth on the grid. Center the truth the same
+    # way, so that the curves compare directly.
+    true_centered = true_log_rate - np.mean(true_log_rate)
+
+    curves = [
+        ("Cyclic B-spline", ORANGE, cyclic_smooth),
+        ("B-spline", PURPLE, noncyclic_smooth),
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(15.0, 5.0), constrained_layout=True)
+    full_ax, wrap_ax = axes
+
+    full_ax.plot(
+        grid_deg,
+        true_centered,
+        color="black",
+        linestyle="--",
+        linewidth=2.4,
+        label="Truth",
+    )
+    for label, color, (mean, low, high) in curves:
+        mean, low, high = (np.asarray(part) for part in (mean, low, high))
+        full_ax.plot(grid_deg, mean, color=color, linewidth=2.7, label=label)
+        full_ax.fill_between(grid_deg, low, high, color=color, alpha=0.2)
+    full_ax.set(
+        xlabel="Head direction (deg)",
+        ylabel="Contribution to log-rate",
+        xticks=np.arange(-180, 181, 90),
+        title="Full circle",
+    )
+    full_ax.legend(frameon=False, fontsize=12)
+
+    wrap_ax.axvline(180, color=GRAY, linestyle=":", linewidth=1.6)
+    for piece_x, piece_true in _unroll_around_wrap_point(grid_deg, true_centered):
+        wrap_ax.plot(piece_x, piece_true, color="black", linestyle="--", linewidth=2.4)
+    for label, color, (mean, low, high) in curves:
+        mean, low, high = (np.asarray(part) for part in (mean, low, high))
+        mean_pieces = _unroll_around_wrap_point(grid_deg, mean)
+        low_pieces = _unroll_around_wrap_point(grid_deg, low)
+        high_pieces = _unroll_around_wrap_point(grid_deg, high)
+        for (x, piece_mean), (_, piece_low), (_, piece_high) in zip(
+            mean_pieces, low_pieces, high_pieces
+        ):
+            wrap_ax.plot(x, piece_mean, color=color, linewidth=2.7)
+            wrap_ax.fill_between(x, piece_low, piece_high, color=color, alpha=0.2)
+    wrap_ax.set(
+        xlabel="Head direction (deg)",
+        xticks=[120, 150, 180, 210, 240],
+        xticklabels=["120", "150", "180 = -180", "-150", "-120"],
+        title="Zoom on the wrap point",
+    )
+
+    return fig
