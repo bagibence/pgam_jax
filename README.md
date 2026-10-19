@@ -15,9 +15,6 @@ Tested on Linux, macOS, and Windows.
 JAX's docs list Windows as both [supported](https://docs.jax.dev/en/latest/installation.html#supported-platforms) and [experimental](https://docs.jax.dev/en/latest/installation.html#pip-installation-cpu).
 If you have problems on native Windows, try [WSL](https://learn.microsoft.com/windows/wsl/).
 
-On Windows, jax/jaxlib 0.10.x together with SciPy 1.18 crashes in batched `eigh` with an "access violation".
-For this reason, `pgam_jax` requires `jax>=0.11`.
-
 ### Add `pgam_jax` to your analysis project
 
 `pgam_jax` is not on PyPI. You can install it from GitHub.
