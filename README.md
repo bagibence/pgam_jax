@@ -18,36 +18,96 @@ If you have problems on native Windows, try [WSL](https://learn.microsoft.com/wi
 On Windows, jax/jaxlib 0.10.x together with SciPy 1.18 crashes in batched `eigh` with an "access violation".
 For this reason, `pgam_jax` requires `jax>=0.11`.
 
-### Fresh install
+### Add `pgam_jax` to your analysis project
+
+`pgam_jax` is not on PyPI. You can install it from GitHub.
+
+#### Projects with a `pyproject.toml`
+
+If you use [uv](https://docs.astral.sh/uv/), run this command in your project folder:
 
 ```bash
-uv sync
+uv add git+https://github.com/bagibence/pgam_jax.git
 ```
 
-For local development and comparisons against the original implementation:
+Without uv, add `pgam_jax` to the `dependencies` list in your `pyproject.toml`:
 
-```bash
-uv sync --extra dev
+```toml
+[project]
+dependencies = [
+    "pgam_jax @ git+https://github.com/bagibence/pgam_jax.git",
+]
 ```
 
-For notebook-based experimentation:
+Then install your project again, for example with `pip install -e .`.
+
+#### Conda environments
+
+Activate your environment, then install with pip:
 
 ```bash
-uv sync --extra dev --extra notebooks
+conda activate my-analysis-env
+pip install git+https://github.com/bagibence/pgam_jax.git
 ```
 
-### Existing environment
+To make the environment reproducible, add `pgam_jax` to the `pip` section of your `environment.yml`:
 
-If you'd rather install into an existing environment:
-
-```bash
-pip install -e .
+```yaml
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - git+https://github.com/bagibence/pgam_jax.git
 ```
 
-To include the development and notebook extras:
+### Install from a local clone
+
+Use a local clone to read or change the `pgam_jax` source code.
+
+Clone the repository:
 
 ```bash
-pip install -e ".[dev,notebooks]"
+git clone https://github.com/bagibence/pgam_jax.git
+```
+
+#### Projects with a `pyproject.toml`
+
+If you use uv, run this command in your project folder:
+
+```bash
+uv add --editable /path/to/pgam_jax
+```
+
+uv writes the path into your `pyproject.toml`. You can also write it yourself:
+
+```toml
+[project]
+dependencies = [
+    "pgam_jax",
+]
+
+[tool.uv.sources]
+pgam_jax = { path = "../pgam_jax", editable = true }
+```
+
+Then run `uv sync`.
+A relative path, for example `../pgam_jax`, is relative to the folder of your `pyproject.toml`.
+
+To include the development and notebook extras, add `--extra dev --extra notebooks` to the `uv add` command.
+
+#### Conda environments
+
+Activate your environment, then install the clone with pip:
+
+```bash
+conda activate my-analysis-env
+pip install -e /path/to/pgam_jax
+```
+
+To include the development and notebook extras, add them after the path:
+
+```bash
+pip install -e "/path/to/pgam_jax[dev,notebooks]"
 ```
 
 ## Quick Start
@@ -59,6 +119,7 @@ To see how to use model temporal responses, see `examples/quick_start_temporal.i
 
 For a worked example of dropping empty basis columns, see `examples/island_column_masking.ipynb`. It fits a 2-D place field on data that covers only part of the arena.
 
+The quickest way to install `pgam_jax` into a fresh environment is using [uv](https://docs.astral.sh/uv/getting-started/installation/):
 Install with the required dependencies, then launch Jupyter Lab:
 ```bash
 uv sync --extra dev --extra notebooks
