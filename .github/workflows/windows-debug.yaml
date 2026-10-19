@@ -1,0 +1,70 @@
+name: windows-debug
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci_on_windows
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash  # Git Bash. Avoids PowerShell syntax.
+    env:
+      TEST_ID: tests/test_penalty_handler.py::TestJIT::test_vmap_groups_all_methods
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: true
+          cache-suffix: "v2"
+
+      - name: Install
+        run: uv sync --locked --extra dev
+
+      - name: Single test, 20 times, no xdist
+        run: |
+          fails=0
+          for i in $(seq 1 20); do
+            uv run --locked --extra dev pytest -p no:xdist -q "$TEST_ID" || fails=$((fails+1))
+          done
+          echo "$fails / 20 runs failed"
+          [ "$fails" -eq 0 ]
+
+      - name: Whole file, no xdist
+        if: always()
+        run: uv run --locked --extra dev pytest -p no:xdist -q tests/test_penalty_handler.py
+
+      - name: Single test in a 256 MB stack thread, 20 times
+        if: always()
+        run: |
+          cat > big_stack.py <<'EOF'
+          import sys
+          import threading
+
+          import pytest
+
+          threading.stack_size(256 * 1024 * 1024)
+          result = []
+          t = threading.Thread(target=lambda: result.append(pytest.main(sys.argv[1:])))
+          t.start()
+          t.join()
+          sys.exit(result[0] if result else 1)
+          EOF
+          fails=0
+          for i in $(seq 1 20); do
+            uv run --locked --extra dev python big_stack.py -p no:xdist -q "$TEST_ID" || fails=$((fails+1))
+          done
+          echo "$fails / 20 runs failed"
+          [ "$fails" -eq 0 ]
