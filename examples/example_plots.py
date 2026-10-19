@@ -146,6 +146,9 @@ def plot_inputs_and_counts_over_time(data, n_bins=2000):
     The three input panels sit on a tinted background. The spike panel sits
     below a gap, on a white background. The split separates what the
     experiment measured from what the neuron did.
+
+    Return the figure and its axes: the three input panels, then the spike
+    panel.
     """
     window = slice(0, n_bins)
     time_axis = np.arange(data.y.size)[window] * data.time_bin
@@ -189,7 +192,7 @@ def plot_inputs_and_counts_over_time(data, n_bins=2000):
     spike_ax.set_title("Output: what the neuron did", fontsize=14)
 
     fig.align_ylabels(axes)
-    return fig
+    return fig, np.array(axes)
 
 
 def _mean_count_by_value(counts, values, n_value_bins):
@@ -259,6 +262,8 @@ def plot_binned_tuning(
     the position tuning, although the nuisance input has no effect. Events
     that fall close together share part of their window, so their responses
     add up in the bottom panel. The model separates both. This figure does not.
+
+    Return the figure and its axes: position, nuisance, then event.
     """
     fig = plt.figure(figsize=(13.0, 7.6), constrained_layout=True)
     grid = fig.add_gridspec(2, 2, height_ratios=[1.0, 0.9])
@@ -325,7 +330,7 @@ def plot_binned_tuning(
     )
     event_ax.legend(frameon=False, fontsize=12)
 
-    return fig
+    return fig, np.array([spatial_ax, nuisance_ax, event_ax])
 
 
 def plot_design_blocks(basis, data, n_rows=400):
@@ -336,6 +341,8 @@ def plot_design_blocks(basis, data, n_rows=400):
     ``EVENT_WINDOW_SIZE`` rows of the event block are NaN, drawn in orange.
     A convolution needs a full window of past samples, so those rows have no
     value.
+
+    Return the figure and its axis.
     """
     design = np.asarray(
         basis.compute_features(data.position, data.nuisance, data.events)
@@ -370,7 +377,7 @@ def plot_design_blocks(basis, data, n_rows=400):
     top_axis.tick_params(length=0)
 
     fig.colorbar(image, ax=ax, label="Feature value")
-    return fig
+    return fig, ax
 
 
 def _find_isolated_events(data, n_events=3, length=600):
@@ -399,6 +406,8 @@ def plot_true_effects(data, value_grid):
     input. The bottom row holds the event effect, which acts over time. It
     shows three events, one copy of the true response under each, and their
     sum. ``plot_binned_tuning`` repeats this layout with summaries of the data.
+
+    Return the figure and its axes: position, nuisance, then event.
     """
     true_position = spatial_effect(value_grid)
 
@@ -459,7 +468,7 @@ def plot_true_effects(data, value_grid):
     handles, labels = event_ax.get_legend_handles_labels()
     event_ax.legend(handles[-2:], labels[-2:], frameon=False, fontsize=12)
 
-    return fig
+    return fig, np.array([spatial_ax, nuisance_ax, event_ax])
 
 
 def plot_recovered_smooths(
@@ -476,6 +485,8 @@ def plot_recovered_smooths(
 
     Each ``*_smooth`` argument is the ``(mean, low, high)`` triple that
     ``GAM.smooth_compute`` returns.
+
+    Return the figure and its axes: position, nuisance, then event.
     """
     position_mean, position_low, position_high = position_smooth
     nuisance_mean, nuisance_low, nuisance_high = nuisance_smooth
@@ -563,7 +574,7 @@ def plot_recovered_smooths(
     for ax in axes:
         ax.legend(frameon=False, fontsize=12)
 
-    return fig
+    return fig, axes
 
 
 def plot_predicted_and_true_rate(data, predicted_rate, n_bins=300):
@@ -572,6 +583,8 @@ def plot_predicted_and_true_rate(data, predicted_rate, n_bins=300):
 
     ``predicted_rate`` is in spikes per second, with one value per time bin of
     the recording. Dashed vertical lines mark the events.
+
+    Return the figure and its axis.
     """
     window = slice(0, n_bins)
     time_axis = np.arange(data.y.size)[window] * data.time_bin
@@ -606,4 +619,4 @@ def plot_predicted_and_true_rate(data, predicted_rate, n_bins=300):
     )
     ax.set(xlabel="Time (s)", ylabel="Rate (spikes/s)")
     ax.legend(loc="upper left", bbox_to_anchor=(1, 1), frameon=False)
-    return fig
+    return fig, ax

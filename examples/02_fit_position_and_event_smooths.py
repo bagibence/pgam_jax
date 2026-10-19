@@ -15,6 +15,12 @@
 # %% [markdown]
 # # Single neuron with 3 types of inputs
 #
+# In this notebook, we show how to model a neuron’s responses to multiple inputs with a GAM, including responses that unfold over time after an event.
+#
+# Recorded variables often vary together, especially in naturalistic experiments. For example, an animal may move more slowly near the ends of a linear maze and faster near the center. A neuron tuned to position can then appear tuned to speed as well. Looking at each variable separately may therefore give a misleading picture of what drives firing.
+#
+# We use simulated data to explore whether the model can separate the contributions of strongly correlated inputs and recover temporal responses when nearby events overlap.
+#
 # We simulate a synthetic neuron with three recorded inputs:
 #
 # * Position $x_t$ drives the firing rate through a curved tuning function $f_{\mathrm{pos}}$.
@@ -73,8 +79,7 @@ print(f"Time bins: {data.y.size}")
 print(f"Events: {int(data.events.sum())}")
 print(f"Total spikes: {int(data.y.sum())}")
 
-fig = plot_inputs_and_counts_over_time(data)
-plt.show()
+fig, ax = plot_inputs_and_counts_over_time(data)
 
 # %% [markdown]
 # ## What the model must recover
@@ -84,27 +89,27 @@ plt.show()
 # %%
 value_grid = np.linspace(-2.0, 2.0, 400)
 
-fig = plot_true_effects(data, value_grid)
-plt.show()
+fig, ax = plot_true_effects(data, value_grid)
 
 # %% [markdown]
 # ### Initial analysis
 #
-# For position and nuisance: average spikes per input value to get an estimate of the tuning curve.
-# Position has a clear effect. As it is correlated to position, the nuisance input also seems to, even though we know it does not influence firing.
+# The figure shows marginal tuning curves for position and the nuisance input, and a peri-event time histogram (PSTH) for the events. Each summarizes firing relative to one input without accounting for the others.
 #
-# The events act over time, so calculate an event-triggered average: cut the recording around each event and average those pieces.
-# It shows a rise, a peak near 250 ms, and a decay back to the baseline.
+# For position and the nuisance input, we average spike counts within each input-value bin to estimate the tuning curves.
+# Firing varies clearly with position. In this example, we know that the nuisance input does not influence firing. Because it is strongly correlated with position, firing appears to vary with the nuisance input as well.
 #
-# This figure is the raw version of what the model must recover.
-# The model does more.
-# Events that fall close together share part of their window, and
-# their responses add up here.
-# The model separates them, and it separates them from the effect of position at the same time.
+# The events act over time, so we calculate an event-triggered average: cut the recording around each event and average those pieces.
+# It shows a rise, a peak near 250 ms, and a decay back to the baseline. However, note from the previous plot that events that fall close together share part of their window, and their responses add up. This average cannot separate those contributions.
+#
+# We would like modeling to help us here and our model to do what these marginal statistics cannot do:
+#
+# 1. Isolate the actual effect of position and events.
+# 2. Disentangle the contribution of events close in time.
+# 3. Infer that the nuisance variable does not actually influence firing rate and here it only appears to because of its correlation with position.
 
 # %%
-fig = plot_binned_tuning(data)
-plt.show()
+fig, ax = plot_binned_tuning(data)
 
 # %% [markdown]
 # ## Fit the model
@@ -158,8 +163,7 @@ design = full_basis.compute_features(data.position, data.nuisance, data.events)
 print(f"Design matrix shape: {design.shape}")
 
 # %%
-fig = plot_design_blocks(full_basis, data)
-plt.show()
+fig, ax = plot_design_blocks(full_basis, data)
 
 # %% [markdown]
 # ### Create the GAM
@@ -187,9 +191,7 @@ gam = GAM(
 # The `para` row is the intercept.
 
 # %%
-concurvity_df = gam.concurvity(
-    (data.position, data.nuisance, data.events), as_dataframe=True
-)
+concurvity_df = gam.concurvity((data.position, data.nuisance, data.events), as_dataframe=True)
 concurvity_df.style.format("{:.2f}")
 
 # %% [markdown]
@@ -293,7 +295,7 @@ print(position_smooth[1].shape)  # lower
 print(position_smooth[2].shape)  # upper
 
 # %%
-fig = plot_recovered_smooths(
+fig, ax = plot_recovered_smooths(
     data,
     value_grid,
     position_smooth,
@@ -302,7 +304,6 @@ fig = plot_recovered_smooths(
     impulse,
     event_time_ms,
 )
-plt.show()
 
 # %% [markdown]
 # Note that on these plots, the spatial and nuisance curves have mean zero over `value_grid`, and the event curves are shifted to be zero before the event.
@@ -320,9 +321,6 @@ plt.show()
 
 # %%
 # Divide by the bin width to convert the count per bin to spikes/s.
-predicted_rate = (
-    gam.predict((data.position, data.nuisance, data.events)) / data.time_bin
-)
+predicted_rate = gam.predict((data.position, data.nuisance, data.events)) / data.time_bin
 
-fig = plot_predicted_and_true_rate(data, predicted_rate)
-plt.show()
+fig, ax = plot_predicted_and_true_rate(data, predicted_rate)
