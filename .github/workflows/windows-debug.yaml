@@ -11,11 +11,10 @@ on:
 jobs:
   repro:
     runs-on: windows-latest
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash  # Git Bash. Avoids PowerShell syntax.
-    env:
-      TEST_ID: tests/test_penalty_handler.py::TestJIT::test_vmap_groups_all_methods
     steps:
       - uses: actions/checkout@v6
         with:
@@ -33,38 +32,31 @@ jobs:
       - name: Install
         run: uv sync --locked --extra dev
 
-      - name: Single test, 20 times, no xdist
+      - name: Run each repro case in its own process
+        timeout-minutes: 40
         run: |
-          fails=0
-          for i in $(seq 1 20); do
-            uv run --locked --extra dev pytest -p no:xdist -q "$TEST_ID" || fails=$((fails+1))
+          script=.github/debug/windows_crash_repro.py
+          # Python on Windows prints CRLF. Strip the CR so the names match.
+          cases=$(uv run --locked --extra dev python "$script" --list | tr -d '\r')
+          summary=""
+          failed=0
+          # pgam_jax forces x64 on import, so only the jax_ cases run with x64=0.
+          for x64 in 1 0; do
+            for case in $cases; do
+              if [ "$x64" = 0 ] && [[ "$case" != jax_* ]]; then continue; fi
+              for i in 1 2; do
+                echo "::group::x64=$x64 $case run $i"
+                if JAX_ENABLE_X64=$x64 timeout 300 uv run --locked --extra dev python "$script" "$case"; then
+                  status=ok
+                else
+                  status="FAIL (exit $?)"
+                  failed=1
+                fi
+                echo "::endgroup::"
+                summary+="x64=$x64 $case run $i: $status"$'\n'
+              done
+            done
           done
-          echo "$fails / 20 runs failed"
-          [ "$fails" -eq 0 ]
-
-      - name: Whole file, no xdist
-        if: always()
-        run: uv run --locked --extra dev pytest -p no:xdist -q tests/test_penalty_handler.py
-
-      - name: Single test in a 256 MB stack thread, 20 times
-        if: always()
-        run: |
-          cat > big_stack.py <<'EOF'
-          import sys
-          import threading
-
-          import pytest
-
-          threading.stack_size(256 * 1024 * 1024)
-          result = []
-          t = threading.Thread(target=lambda: result.append(pytest.main(sys.argv[1:])))
-          t.start()
-          t.join()
-          sys.exit(result[0] if result else 1)
-          EOF
-          fails=0
-          for i in $(seq 1 20); do
-            uv run --locked --extra dev python big_stack.py -p no:xdist -q "$TEST_ID" || fails=$((fails+1))
-          done
-          echo "$fails / 20 runs failed"
-          [ "$fails" -eq 0 ]
+          echo "===== summary ====="
+          printf '%s' "$summary"
+          [ "$failed" -eq 0 ]
