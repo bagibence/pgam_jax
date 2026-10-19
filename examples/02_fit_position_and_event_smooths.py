@@ -191,7 +191,9 @@ gam = GAM(
 # The `para` row is the intercept.
 
 # %%
-concurvity_df = gam.concurvity((data.position, data.nuisance, data.events), as_dataframe=True)
+concurvity_df = gam.concurvity(
+    (data.position, data.nuisance, data.events), as_dataframe=True
+)
 concurvity_df.style.format("{:.2f}")
 
 # %% [markdown]
@@ -321,6 +323,8 @@ fig, ax = plot_recovered_smooths(
 
 # %%
 # Divide by the bin width to convert the count per bin to spikes/s.
-predicted_rate = gam.predict((data.position, data.nuisance, data.events)) / data.time_bin
+predicted_rate = (
+    gam.predict((data.position, data.nuisance, data.events)) / data.time_bin
+)
 
 fig, ax = plot_predicted_and_true_rate(data, predicted_rate)

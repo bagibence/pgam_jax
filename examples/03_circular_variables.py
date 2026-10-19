@@ -159,7 +159,9 @@ noncyclic_smooth = noncyclic_gam.smooth_compute(data.angle_grid, "head direction
 # %%
 true_log_rate = np.log(data.true_count_grid[:, wide_column])
 
-fig = plot_cyclic_and_noncyclic_smooths(data.angle_grid, true_log_rate, cyclic_smooth, noncyclic_smooth)
+fig = plot_cyclic_and_noncyclic_smooths(
+    data.angle_grid, true_log_rate, cyclic_smooth, noncyclic_smooth
+)
 
 # %% [markdown]
 # The right panel centers the view on ±180°, bringing the two ends of the left panel together.
