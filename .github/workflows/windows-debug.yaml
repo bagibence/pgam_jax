@@ -60,3 +60,49 @@ jobs:
           echo "===== summary ====="
           printf '%s' "$summary"
           [ "$failed" -eq 0 ]
+
+  # Each cell runs only jax and numpy in a fresh environment, without the
+  # project. A red cell means that the version pair crashes.
+  versions:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        jax: ['0.8.2', '0.9.2', '0.10.0', '0.10.2', '0.11.2']
+        scipy: ['1.17.1', '1.18.1']
+      fail-fast: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      JAX_ENABLE_X64: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: true
+          cache-suffix: "v2"
+
+      - name: Single matrix eigh
+        timeout-minutes: 5
+        run: >
+          uv run --no-project --isolated --python 3.12
+          --with jax==${{ matrix.jax }} --with jaxlib==${{ matrix.jax }}
+          --with scipy==${{ matrix.scipy }}
+          python .github/debug/windows_crash_repro.py jax_eigh_single
+
+      - name: Batched eigh
+        if: always()
+        timeout-minutes: 5
+        run: >
+          uv run --no-project --isolated --python 3.12
+          --with jax==${{ matrix.jax }} --with jaxlib==${{ matrix.jax }}
+          --with scipy==${{ matrix.scipy }}
+          python .github/debug/windows_crash_repro.py jax_eigh_vmap

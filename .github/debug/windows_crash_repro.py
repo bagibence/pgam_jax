@@ -120,6 +120,11 @@ def _weighted_sums():
     return jnp.stack([jnp.einsum("i,ijk->jk", jnp.exp(r), FULL_RANK_S) for r in RHOS])
 
 
+def case_jax_eigh_single():
+    """eigh on one (96, 96) matrix. Control case for jax_eigh_vmap."""
+    return jnp.linalg.eigh(_weighted_sums()[0])
+
+
 def case_jax_eigh_vmap():
     """vmap of eigh on a (2, 96, 96) batch."""
     return jax.vmap(jnp.linalg.eigh)(_weighted_sums())
