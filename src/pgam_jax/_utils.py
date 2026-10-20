@@ -1,13 +1,16 @@
 """General JAX utilities shared across modules."""
 
+from __future__ import annotations
+
 import warnings
 from functools import wraps
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
+from jaxtyping import PyTree
 from nemos.observation_models import (
     GammaObservations,
     GaussianObservations,
@@ -17,7 +20,10 @@ from nemos.observation_models import (
 from nemos.tree_utils import pytree_map_and_reduce
 from nemos.type_casting import cast_to_pynapple, get_time_info, is_pynapple_tsd
 
-from ._typing import JaxFloatMatrix
+from ._typing import InputArray, JaxFloatMatrix
+
+if TYPE_CHECKING:
+    from pynapple import Tsd, TsdFrame, TsdTensor
 
 
 def elementwise_derivative(f):
@@ -132,8 +138,15 @@ def to_zero_dim_jax_array(x: ArrayLike) -> jax.Array:
     return jnp.reshape(jnp.asarray(x), ())
 
 
-def cast_output_like_inputs(out, xi):
-    """Wrap out in pynapple objects with the time info of xi, if xi holds any."""
+def cast_output_like_inputs(
+    out: PyTree[jax.Array], xi: tuple[InputArray, ...]
+) -> PyTree[jax.Array | Tsd | TsdFrame | TsdTensor]:
+    """
+    Wrap output arrays in pynapple objects with the time info of xi, if xi holds any.
+
+    An array whose length is not the number of time points stays unchanged.
+    Without pynapple inputs, ``out`` is returned unchanged.
+    """
     if not pytree_map_and_reduce(is_pynapple_tsd, any, xi):
         return out
     time, time_support = get_time_info(*xi)

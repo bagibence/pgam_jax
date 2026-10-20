@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 
 import jax
 import jax.numpy as jnp
@@ -24,7 +24,6 @@ from nemos.glm.initialize_parameters import (
 from nemos.observation_models import Observations, PoissonObservations
 from nemos.type_casting import all_same_time_info
 from nemos.validation import check_same_shape_on_axis
-from numpy.typing import ArrayLike
 from scipy import stats as sts
 
 from ._identifiable_features import (
@@ -48,7 +47,7 @@ from ._p_values import weighted_chisq_pval
 from ._penalty_handler import PenaltyHandler
 from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
-from ._typing import JaxFloatScalar
+from ._typing import InputArray, JaxFloatScalar, ResponseArray
 from ._utils import (
     cast_output_like_inputs,
     prepend_ones_for_intercept,
@@ -76,6 +75,9 @@ from .penalty_utils import (
     identifiability_square_fns_per_component,
     prepend_zeros_for_intercept,
 )
+
+if TYPE_CHECKING:
+    from pynapple import Tsd
 
 SupportedBSplineBasis = (
     BSplineEval
@@ -653,7 +655,7 @@ class GAM:
 
     def _compute_raw_design_matrix(
         self,
-        inputs: tuple[ArrayLike, ...],
+        inputs: tuple[InputArray, ...],
         infos: tuple[BasisComponentInfo, ...],
     ) -> jnp.ndarray:
         """
@@ -669,7 +671,7 @@ class GAM:
 
     def _prepare_design_matrix(
         self,
-        inputs: tuple[ArrayLike, ...],
+        inputs: tuple[InputArray, ...],
         y: jnp.ndarray | None = None,
     ) -> tuple[jnp.ndarray, tuple[BasisComponentInfo, ...]]:
         """
@@ -704,7 +706,7 @@ class GAM:
 
     def _fit_design_matrix(
         self,
-        inputs: tuple[ArrayLike, ...],
+        inputs: tuple[InputArray, ...],
         y: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, tuple[BasisComponentInfo, ...], jnp.ndarray]:
         """
@@ -727,7 +729,7 @@ class GAM:
 
     def _transform_design_matrix_with_policy(
         self,
-        inputs: tuple[ArrayLike, ...],
+        inputs: tuple[InputArray, ...],
     ) -> jnp.ndarray:
         """
         Build a row-preserving design using the fitted NaN policy.
@@ -952,10 +954,11 @@ class GAM:
         # if component is an index
         return infos[component]
 
-    def _validate_xi(self, xi: tuple[ArrayLike, ...], fname: str) -> None:
+    def _validate_xi(self, xi: tuple[InputArray, ...], fname: str) -> None:
         """
         Check that the inputs are a tuple of aligned samples.
 
+        pynapple inputs must also have the same time axis and time support.
         ``fname`` names the public method in the warnings.
         """
         if not isinstance(xi, tuple):
@@ -980,11 +983,12 @@ class GAM:
         )
 
     def _validate_y(
-        self, xi: tuple[ArrayLike, ...], y: ArrayLike, fname: str
+        self, xi: tuple[InputArray, ...], y: ResponseArray, fname: str
     ) -> jnp.ndarray:
         """
         Check that y is aligned with the inputs and return it as a float array.
 
+        A pynapple y must have the time axis and time support of the pynapple inputs.
         Call ``_validate_xi`` on ``xi`` first.
         ``fname`` names the public method in the warnings.
         """
@@ -1015,12 +1019,12 @@ class GAM:
         # this dtype. Mixed dtypes crash the jaxopt GLM init, so convert.
         return y.astype(float)
 
-    # TODO: Should annotate to include pynapple objects for elements of xi and y,
-    # then have a clear boundary where everything is jax arrays.
+    # TODO: Have a clear boundary where everything is jax arrays. pynapple inputs
+    # must reach the basis to keep the per-epoch convolution.
     def fit(
         self,
-        xi: tuple[ArrayLike, ...],
-        y: ArrayLike,
+        xi: tuple[InputArray, ...],
+        y: ResponseArray,
         init_params: tuple[jnp.ndarray, jnp.ndarray] | None = None,
         init_regularizer_strength: list[jnp.ndarray] | None = None,
     ) -> GAM:
@@ -1030,10 +1034,14 @@ class GAM:
         Parameters
         ----------
         xi :
-            Input arrays, one per input dimension of the basis.
+            Input arrays, one per input dimension of the basis. Inputs can be
+            pynapple time series. All pynapple inputs must have the same time axis
+            and time support. A convolution basis then convolves each epoch of the
+            time support separately.
         y :
-            Response variable, shape ``(n_samples,)``. Rows containing NaNs
-            are omitted before centering and fitting.
+            Response variable, shape ``(n_samples,)``. Can be a pynapple ``Tsd``
+            with the time axis and time support of the pynapple inputs. Rows
+            containing NaNs are omitted before centering and fitting.
         init_params :
             Initial (coefficients, intercept).
             If None, coefficients start at zero and the intercept at ``link(mean(y))``
@@ -1133,7 +1141,7 @@ class GAM:
     def _predict(
         self,
         params: tuple[jnp.ndarray, jnp.ndarray],
-        xi: tuple[ArrayLike, ...],
+        xi: tuple[InputArray, ...],
     ) -> jnp.ndarray:
         """
         Compute predicted mean response for the given parameters and inputs.
@@ -1144,33 +1152,38 @@ class GAM:
             Model (coefficients, intercept).
         xi :
             Input arrays, one per input dimension of the basis.
+            Inputs can be pynapple time series.
 
         Returns
         -------
         :
             Predicted mean response (after applying the inverse link function),
             shape ``(n_samples,)``. With ``nan_handling="drop"``, entries at
-            design-invalid rows are NaN.
+            design-invalid rows are NaN. Always a jax array, also for pynapple
+            inputs.
         """
         w, b = params
         X = self._transform_design_matrix_with_policy(xi)
         return self.observation_model.default_inverse_link_function(X @ w + b)
 
-    def predict(self, xi: tuple[ArrayLike, ...]) -> jnp.ndarray:
+    def predict(self, xi: tuple[InputArray, ...]) -> jnp.ndarray | Tsd:
         """
         Predict the mean response for new inputs.
 
         Parameters
         ----------
         xi :
-            Input arrays, one per input dimension of the basis.
+            Input arrays, one per input dimension of the basis. Inputs can be
+            pynapple time series, as in ``fit``.
 
         Returns
         -------
         :
             Predicted mean response, shape ``(n_samples,)``. Prediction never
             removes rows; ``nan_handling="drop"`` produces NaN at rows whose
-            raw design contains a NaN.
+            raw design contains a NaN. If any input is a pynapple object, the
+            result is a ``Tsd`` with the time axis and time support of the
+            pynapple inputs. Otherwise it is a jax array.
         """
         self._validate_xi(xi, "GAM.predict")
 
@@ -1181,7 +1194,7 @@ class GAM:
 
     def concurvity(
         self,
-        xi: tuple[ArrayLike, ...],
+        xi: tuple[InputArray, ...],
         full: bool = True,
         as_dataframe: bool = False,
     ):
@@ -1233,7 +1246,7 @@ class GAM:
             dimension. After ``fit`` you almost always want to pass the
             training inputs; before ``fit``, pass the inputs you plan to
             train on (so the design matrix is the one the actual fit will
-            see).
+            see). Inputs can be pynapple time series, as in ``fit``.
         full :
             If ``True`` (default), decompose each term against the rest of
             the model. If ``False``, return pairwise concurvity between
@@ -1311,11 +1324,11 @@ class GAM:
     # TODO: Test against original implementation
     def smooth_compute(
         self,
-        xi: tuple[ArrayLike, ...],
+        xi: InputArray | tuple[InputArray, ...],
         component_index: int | str,
         perc: float = 0.95,
         se_with_mean: bool = True,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray] | tuple[Tsd, Tsd, Tsd]:
         """
         Evaluate one grid-centered smooth and confidence band.
 
@@ -1325,11 +1338,16 @@ class GAM:
         It is intentionally separate from ``predict``, which uses training
         centering.
 
+        If any input is a pynapple object, ``mean``, ``lower`` and ``upper`` are
+        each a ``Tsd`` with the time axis and time support of the pynapple inputs.
+        Otherwise they are jax arrays.
+
         Parameters
         ----------
         xi :
             Input arrays for the selected component, one per input dimension of
             that component. A single array is also accepted and wrapped in a tuple.
+            Inputs can be pynapple time series, as in ``fit``.
         component_index :
             Index or label of the smooth component to evaluate.
         perc :
@@ -1678,8 +1696,8 @@ class GAM:
 
     def score(
         self,
-        xi: tuple[ArrayLike, ...],
-        y: ArrayLike,
+        xi: tuple[InputArray, ...],
+        y: ResponseArray,
         aggregate_sample_scores: Callable = jnp.mean,
     ) -> jnp.ndarray:
         """
@@ -1688,11 +1706,13 @@ class GAM:
         Parameters
         ----------
         xi :
-            Input arrays, one per input dimension of the basis.
+            Input arrays, one per input dimension of the basis. Inputs can be
+            pynapple time series, as in ``fit``.
         y :
-            Observed response variable, shape ``(n_samples,)``. Rows with NaN
-            responses are omitted. With ``nan_handling="drop"``, rows whose
-            raw design contains a NaN are also omitted.
+            Observed response variable, shape ``(n_samples,)``. Can be a pynapple
+            ``Tsd`` with the time axis and time support of the pynapple inputs.
+            Rows with NaN responses are omitted. With ``nan_handling="drop"``,
+            rows whose raw design contains a NaN are also omitted.
         aggregate_sample_scores :
             Function to aggregate per-sample log-likelihoods. Default is ``jnp.mean``.
 
