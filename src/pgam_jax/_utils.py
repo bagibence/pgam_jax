@@ -94,7 +94,11 @@ def warn_if_x64_disabled(fname: str) -> None:
 
 
 def warn_if_not_float64(
-    fname: str, arrays: Mapping[str, ArrayLike], *, advice: str
+    fname: str,
+    arrays: Mapping[str, ArrayLike],
+    *,
+    advice: str,
+    stacklevel: int = 3,
 ) -> None:
     """
     Warn about each floating-point array whose dtype is not float64.
@@ -103,18 +107,21 @@ def warn_if_not_float64(
     Nothing is checked when x64 mode is off. In that case no array can be float64,
     and ``warn_if_x64_disabled`` already reports the cause.
     ``advice`` is appended to the message and tells the user what happens next.
+    ``stacklevel`` is passed to ``warnings.warn``. The default of 3 points to the
+    caller of the public method that calls this function directly. Add one for
+    each extra call level between them.
     """
     if not jax.config.jax_enable_x64:
         return
     for name, arr in arrays.items():
-        dtype = jnp.asarray(arr).dtype
+        dtype = arr.dtype if hasattr(arr, "dtype") else np.asarray(arr).dtype
         if jnp.issubdtype(dtype, jnp.floating) and dtype != np.float64:
             warnings.warn(
                 f"{fname}: {name} has dtype {dtype}, not float64. "
                 "pgam_jax relies on float64 precision and can give inaccurate "
                 f"results with {dtype} data. {advice}",
                 UserWarning,
-                stacklevel=3,
+                stacklevel=stacklevel,
             )
 
 
