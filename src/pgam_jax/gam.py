@@ -50,6 +50,7 @@ from ._pql_gcv import gcv_compute_factory
 from ._pql_reml import reml_compute_factory
 from ._typing import JaxFloatScalar
 from ._utils import (
+    cast_output_like_inputs,
     prepend_ones_for_intercept,
     scale_estimated,
     singular_value_keep_mask,
@@ -1172,8 +1173,11 @@ class GAM:
             raw design contains a NaN.
         """
         self._validate_xi(xi, "GAM.predict")
+
         params = (self.coef_, self.intercept_)
-        return self._predict(params, xi)
+        predicted = self._predict(params, xi)
+
+        return cast_output_like_inputs(predicted, xi)
 
     def concurvity(
         self,
@@ -1398,7 +1402,9 @@ class GAM:
         sigma2 = jnp.sum((X_se @ cov) * X_se, axis=1)
         se_y = jnp.sqrt(jnp.clip(sigma2, 0.0, jnp.inf))
         delta = se_y * sts.norm().ppf(1 - (1 - perc) * 0.5)
-        return mean_y, mean_y - delta, mean_y + delta
+
+        out = (mean_y, mean_y - delta, mean_y + delta)
+        return cast_output_like_inputs(out, xi)
 
     def _smooth_pval_unpenalized(self, component_index: int | str):
         """
