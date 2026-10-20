@@ -309,7 +309,6 @@ print(position_smooth[2].shape)  # upper
 
 # %%
 fig, ax = plot_recovered_smooths(
-    data,
     value_grid,
     position_smooth,
     nuisance_smooth,
