@@ -14,6 +14,8 @@ from nemos.observation_models import (
     Observations,
     PoissonObservations,
 )
+from nemos.tree_utils import pytree_map_and_reduce
+from nemos.type_casting import cast_to_pynapple, get_time_info, is_pynapple_tsd
 
 from ._typing import JaxFloatMatrix
 
@@ -128,6 +130,16 @@ def warn_if_not_float64(
 def to_zero_dim_jax_array(x: ArrayLike) -> jax.Array:
     """Turn `x` into a 0-dimensional jax array."""
     return jnp.reshape(jnp.asarray(x), ())
+
+
+def cast_output_like_inputs(out, xi):
+    """Wrap out in pynapple objects with the time info of xi, if xi holds any."""
+    if not pytree_map_and_reduce(is_pynapple_tsd, any, xi):
+        return out
+    time, time_support = get_time_info(*xi)
+    return jax.tree_util.tree_map(
+        lambda x: cast_to_pynapple(np.asarray(x), time, time_support), out
+    )
 
 
 def singular_value_keep_mask(
