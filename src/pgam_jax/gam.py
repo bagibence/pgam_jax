@@ -22,6 +22,8 @@ from nemos.glm.initialize_parameters import (
     initialize_intercept_matching_mean_rate,
 )
 from nemos.observation_models import Observations, PoissonObservations
+from nemos.type_casting import all_same_time_info
+from nemos.validation import check_same_shape_on_axis
 from numpy.typing import ArrayLike
 from scipy import stats as sts
 
@@ -949,11 +951,71 @@ class GAM:
         # if component is an index
         return infos[component]
 
-    # TODO: Do we need to take X in fit? or is this fine?
-    # TODO: Accept the initial regularizer_strength here or in the constructor?
-    # In the constructor it's tricky because it's derived from the penalty_tree, which would have to be calculated there
-    # (Although it could just be stashed in self for later.)
-    # it's optimized, so in that sense it's similar to params, and those are given here
+    def _validate_xi(self, xi: tuple[ArrayLike, ...], fname: str) -> None:
+        """
+        Check that the inputs are a tuple of aligned samples.
+
+        ``fname`` names the public method in the warnings.
+        """
+        if not isinstance(xi, tuple):
+            raise TypeError("Inputs xi have to be wrapped in a tuple.")
+
+        # only checks pynapple objects
+        if not all_same_time_info(*xi):
+            raise ValueError("Time axis mismatch. Inputs have mismatching time axis.")
+        # arrays pass through the previous check, so check the first dimension
+        check_same_shape_on_axis(
+            *xi,
+            axis=0,
+            err_message="All inputs need to have the same number of samples.",
+        )
+
+        # stacklevel 4: user -> public method -> _validate_xi -> warn_if_not_float64
+        warn_if_not_float64(
+            fname,
+            {f"xi[{i}]": x for i, x in enumerate(xi)},
+            advice="Cast the inputs to float64.",
+            stacklevel=4,
+        )
+
+    def _validate_y(
+        self, xi: tuple[ArrayLike, ...], y: ArrayLike, fname: str
+    ) -> jnp.ndarray:
+        """
+        Check that y is aligned with the inputs and return it as a float array.
+
+        Call ``_validate_xi`` on ``xi`` first.
+        ``fname`` names the public method in the warnings.
+        """
+        # only checks pynapple objects
+        if not all_same_time_info(*xi, y):
+            raise ValueError(
+                "Time axis mismatch. Inputs and outputs have mismatching time axis."
+            )
+        # arrays pass through the previous check, so check the first dimension
+        check_same_shape_on_axis(
+            *xi,
+            y,
+            axis=0,
+            err_message="All inputs and the output need to have the same number of samples.",
+        )
+
+        y = jnp.asarray(y)
+        # stacklevel 4: user -> public method -> _validate_y -> warn_if_not_float64
+        warn_if_not_float64(
+            fname,
+            {"y": y},
+            advice="pgam_jax casts y to float64, but it cannot recover "
+            "precision lost in float32 data.",
+            stacklevel=4,
+        )
+        # float is the default float dtype: float64 with x64 on, float32 with
+        # x64 off (warned above). basis.compute_features also returns X with
+        # this dtype. Mixed dtypes crash the jaxopt GLM init, so convert.
+        return y.astype(float)
+
+    # TODO: Should annotate to include pynapple objects for elements of xi and y,
+    # then have a clear boundary where everything is jax arrays.
     def fit(
         self,
         xi: tuple[ArrayLike, ...],
@@ -986,27 +1048,12 @@ class GAM:
             ``n_iter_``, ``cov_beta_``, ``scale_``, ``dof_resid_``,
             ``feature_mean_``, and ``penalized_information_rank_`` set.
         """
-        # TODO: Handle different types if accepting xi instead of X
-        if not isinstance(xi, tuple):
-            raise TypeError("Inputs xi have to be wrapped in a tuple.")
-
         warn_if_x64_disabled("GAM.fit")
-        y = jnp.asarray(y)
-        warn_if_not_float64(
-            "GAM.fit",
-            {"y": y},
-            advice="pgam_jax casts y to float64, but it cannot recover "
-            "precision lost in float32 data.",
-        )
-        # float is the default float dtype: float64 with x64 on, float32 with
-        # x64 off (warned above). Mixed dtypes crash the jaxopt GLM init.
-        y = y.astype(float)
+
+        self._validate_xi(xi, "GAM.fit")
+        y = self._validate_y(xi, y, "GAM.fit")
+
         X, y, infos, feature_mean = self._fit_design_matrix(xi, y)
-        warn_if_not_float64(
-            "GAM.fit",
-            {"design matrix": X},
-            advice="Cast the inputs to float64.",
-        )
 
         penalty_tree = self._get_penalty_tree(infos)
         ph = self._build_penalty_handler(penalty_tree, infos)
@@ -1124,6 +1171,7 @@ class GAM:
             removes rows; ``nan_handling="drop"`` produces NaN at rows whose
             raw design contains a NaN.
         """
+        self._validate_xi(xi, "GAM.predict")
         params = (self.coef_, self.intercept_)
         return self._predict(params, xi)
 
@@ -1223,6 +1271,7 @@ class GAM:
         - `mgcv` source: ``R/mgcv.r``, function ``concurvity``. The exact
           formulas implemented here are derived from that source.
         """
+        self._validate_xi(xi, "GAM.concurvity")
         if hasattr(self, "coef_"):
             # Post-fit: reuse the cached centering and the fitted β.
             X_transformed = self._transform_design_matrix_with_policy(xi)
@@ -1298,6 +1347,7 @@ class GAM:
 
         if not isinstance(xi, tuple):
             xi = (xi,)
+        self._validate_xi(xi, "GAM.smooth_compute")
 
         info = self._resolve_basis_component(component_index)
 
@@ -1645,7 +1695,8 @@ class GAM:
         score :
             Aggregated log-likelihood score.
         """
-        y = jnp.asarray(y)
+        self._validate_xi(xi, "GAM.score")
+        y = self._validate_y(xi, y, "GAM.score")
         X = self._transform_design_matrix_with_policy(xi)
         valid_X_rows = ~_rows_with_nan(X)
         valid_y_rows = get_valid_y_rows(y, n_rows=X.shape[0])
