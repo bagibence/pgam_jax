@@ -100,7 +100,7 @@ spikes = nap.Ts(t=data.spike_times)
 trials
 
 # %% [markdown]
-# The first 3 trials. The tinted bands are the trials. Position and spikes continue in the gaps, but the events happen only inside the trials.
+# The shaded bands show the first 3 trials. Position and spikes continue in the gaps, but the events happen only inside the trials.
 
 # %%
 fig, ax = plot_trials(trials, position, events, spikes)
@@ -108,7 +108,7 @@ fig, ax = plot_trials(trials, position, events, spikes)
 # %% [markdown]
 # ## Build the model inputs
 #
-# The model needs position, event counts, and spike counts on the same time bins. We bin all three series using a width of `TIME_BIN` seconds. Passing `ep=trials` limits the bins to the trial intervals.
+# The model needs position, event counts, and spike counts on the same time bins. We bin all three series with a bin size of `TIME_BIN` seconds. Passing `ep=trials` limits the bins to the trial intervals.
 #
 # * `bin_average` averages the position samples in each bin.
 # * `count` counts the events or spikes in each bin.
@@ -126,7 +126,6 @@ print(
     f"{np.array_equal(position_binned.t, event_counts.t)}, "
     f"{np.array_equal(event_counts.t, spike_counts.t)}"
 )
-spike_counts.time_support
 
 # %% [markdown]
 # ## Build the basis
@@ -150,15 +149,17 @@ full_basis = position_basis + event_basis
 # %% [markdown]
 # ## Compare convolution with and without trial boundaries
 #
-# We build the same design matrix from two representations of the binned data:
+# We build the same design matrix from two versions of the binned data:
 #
 # * Plain arrays carry no trial information. Convolution treats the end of one trial and the start of the next as consecutive samples.
 # * Pynapple objects preserve the trial intervals, so convolution runs separately within each trial.
 
 # %%
+# `.values` gives an array holding data from all trials concatenated
 design_joined = full_basis.compute_features(position_binned.values, event_counts.values)
 design_split = full_basis.compute_features(position_binned, event_counts)
 
+# given pynapple objects, nemos bases return pynapple objects preserving time info
 print(type(design_split))
 print(f"Design matrix shape: {design_split.shape}")
 
@@ -176,11 +177,10 @@ fig, ax = plot_design_at_trial_border(full_basis, design_joined, design_split)
 # %% [markdown]
 # ## Fit the GAM
 #
-# We pass the pynapple inputs and spike counts directly to `fit` and use `nan_handling="drop"`.
+# We can pass the pynapple inputs and spike counts directly to `fit`.
 #
-# Zero filling would assign zero event features throughout the first 1.2 seconds of each trial, including bins where early events already affect the firing rate. This mismatch can bias the fitted smooths. Dropping these rows avoids fitting spikes against an incomplete event history.
-#
-# The cost is substantial for short trials: 120 bins per trial, or 2,400 of the 11,900 trial bins here. Later, we will use the continuous recording to recover most of these bins.
+# We use `nan_handling="drop"` because zero filling would set the modeled contribution of events early in the trial to zero, even though those events already affect the recorded neuron's firing.
+# Dropping rows with incomplete event history avoids this mismatch, but discards the first 1.2 seconds of every trial. Later, we show how most of these bins can be recovered.
 
 # %%
 gam = GAM(
@@ -194,8 +194,6 @@ gam.fit((position_binned, event_counts), spike_counts)
 # ## Compare the fitted smooths with the truth
 #
 # We evaluate the position smooth on a position grid and the event smooth using a single event impulse, as in notebook 02. The shaded bands are the default 95% confidence bands returned by `smooth_compute`.
-#
-# The fitted curves capture the main shapes of the true effects, with larger differences near the position boundaries. These plots compare the estimated effects with the known simulation truth.
 
 # %%
 value_grid = np.linspace(-2.0, 2.0, 400)
@@ -217,11 +215,11 @@ fig, ax = plot_recovered_smooths(
 # %% [markdown]
 # ## Predict the firing rate within trials
 #
-# `gam.predict` accepts pynapple inputs and returns a `Tsd` with their timestamps and time support. Dividing the predicted counts by `TIME_BIN` converts them to spikes/s.
+# `gam.predict` accepts pynapple inputs and returns a `Tsd` with their timestamps and time support.
 #
-# Prediction preserves the input rows. With `nan_handling="drop"`, it returns NaN where the event features are undefined, leaving the first 1.2 seconds of each trial blank in the plot.
+# Prediction preserves all input rows. With `nan_handling="drop"`, it returns NaN where the event features are undefined, leaving the first 1.2 seconds of each trial blank in the plot.
 #
-# We show predictions for the first two training trials alongside the known firing rate. This illustrates the fitted model, rather than its performance on held-out data.
+# We compare fitted and true firing rates for the first two training trials.
 
 # %%
 # Divide by the bin width to convert the count per bin to spikes/s.
@@ -235,11 +233,13 @@ fig, ax = plot_predicted_and_true_rate_in_trials(
 # %% [markdown]
 # ## Use continuous history while fitting only the trials
 #
-# So far, each trial has been treated as a separate observation interval. In this recording, however, the inputs are also known during the gaps. In particular, we know that no events occurred there. We can use that history to construct event features at the start of each trial.
+# So far, each trial has been treated as a separate observation interval. In this recording, however, the inputs are also known during the gaps. We can use that history to construct event features at the start of each trial.
 #
 # We bin the whole recording and convolve over that continuous interval. To keep the fit limited to trial responses, we set spike counts outside the trials to NaN. `GAM.fit` excludes those response rows while still using the input history from the gaps.
 #
-# This requires valid input history between trials. If event logging stops during the gaps, an empty event list does not establish that no events occurred. In that case, treating the missing history as zero would be an unsupported assumption.
+# Note that this approach requires knowing when events occurred between trials. If events were not recorded during the gaps, we cannot assume that none occurred.
+#
+# The choice between the two approaches depends on the available history. When inputs outside trials are unavailable, keep trials separate and exclude bins without a full history window. When continuous inputs are known, use them to build the history and mask the responses to select the bins used for fitting.
 
 # %%
 # One interval for the whole recording gives all inputs the same bins.
@@ -250,35 +250,31 @@ position_rec = position.bin_average(TIME_BIN, ep=recording)
 event_counts_rec = events.count(TIME_BIN, ep=recording)
 spike_counts_rec = spikes.count(TIME_BIN, ep=recording)
 
-# in_interval gives NaN for the bins outside the trials.
-in_trial = ~np.isnan(trials.in_interval(spike_counts_rec))
-# set the time series data to NaN outside the trials
+# in_interval gives NaN for the bins outside the trials
+in_trial_mask = ~np.isnan(trials.in_interval(spike_counts_rec))
+# set spike counts outside trials to NaN
+nan_masked_counts = np.where(in_trial_mask, spike_counts_rec.values, np.nan)
+# create a nap.Tsd with this data
 spike_counts_in_trials = nap.Tsd(
     t=spike_counts_rec.t,
-    d=np.where(in_trial, spike_counts_rec.values, np.nan),
-    time_support=spike_counts_rec.time_support,  # required for equivalence check
+    d=nan_masked_counts,
+    time_support=spike_counts_rec.time_support,  # y must have the same time support as the inputs
 )
 
 # %% [markdown]
-# We build the continuous design explicitly to compare it with the earlier designs at the same trial boundary.
+# We build the design explicitly to compare it with the earlier designs at the same trial boundary.
 #
 # The third panel includes rows in the gap. The earlier event's response ends there, leaving no contribution from that event at the next trial's start. New events early in the next trial have defined features, where the separate-trial design has NaNs.
-#
-# The timestamp check confirms that the continuous and separate-trial binning align inside the trials for this example. The simulated trial boundaries fall on the common bin grid.
 
 # %%
 design_rec = full_basis.compute_features(position_rec, event_counts_rec)
-print(
-    "Same rows inside the trials: "
-    f"{np.array_equal(design_rec.restrict(trials).t, design_split.t)}"
-)
 
 fig, ax = plot_design_at_trial_border(
     full_basis, design_joined, design_split, design_rec
 )
 
 # %% [markdown]
-# Fit using the continuous inputs and the masked spike counts. History comes from the whole recording, but only responses inside trials contribute to the fit.
+# Fit using the continuous inputs and the masked spike counts. History comes from the whole recording, but because `gam.fit` drops rows where `spike_counts_in_trials` is NaN, only responses inside trials contribute to the fit.
 
 # %%
 gam_rec = GAM(
@@ -289,33 +285,36 @@ gam_rec = GAM(
 gam_rec.fit((position_rec, event_counts_rec), spike_counts_in_trials)
 
 # %% [markdown]
-# Only the first trial still loses its first 1.2 seconds, because no recorded history precedes it. The separate-trial fit uses 9,500 bins. Continuous history increases this to 11,780 bins, recovering 2,280 bins, or 22.8 seconds of trial data.
-#
-# We count valid predictions within trials to check these totals. The response mask controls fitting only: predictions outside trials are still defined wherever the input history is valid.
-#
-# We predict over the continuous recording before restricting the result to trials, so the convolution still uses the history in the gaps. The plot shows the predictions recovered near the start of the second trial.
+# We predict over the continuous recording before restricting the result to trials, so the convolution still uses the history in the gaps.
 
 # %%
 # Predict with continuous history, then select the trial intervals.
-predicted_rate_rec = (
-    gam_rec.predict((position_rec, event_counts_rec)) / TIME_BIN
-).restrict(trials)
+predicted_rate_full = gam_rec.predict((position_rec, event_counts_rec)) / TIME_BIN
+predicted_rate_rec = predicted_rate_full.restrict(trials)
 
-rows_split = np.isfinite(predicted_rate.values).sum()
-rows_rec = np.isfinite(predicted_rate_rec.values).sum()
-print(f"Rows in the fit, trials convolved separately: {rows_split}")
-print(f"Rows in the fit, whole recording convolved:   {rows_rec}")
-
+# %%
 fig, ax = plot_predicted_and_true_rate_in_trials(
     trials, events, true_rate, predicted_rate_rec
 )
 
 # %% [markdown]
+# Here, only the first trial still loses its first 1.2 seconds, because no recorded history precedes it.
+#
+# In this data every bin in every trial has a valid spike count, so the number of finite predictions within trials also gives the number of bins used for fitting.
+
+# %%
+rows_split = np.isfinite(predicted_rate.values).sum()
+rows_rec = np.isfinite(predicted_rate_rec.values).sum()
+print(f"Rows in the fit, trials convolved separately: {rows_split}")
+print(f"Rows in the fit, whole recording convolved:   {rows_rec}")
+
+# %% [markdown]
+# Convolving each trial separately retained 9,500 bins. Using continuous history increases this to 11,780 bins, recovering 2,280 bins, or 22.8 seconds of data within trials.
+
+# %% [markdown]
 # ### Compare the smooths after retaining more trial data
 #
-# We use the same grids and plotting conventions to inspect the second fit. Retaining more trial data does not guarantee that every part of each estimated curve will move closer to the truth.
-#
-# The choice between the two approaches depends on the available history. When inputs outside trials are unavailable, keep trials separate and exclude bins without a full history window. When continuous inputs are known, use them to build the history and mask the responses to select the bins used for fitting.
+# We use the same grids and plotting conventions to inspect the second fit.
 
 # %%
 fig, ax = plot_recovered_smooths(
@@ -326,5 +325,3 @@ fig, ax = plot_recovered_smooths(
     impulse=impulse,
     event_time_ms=event_time_ms,
 )
-
-# %%
