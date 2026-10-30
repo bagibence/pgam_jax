@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import nemos as nmo
 import numpy as np
 
 from ._nemos_compat import get_n_inputs
+from ._typing import InputArray
+
+if TYPE_CHECKING:
+    from pynapple import TsdFrame
 
 
 def resolve_min_obs(drop_empty_columns: bool | int) -> int | None:
@@ -259,7 +263,7 @@ class BasisComponentInfo:
             block = block[:, :-1]
         return block
 
-    def compute_reduced_features(self, *inputs) -> np.ndarray:
+    def compute_reduced_features(self, *inputs: InputArray) -> np.ndarray:
         """Transform the component's inputs into features, then apply column-dropping."""
         return self.reduce_features(self.basis._compute_features(*inputs))
 
@@ -287,8 +291,8 @@ def _should_drop_basis_col(
 
 
 def _compute_full_width_feature_blocks(
-    infos: tuple[BasisComponentInfo, ...], *inputs: np.ndarray
-) -> list[np.ndarray]:
+    infos: tuple[BasisComponentInfo, ...], *inputs: InputArray
+) -> list[np.ndarray | TsdFrame]:
     """
     Evaluate full-width blocks of the design matrix.
 
@@ -303,11 +307,14 @@ def _compute_full_width_feature_blocks(
         Tuple of BasisComponentInfo, one for each smooth term.
         Used for routing the inputs to the corresponding basis component.
     inputs :
-        All inputs of the model.
+        All inputs of the model. Inputs can be pynapple time series. They reach
+        the bases unchanged, so a convolution basis convolves each epoch of the
+        time support separately.
 
     Returns
     -------
-    A list of arrays, one for each smooth.
+    A list of arrays, one for each smooth. With pynapple inputs, the blocks are
+    ``TsdFrame`` objects.
     """
     n_expected = sum(info.n_inputs for info in infos)
     if len(inputs) != n_expected:
