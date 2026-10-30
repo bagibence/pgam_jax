@@ -15,10 +15,12 @@
 # %% [markdown]
 # # Modeling circular variables
 #
-# Angular inputs are common in neuroscience, from an animal’s head direction to the phase of a neural oscillation. These variables are circular: -180° and +180° describe the same angle, so a tuning curve should join smoothly where they meet.
+# Angular inputs (e.g. an animal's head direction) are common in neuroscience.
 #
-# A standard B-spline basis treats these angles as opposite ends of a line. It does not require the fitted curve to match at the two ends, which can introduce an artificial break in the tuning curve.
-#
+# These variables are circular: -180° and +180° describe the same angle.
+# \
+# A standard B-spline basis treats these angles as opposite ends of a line. It does not require the fitted curve to match at the two ends, which can introduce an artificial discontinuity (a jump) in the tuning curve.
+# \
 # A cyclic B-spline basis accounts for the circular structure. Its basis functions wrap around from +180° to -180°, so the fitted curve has the same value and slope on both sides of this boundary.
 #
 # In this notebook, we fit tuning curves for two simulated head direction cells using a cyclic B-spline basis. We then show why a cyclic B-spline basis is a better choice than a standard B-spline basis for circular inputs.
@@ -42,7 +44,7 @@ set_plot_style()
 hide_file_paths_in_warnings()
 
 # %% [markdown]
-# ## The data
+# ## Simulate head direction cell activity
 #
 # A head direction cell fires most strongly when the animal faces its preferred direction $\mu$.
 # \
@@ -89,13 +91,14 @@ fig, ax = plot_head_direction_tuning(data)
 # %% [markdown]
 # ## Fit a GAM with a cyclic basis
 #
-# `CyclicBSplineEval` takes the same arguments as `BSplineEval`.
+# `CyclicBSplineEval` takes `n_basis_funcs`, `order`, and `bounds`, like `BSplineEval`.
 # The `bounds` must cover exactly one turn of the circle: $(-\pi, \pi)$ here, or $(0, 2\pi)$, or $(-180, 180)$ for angles in degrees.
 
 # %% [markdown]
-# **WARNING:** Wrap the angles into the `bounds` before the fit.
-# An angle outside the `bounds` gives a row of NaN features.
+# **WARNING:** On nemos <= 0.2.9, wrap the angles into the `bounds` before the fit.
+# On these versions, an angle outside the `bounds` gives a row of NaN features.
 # With the default `nan_handling="zero"`, the GAM replaces these NaNs with zeros and gives no warning.
+# Later versions will wrap these angles automatically.
 # \
 # For the bounds $(-\pi, \pi)$, use `angle = (angle + np.pi) % (2 * np.pi) - np.pi`.
 
