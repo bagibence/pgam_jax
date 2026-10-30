@@ -1,0 +1,4 @@
+# Pair every notebook in this folder with a py:percent script.
+# The .ipynb keeps the outputs. The .py keeps the code, and reads well in git
+# and in a terminal.
+formats = "ipynb,py:percent"
