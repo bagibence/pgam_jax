@@ -213,6 +213,17 @@ gam.fit(
 )
 
 # %% [markdown]
+# ### Concurvity after fitting
+#
+# After fitting, `observed` measures how much of each fitted smooth can be reproduced by the other model terms. For the same data, `worst` and `estimate` remain unchanged.
+
+# %%
+concurvity_df = gam.concurvity(
+    (data.position, data.nuisance, data.events), as_dataframe=True
+)
+concurvity_df.style.format("{:.2f}")
+
+# %% [markdown]
 # ## The estimated smoothing strengths
 #
 # Each smooth is regularized separately.
