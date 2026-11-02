@@ -1,21 +1,29 @@
 """General JAX utilities shared across modules."""
 
+from __future__ import annotations
+
 import warnings
 from functools import wraps
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
+from jaxtyping import PyTree
 from nemos.observation_models import (
     GammaObservations,
     GaussianObservations,
     Observations,
     PoissonObservations,
 )
+from nemos.tree_utils import pytree_map_and_reduce
+from nemos.type_casting import cast_to_pynapple, get_time_info, is_pynapple_tsd
 
-from ._typing import JaxFloatMatrix
+from ._typing import InputArray, JaxFloatMatrix
+
+if TYPE_CHECKING:
+    from pynapple import Tsd, TsdFrame, TsdTensor
 
 
 def elementwise_derivative(f):
@@ -94,7 +102,11 @@ def warn_if_x64_disabled(fname: str) -> None:
 
 
 def warn_if_not_float64(
-    fname: str, arrays: Mapping[str, ArrayLike], *, advice: str
+    fname: str,
+    arrays: Mapping[str, ArrayLike],
+    *,
+    advice: str,
+    stacklevel: int = 3,
 ) -> None:
     """
     Warn about each floating-point array whose dtype is not float64.
@@ -103,24 +115,44 @@ def warn_if_not_float64(
     Nothing is checked when x64 mode is off. In that case no array can be float64,
     and ``warn_if_x64_disabled`` already reports the cause.
     ``advice`` is appended to the message and tells the user what happens next.
+    ``stacklevel`` is passed to ``warnings.warn``. The default of 3 points to the
+    caller of the public method that calls this function directly. Add one for
+    each extra call level between them.
     """
     if not jax.config.jax_enable_x64:
         return
     for name, arr in arrays.items():
-        dtype = jnp.asarray(arr).dtype
+        dtype = arr.dtype if hasattr(arr, "dtype") else np.asarray(arr).dtype
         if jnp.issubdtype(dtype, jnp.floating) and dtype != np.float64:
             warnings.warn(
                 f"{fname}: {name} has dtype {dtype}, not float64. "
                 "pgam_jax relies on float64 precision and can give inaccurate "
                 f"results with {dtype} data. {advice}",
                 UserWarning,
-                stacklevel=3,
+                stacklevel=stacklevel,
             )
 
 
 def to_zero_dim_jax_array(x: ArrayLike) -> jax.Array:
     """Turn `x` into a 0-dimensional jax array."""
     return jnp.reshape(jnp.asarray(x), ())
+
+
+def cast_output_like_inputs(
+    out: PyTree[jax.Array], xi: tuple[InputArray, ...]
+) -> PyTree[jax.Array | Tsd | TsdFrame | TsdTensor]:
+    """
+    Wrap output arrays in pynapple objects with the time info of xi, if xi holds any.
+
+    An array whose length is not the number of time points stays unchanged.
+    Without pynapple inputs, ``out`` is returned unchanged.
+    """
+    if not pytree_map_and_reduce(is_pynapple_tsd, any, xi):
+        return out
+    time, time_support = get_time_info(*xi)
+    return jax.tree_util.tree_map(
+        lambda x: cast_to_pynapple(np.asarray(x), time, time_support), out
+    )
 
 
 def singular_value_keep_mask(
