@@ -281,12 +281,14 @@ class GAM:
         a regularized GLM to warm-start the coefficients and start the fit from there.
         Default is True.
     nan_handling :
-        Policy for NaNs in the raw design matrix. ``"zero"`` (default) replaces
-        NaN features with zero and retains their rows. ``"drop"`` omits rows
-        containing any design NaN during fitting, scoring, and concurvity;
-        prediction preserves row alignment and returns NaN at those rows.
-        Rows with NaN responses are omitted during fitting and scoring under
-        either policy.
+        Policy for NaNs in the raw design matrix.
+        ``"drop"`` (default) omits rows containing any design NaN during fitting, scoring,
+        and concurvity. Prediction preserves row alignment and returns NaN at those rows.
+        ``"zero"`` replaces NaN features with zero and retains their rows.
+        Rows with NaN responses (``y``) are omitted during fitting and scoring under either policy.
+        Design NaNs can appear without NaN inputs. nemos bases return NaN for inputs outside
+        ``bounds``. Convolutional bases return NaN at the start of each epoch, at rows without
+        a full history. ``"drop"`` omits these rows too, and does not warn.
 
     Attributes
     ----------
@@ -338,7 +340,7 @@ class GAM:
         method: Literal["pql_gcv", "pql_reml", "laplace_reml"] = "pql_reml",
         method_kwargs: dict | None = None,
         use_glm_init: bool = True,
-        nan_handling: NanHandling = "zero",
+        nan_handling: NanHandling = "drop",
     ) -> None:
         # TODO: Make basis immutable
         if convergence_criterion not in VALID_CONVERGENCE_CRITERIA:
