@@ -130,4 +130,12 @@ def test_cyclic_basis_gam_fit_and_predict(mode):
     assert np.isfinite(model.coef_).all()
     assert np.isfinite(model.intercept_).all()
     assert prediction.shape == y.shape
-    assert np.isfinite(prediction).all()
+    if mode == "eval":
+        assert np.isfinite(prediction).all()
+    elif mode == "conv":
+        # The default drop policy leaves NaN at rows without a full history.
+        window = basis.window_size
+        assert np.isnan(prediction[:window]).all()
+        assert np.isfinite(prediction[window:]).all()
+    else:
+        raise NotImplementedError(f"Unsupported basis mode: {mode}")
