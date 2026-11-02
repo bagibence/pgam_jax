@@ -325,3 +325,85 @@ fig, ax = plot_recovered_smooths(
     impulse=impulse,
     event_time_ms=event_time_ms,
 )
+
+# %% [markdown]
+# ## Third approach: padding the trials when gaps are long
+#
+# In the previous approach, convolving the whole recording built a design row for every bin in the gaps, and `GAM.fit` then dropped those rows. When the gaps are much longer than the event window, this uses memory for rows that the fit never sees.
+#
+# We can avoid most of these rows. Each event feature depends only on the previous `EVENT_WINDOW_SIZE` bins. The first row of a trial therefore needs one window of bins before it, and later rows need fewer. Bins further back have no effect on any row inside a trial.
+#
+# So we create a new `IntervalSet`, `padded_trials`. Each of its intervals starts one window before a trial and ends when that trial ends. We call the extra window the padding. We bin all three series on these intervals, then set the spike counts outside the trials to NaN, as in the previous section. The padding supplies the history, and the NaNs keep it out of the fit.
+
+# %%
+# Each interval starts one window before its trial, but not before the recording.
+history_s = EVENT_WINDOW_SIZE * TIME_BIN
+padded_trials = nap.IntervalSet(
+    start=np.maximum(trials.start - history_s, 0.0),
+    end=trials.end,
+)
+
+position_padded = position.bin_average(TIME_BIN, ep=padded_trials)
+event_counts_padded = events.count(TIME_BIN, ep=padded_trials)
+spike_counts_padded = spikes.count(TIME_BIN, ep=padded_trials)
+
+# Set spike counts in the padding to NaN, as in the previous section.
+padded_in_trial = ~np.isnan(trials.in_interval(spike_counts_padded))
+spike_counts_padded_in_trials = nap.Tsd(
+    t=spike_counts_padded.t,
+    d=np.where(padded_in_trial, spike_counts_padded.values, np.nan),
+    time_support=spike_counts_padded.time_support,
+)
+
+# %% [markdown]
+# We could pass these pynapple objects to `gam.fit`, as in the previous section, and get the same fit as from the whole recording:
+#
+# ```python
+# gam_padded = GAM(
+#     full_basis,
+#     use_scipy=True,
+#     nan_handling="drop",
+# )
+# gam_padded.fit((position_padded, event_counts_padded), spike_counts_padded_in_trials)
+# ```
+#
+# However, like `design_split` and the first fit, `gam`, this takes longer than convolving the whole recording. `nemos` convolves each interval separately, and JAX compiles the convolution again for each new interval length.
+#
+# With padded trials, we can avoid this by passing plain arrays. `.values` joins the padded trials into one array, so all trials share a single convolution. This was not possible for `gam`. Its trials have no padding, so joining them would mix data from neighboring trials, as `design_joined` showed.
+
+# %%
+inputs_joined = (position_padded.values, event_counts_padded.values)
+gam_joined = GAM(
+    full_basis,
+    use_scipy=True,
+    nan_handling="drop",
+)
+gam_joined.fit(inputs_joined, spike_counts_padded_in_trials.values)
+
+# Arrays carry no time information, so add it back to the predictions.
+predicted_rate_joined = nap.Tsd(
+    t=position_padded.t,
+    d=np.asarray(gam_joined.predict(inputs_joined)) / TIME_BIN,
+).restrict(trials)
+
+# %% [markdown]
+# This gives the same fit as the whole recording, with fewer design rows.
+
+# %%
+coef_difference = np.abs(gam_joined.coef_ - gam_rec.coef_).max()
+print(f"Design rows, whole recording: {len(position_rec)}")
+print(f"Design rows, padded trials:   {len(position_padded)}")
+print(f"Largest difference between the coefficients: {coef_difference}")
+
+# %% [markdown]
+# Joining trials caused the problem in `design_joined`, but here it is safe. After joining, the padding of each trial comes directly after the end of the previous trial:
+#
+# * The window of a row inside a trial reaches back only as far as its own padding, so these rows are correct.
+# * The window of a row in the padding crosses the join into the previous trial, so these rows are wrong. The NaN spike counts remove them from the fit, and `restrict` removes them from the predictions.
+#
+# The padding helps only when the gaps are longer than the padding. In this recording, the gaps are 2 seconds and the padding is 1.2 seconds, so it removes only 1,720 of the 15,900 rows. With gaps of 30 seconds, it would remove about 80% of the rows. Padding also works when inputs are known only around the trials, because it needs no history beyond the padding.
+#
+# Two conditions apply when you use this on your own data:
+#
+# * The padding must be at least as long as the longest convolution window. With shorter padding, the first rows of a trial use events from the previous trial, and no NaN or warning shows this.
+# * `bin_average` and `count` start new bins at the start of each interval. In this recording, every trial starts and ends at a multiple of `TIME_BIN`, so all trials share the same bin edges. If your trials start or end at other times, round each interval start down and each interval end up to a multiple of `TIME_BIN`. Otherwise, the bin edges differ between trials.
