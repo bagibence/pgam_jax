@@ -20,7 +20,7 @@
 #
 # To preserve those boundaries, we can use [`pynapple`](https://pynapple.org) objects, which both `nemos` and `pgam_jax` accept in place of arrays. Along with timestamps and values, a pynapple time series stores its `time_support`: the intervals over which observations are valid. Setting this support to the trial intervals allows convolution to run separately within each trial. If the inputs are also recorded during the gaps, another option is to convolve over the continuous recording while using only the trial responses to fit the model.
 #
-# In this notebook, we will start with raw arrays from a simulated recording and demonstrate what goes wrong when trials are concatenated before convolution. We will then use pynapple to implement both solutions and compare how much trial data each retains. For both fits, we will use the position and event model from [notebook 02](02_fit_position_and_event_smooths.ipynb), leaving out the nuisance input:
+# In this notebook, we will start with raw arrays from a simulated recording and demonstrate what goes wrong when trials are concatenated before convolution. We compare two ways to handle trial boundaries: convolving each trial separately and using continuous history while fitting only trial responses. We then show how to retain just the pre-trial history needed for the second approach. For all fits, we will use the position and event model from [notebook 02](02_fit_position_and_event_smooths.ipynb), leaving out the nuisance input:
 #
 # $$\log \lambda_t = \beta_0 + f_{\mathrm{pos}}(x_t) + \sum_{\tau \ge 0} k(\tau)\, e_{t-\tau}$$
 #
@@ -28,7 +28,7 @@
 #
 # Here, the spike count $y_t$ in each time bin depends on position $x_t$ through the smooth $f_{\mathrm{pos}}$, and on past event counts $e_t$ through the response kernel $k$. The model gives the expected count per bin, $\lambda_t$, which we divide by the bin width to obtain a firing rate in spikes/s.
 #
-# We simulate events only within trials and leave gaps longer than the event response, so no response carries over into the next trial in the underlying recording. This makes any carryover introduced by concatenating the trials easy to distinguish from the true event history.
+# We simulate events only within trials and leave inter-trial gaps longer than the event response, so no response carries over into the next trial in the underlying recording. This makes any carryover introduced by concatenating the trials easy to distinguish from the true event history.
 
 # %%
 import jax
@@ -68,7 +68,7 @@ hide_file_paths_in_warnings()
 # * spike timestamps
 # * the start and end of each trial
 #
-# All timestamps are in seconds. Position and spikes are recorded throughout, including the gaps. Event recording also covers the whole recording, but no events occur in the gaps.
+# All timestamps are in seconds. Position, spikes, and events are recorded throughout, including during the gaps. In this simulation, however, no events occur between trials.
 
 # %%
 data = make_trial_recording()
@@ -89,7 +89,7 @@ for name in [
 #
 # * The trials become a `nap.IntervalSet`: a set of time intervals, each with a start and an end.
 # * Position becomes a `nap.Tsd`: a time series with one value at each timestamp.
-# * Events and spikes become `nap.Ts` objects: timestamps with no values.
+# * Events and spikes become `nap.Ts` objects, which store timestamps without an associated measurement at each timestamp.
 
 # %%
 trials = nap.IntervalSet(start=data.trial_starts, end=data.trial_ends)
@@ -149,7 +149,7 @@ full_basis = position_basis + event_basis
 # %% [markdown]
 # ## Compare convolution with and without trial boundaries
 #
-# We build the same design matrix from two versions of the binned data:
+# We apply the same basis to two representations of the binned data:
 #
 # * Plain arrays carry no trial information. Convolution treats the end of one trial and the start of the next as consecutive samples.
 # * Pynapple objects preserve the trial intervals, so convolution runs separately within each trial.
@@ -166,7 +166,7 @@ print(f"Design matrix shape: {design_split.shape}")
 # %% [markdown]
 # The plot shows the design around one trial boundary, with time on the vertical axis. The hatched band marks the gap, where neither design has rows. An event near the end of the first trial makes the difference visible:
 #
-# * With arrays, its history carries into the next trial, even though its response ended during the gap in the actual recording.
+# * With arrays, the event contributes to features in the next trial, even though its effect ended during the gap in the original recording.
 # * With pynapple, the first `EVENT_WINDOW_SIZE` rows of the next trial have NaN event features, shown in orange. The position features remain defined, but the event features lack a full window of history within that trial.
 #
 # `GAM` offers two ways to handle these NaNs. The default, `nan_handling="zero"`, replaces missing feature values with zero and keeps the rows. With `nan_handling="drop"`, any row containing a NaN feature is excluded from the fit.
@@ -264,7 +264,7 @@ spike_counts_in_trials = nap.Tsd(
 # %% [markdown]
 # We build the design explicitly to compare it with the earlier designs at the same trial boundary.
 #
-# The third panel includes rows in the gap. The earlier event's response ends there, leaving no contribution from that event at the next trial's start. New events early in the next trial have defined features, where the separate-trial design has NaNs.
+# The third panel includes rows in the gap. The earlier event's response ends there, leaving no contribution from that event at the next trial's start. At the start of the next trial, the continuous design has valid event-history features, including contributions from new events. The design computed separately for each trial has NaNs in these bins.
 
 # %%
 design_rec = full_basis.compute_features(position_rec, event_counts_rec)
@@ -300,7 +300,7 @@ fig, ax = plot_predicted_and_true_rate_in_trials(
 # %% [markdown]
 # Here, only the first trial still loses its first 1.2 seconds, because no recorded history precedes it.
 #
-# In this data every bin in every trial has a valid spike count, so the number of finite predictions within trials also gives the number of bins used for fitting.
+# In this dataset, all trial bins have valid spike counts. We can therefore count the bins used for fitting by counting predictions that are neither NaN nor infinite.
 
 # %%
 rows_split = np.isfinite(predicted_rate.values).sum()
@@ -327,83 +327,82 @@ fig, ax = plot_recovered_smooths(
 )
 
 # %% [markdown]
-# ## Third approach: padding the trials when gaps are long
+# ## Retain only the history needed for each trial
 #
-# In the previous approach, convolving the whole recording built a design row for every bin in the gaps, and `GAM.fit` then dropped those rows. When the gaps are much longer than the event window, this uses memory for rows that the fit never sees.
+# In the previous approach, convolving the whole recording built a design row for every bin in the gaps, and `GAM.fit` then dropped those rows. When the gaps are much longer than the event window, this uses memory for rows that the fit never sees. We can avoid calculating features for some of these rows.
 #
-# We can avoid most of these rows. Each event feature depends only on the previous `EVENT_WINDOW_SIZE` bins. The first row of a trial therefore needs one window of bins before it, and later rows need fewer. Bins further back have no effect on any row inside a trial.
-#
-# So we create a new `IntervalSet`, `padded_trials`. Each of its intervals starts one window before a trial and ends when that trial ends. We call the extra window the padding. We bin all three series on these intervals, then set the spike counts outside the trials to NaN, as in the previous section. The padding supplies the history, and the NaNs keep it out of the fit.
+# As each event feature depends only on the previous `EVENT_WINDOW_SIZE` bins, the first row of a trial needs one window of bins before it.
+# So we create a new `IntervalSet`, `extended_trials`: each of its intervals starts one window before a trial and ends when that trial ends. This extra window retains the pre-trial data needed to produce features for the first bins of each trial. We bin all three time series on these intervals, then set the spike counts outside the trials to NaN, as in the previous section. The pre-trial data supplies the history, and the NaNs ensure that only bins within the original trials contribute to the fit.
 
 # %%
 # Each interval starts one window before its trial, but not before the recording.
-history_s = EVENT_WINDOW_SIZE * TIME_BIN
-padded_trials = nap.IntervalSet(
-    start=np.maximum(trials.start - history_s, 0.0),
+history_length_s = EVENT_WINDOW_SIZE * TIME_BIN
+extended_trials = nap.IntervalSet(
+    start=np.maximum(trials.start - history_length_s, 0.0),
     end=trials.end,
 )
 
-position_padded = position.bin_average(TIME_BIN, ep=padded_trials)
-event_counts_padded = events.count(TIME_BIN, ep=padded_trials)
-spike_counts_padded = spikes.count(TIME_BIN, ep=padded_trials)
+position_extended = position.bin_average(TIME_BIN, ep=extended_trials)
+event_counts_extended = events.count(TIME_BIN, ep=extended_trials)
+spike_counts_extended = spikes.count(TIME_BIN, ep=extended_trials)
 
-# Set spike counts in the padding to NaN, as in the previous section.
-padded_in_trial = ~np.isnan(trials.in_interval(spike_counts_padded))
-spike_counts_padded_in_trials = nap.Tsd(
-    t=spike_counts_padded.t,
-    d=np.where(padded_in_trial, spike_counts_padded.values, np.nan),
-    time_support=spike_counts_padded.time_support,
+# Set spike counts in the pre-trial history to NaN, as in the previous section.
+extended_in_trial = ~np.isnan(trials.in_interval(spike_counts_extended))
+spike_counts_extended_in_trials = nap.Tsd(
+    t=spike_counts_extended.t,
+    d=np.where(extended_in_trial, spike_counts_extended.values, np.nan),
+    time_support=spike_counts_extended.time_support,
 )
 
 # %% [markdown]
-# We could pass these pynapple objects to `gam.fit`, as in the previous section, and get the same fit as from the whole recording:
+# We could fit the model directly with these pynapple objects and obtain the same result as with the continuous recording:
 #
 # ```python
-# gam_padded = GAM(
+# gam_extended = GAM(
 #     full_basis,
 #     use_scipy=True,
 #     nan_handling="drop",
 # )
-# gam_padded.fit((position_padded, event_counts_padded), spike_counts_padded_in_trials)
+# gam_extended.fit((position_extended, event_counts_extended), spike_counts_extended_in_trials)
 # ```
 #
-# However, like `design_split` and the first fit, `gam`, this takes longer than convolving the whole recording. `nemos` convolves each interval separately, and JAX compiles the convolution again for each new interval length.
+# As with `design_split` and the first fit (`gam`), `nemos` convolves each interval separately. JAX compiles a separate convolution for each distinct interval length, which can make this slower than processing the continuous recording. With extended trials, we can instead pass plain arrays: the `.values` attribute of each `Tsd` returns the data from all extended trial intervals joined into one array, allowing us to convolve all segments together.
 #
-# With padded trials, we can avoid this by passing plain arrays. `.values` joins the padded trials into one array, so all trials share a single convolution. This was not possible for `gam`. Its trials have no padding, so joining them would mix data from neighboring trials, as `design_joined` showed.
+# In `design_joined`, concatenating trials caused convolution to use data from the previous trial because no pre-trial history had been retained. Here, each trial includes the history needed to prevent that:
+#
+# * For bins within a trial, convolution uses only data from that trial and its retained pre-trial history.
+# * For rows in the pre-trial history, convolution reaches back across the join and uses data from the previous trial, so these features are incorrect. The NaN spike counts exclude these rows from fitting, and `restrict` excludes them from predictions.
+#
+# As in the continuous approach, the first trial has no preceding recorded history, so its first 1.2 seconds still have undefined event features.
 
 # %%
-inputs_joined = (position_padded.values, event_counts_padded.values)
-gam_joined = GAM(
+inputs_joined = (position_extended.values, event_counts_extended.values)
+gam_extended = GAM(
     full_basis,
     use_scipy=True,
     nan_handling="drop",
 )
-gam_joined.fit(inputs_joined, spike_counts_padded_in_trials.values)
+gam_extended.fit(inputs_joined, spike_counts_extended_in_trials.values)
 
 # Arrays carry no time information, so add it back to the predictions.
 predicted_rate_joined = nap.Tsd(
-    t=position_padded.t,
-    d=np.asarray(gam_joined.predict(inputs_joined)) / TIME_BIN,
+    t=position_extended.t,
+    d=np.asarray(gam_extended.predict(inputs_joined)) / TIME_BIN,
 ).restrict(trials)
 
 # %% [markdown]
 # This gives the same fit as the whole recording, with fewer design rows.
 
 # %%
-coef_difference = np.abs(gam_joined.coef_ - gam_rec.coef_).max()
+coef_difference = np.abs(gam_extended.coef_ - gam_rec.coef_).max()
 print(f"Design rows, whole recording: {len(position_rec)}")
-print(f"Design rows, padded trials:   {len(position_padded)}")
+print(f"Design rows, extended trials: {len(position_extended)}")
 print(f"Largest difference between the coefficients: {coef_difference}")
 
 # %% [markdown]
-# Joining trials caused the problem in `design_joined`, but here it is safe. After joining, the padding of each trial comes directly after the end of the previous trial:
-#
-# * The window of a row inside a trial reaches back only as far as its own padding, so these rows are correct.
-# * The window of a row in the padding crosses the join into the previous trial, so these rows are wrong. The NaN spike counts remove them from the fit, and `restrict` removes them from the predictions.
-#
-# The padding helps only when the gaps are longer than the padding. In this recording, the gaps are 2 seconds and the padding is 1.2 seconds, so it removes only 1,720 of the 15,900 rows. With gaps of 30 seconds, it would remove about 80% of the rows. Padding also works when inputs are known only around the trials, because it needs no history beyond the padding.
+# Restricting the inputs to trials and their required history reduces the number of design-matrix rows when gaps exceed the history window. In this simulated recording, the gaps are 2 seconds and the history window is 1.2 seconds, so it removes only 1,720 of the 15,900 rows. With gaps of 30 seconds, it would remove about 80% of the rows. This approach also works when inputs are available only during trials and the required history immediately before them.
 #
 # Two conditions apply when you use this on your own data:
 #
-# * The padding must be at least as long as the longest convolution window. With shorter padding, the first rows of a trial use events from the previous trial, and no NaN or warning shows this.
-# * `bin_average` and `count` start new bins at the start of each interval. In this recording, every trial starts and ends at a multiple of `TIME_BIN`, so all trials share the same bin edges. If your trials start or end at other times, round each interval start down and each interval end up to a multiple of `TIME_BIN`. Otherwise, the bin edges differ between trials.
+# * The history window must be at least as long as the longest convolution window. If the retained history is shorter than the longest convolution window, features at the start of a trial can incorrectly include events from the previous trial without producing NaNs or a warning.
+# * `bin_average` and `count` start new bins at the start of each interval. In this recording, all trial boundaries lie on a common time grid with spacing `TIME_BIN`. If your trials start or end at other times, round each interval start down and each interval end up to a multiple of `TIME_BIN`. Otherwise, bins in different intervals may be offset relative to that grid.
