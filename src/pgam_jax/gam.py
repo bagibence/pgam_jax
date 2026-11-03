@@ -1340,9 +1340,18 @@ class GAM:
         It is intentionally separate from ``predict``, which uses training
         centering.
 
-        If any input is a pynapple object, ``mean``, ``lower`` and ``upper`` are
-        each a ``Tsd`` with the time axis and time support of the pynapple inputs.
-        Otherwise they are jax arrays.
+        Under either NaN policy, the grid center uses only rows whose computed
+        features contain no NaNs. Input NaNs do not exclude a row when its
+        computed features are finite, as can happen with causal convolution.
+
+        Rows with NaN features follow ``self.nan_handling``, as in ``predict``.
+        ``"drop"`` returns NaN at these rows. ``"zero"`` replaces the NaN features
+        with zero before subtracting the center (computed as above).
+        With ``"zero"``, a row with only NaN features therefore returns
+        ``-center @ coef``, the value of the smooth when all features are zero.
+        For a convolutional basis, this is the same value as a row with no event
+        in the history window. This differs from legacy PGAM, which shows zero
+        at these rows.
 
         Parameters
         ----------
@@ -1362,10 +1371,16 @@ class GAM:
         -------
         mean :
             Centered smooth evaluated at ``xi``, shape ``(n_samples,)``.
+            With ``nan_handling="drop"``, entries at rows with NaN features are NaN.
+            If any input is a pynapple object, the result is a ``Tsd`` with the
+            time axis and time support of the pynapple inputs. Otherwise it is a
+            jax array.
         lower :
             Lower bound of the confidence band, shape ``(n_samples,)``.
+            Same type as ``mean``, and NaN at the same rows.
         upper :
             Upper bound of the confidence band, shape ``(n_samples,)``.
+            Same type as ``mean``, and NaN at the same rows.
         """
         self._raise_if_not_fitted()
 
@@ -1384,11 +1399,7 @@ class GAM:
         # TODO: Why is this called fX? isn't it X_i?
         fX = jnp.asarray(info.compute_reduced_features(*xi))
 
-        nan_filter = jnp.asarray(
-            jnp.sum(jnp.isnan(jnp.asarray(xi)), axis=0),
-            dtype=bool,
-        )
-        nan_filter = nan_filter | jnp.any(jnp.isnan(fX), axis=1)
+        nan_filter = jnp.any(jnp.isnan(fX), axis=1)
         if not bool(jnp.any(~nan_filter)):
             raise ValueError(
                 "No valid rows remain after evaluating the selected smooth. "
@@ -1398,9 +1409,7 @@ class GAM:
 
         center = jnp.mean(fX[~nan_filter], axis=0)
 
-        fX = jnp.where(jnp.isnan(fX), 0.0, fX)
-        fX = fX - center
-        fX = fX.at[nan_filter, :].set(0.0)
+        fX = apply_nan_policy_for_transform(fX, center, self.nan_handling)
 
         mean_y = fX @ self.coef_[info.identifiable_feature_slice]
 
