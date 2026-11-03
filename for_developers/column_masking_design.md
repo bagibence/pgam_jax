@@ -31,7 +31,9 @@ a wrapper breaks.
 ## Consequences
 
 At `min_obs = 1`, the mask removes only columns that are zero on every fitting
-row, with NaNs counted as zero. The existing identifiability rule is preserved.
+row. Under `nan_handling="drop"`, rows with a design NaN are not fitting rows.
+Under `nan_handling="zero"`, those rows are fitting rows and their NaNs count as
+zero. The existing identifiability rule is preserved.
 For evaluation B-splines on valid rows, the columns form a partition of unity,
 and zero-only removal preserves that dependency with the intercept. The last
 surviving column is still removed by `DROP_LAST_COL`. Fits with no removed
