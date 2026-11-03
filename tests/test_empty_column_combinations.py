@@ -237,6 +237,8 @@ def _smooth_grids(kind):
     elif kind == "conv":
         events = np.zeros(120)
         events[60] = 1.0
+        # Causal features at this row are finite despite the input NaN.
+        events[80] = np.nan
         case_grid = (events,)
     elif kind == "tensor":
         axis = np.linspace(0.05, 0.95, 6)
@@ -784,10 +786,11 @@ def _assert_smooth_compute(gam, data, layout, context):
     for index, (component, grid) in enumerate(zip(layout, data.grids, strict=True)):
         raw = np.asarray(tuple(gam.basis)[index]._compute_features(*grid))
         reduced = _ref_reduce(raw, component)
-        invalid = np.isnan(np.asarray(grid)).any(axis=0) | np.isnan(reduced).any(axis=1)
+        invalid = np.isnan(reduced).any(axis=1)
+        if isinstance(tuple(gam.basis)[index], nmo.basis.BSplineConv):
+            assert np.isnan(grid[0][80]) and not invalid[80], context
         assert invalid.any() and not invalid.all(), context
         smooth_design = np.nan_to_num(reduced) - reduced[~invalid].mean(axis=0)
-        smooth_design[invalid] = 0.0
         expected_smooth = smooth_design @ coef[component.coef_slice]
         coef_index = (
             np.arange(component.coef_slice.start, component.coef_slice.stop) + 1
@@ -798,11 +801,9 @@ def _assert_smooth_compute(gam, data, layout, context):
             if se_with_mean:
                 se_design = _with_intercept(smooth_design)
                 cov_index = np.concatenate([[0], coef_index])
-                invalid_half_width = z * np.sqrt(cov_beta[0, 0])
             else:
                 se_design = smooth_design
                 cov_index = coef_index
-                invalid_half_width = 0.0
             cov = cov_beta[np.ix_(cov_index, cov_index)]
             variance = np.diag(se_design @ cov @ se_design.T)
             half_width = z * np.sqrt(np.clip(variance, 0.0, None))
@@ -811,13 +812,24 @@ def _assert_smooth_compute(gam, data, layout, context):
                 np.asarray(values)
                 for values in gam.smooth_compute(grid, index, se_with_mean=se_with_mean)
             )
-            _assert_close(smooth, expected_smooth, where)
-            _assert_close(lower, expected_smooth - half_width, where)
-            _assert_close(upper, expected_smooth + half_width, where)
-            # Invalid rows: zero smooth, and a band from the intercept alone.
-            np.testing.assert_array_equal(smooth[invalid], 0.0, err_msg=where)
-            _assert_close(upper[invalid], invalid_half_width, where)
-            _assert_close(lower[invalid], -invalid_half_width, where)
+            if gam.nan_handling == "zero":
+                # Invalid rows use zero-filled features, like predict.
+                compared = np.ones_like(invalid)
+            elif gam.nan_handling == "drop":
+                # Invalid rows are NaN, like predict.
+                compared = ~invalid
+                assert np.isnan(smooth[invalid]).all(), where
+                assert np.isnan(lower[invalid]).all(), where
+                assert np.isnan(upper[invalid]).all(), where
+            else:
+                raise NotImplementedError(f"Unknown NaN policy: {gam.nan_handling!r}")
+            _assert_close(smooth[compared], expected_smooth[compared], where)
+            _assert_close(
+                lower[compared], (expected_smooth - half_width)[compared], where
+            )
+            _assert_close(
+                upper[compared], (expected_smooth + half_width)[compared], where
+            )
 
 
 def _assert_postfit_concurvity(gam, case, data, layout, mean, context):
