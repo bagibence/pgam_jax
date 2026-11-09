@@ -213,17 +213,6 @@ gam.fit(
 )
 
 # %% [markdown]
-# ### Concurvity after fitting
-#
-# After fitting, `observed` measures how much of each fitted smooth can be reproduced by the other model terms. For the same data, `worst` and `estimate` remain unchanged.
-
-# %%
-concurvity_df = gam.concurvity(
-    (data.position, data.nuisance, data.events), as_dataframe=True
-)
-concurvity_df.style.format("{:.2f}")
-
-# %% [markdown]
 # ## The estimated smoothing strengths
 #
 # Each smooth is regularized separately.
@@ -284,6 +273,22 @@ for label in smooth_labels:
 # * The test treats the fitted smoothing strengths as fixed and ignores their uncertainty. Read a p-value close to the threshold (for example 0.05) as inconclusive. The `UserWarning` above says this.
 # * A p-value of 0 means that the true value is smaller than the numerical integration can resolve. It does not mean exactly zero.
 # * High concurvity can make the test unreliable. Position and nuisance have high concurvity (see above). Here the data was enough to separate them: the nuisance smooth is pulled to zero, and its p-value is large.
+
+# %% [markdown]
+# ### Concurvity after fitting
+
+# %%
+concurvity_df = gam.concurvity(
+    (data.position, data.nuisance, data.events), as_dataframe=True
+)
+concurvity_df.style.format("{:.2f}")
+
+# %% [markdown]
+# After fitting, for the same data, `worst` and `estimate` remain unchanged.
+# \
+# `observed` measures how much of each fitted smooth can be reproduced by the other model terms.
+# It does not depend on the smooths' magnitude, only their shape, and remains high.
+# Despite this concurvity, as the previous sections show, in this example the model identified the nuisance smooth as redundant and pushed its magnitude close to zero.
 
 # %% [markdown]
 # ## GAM recovers the true smooths
