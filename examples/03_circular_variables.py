@@ -97,7 +97,7 @@ fig, ax = plot_head_direction_tuning(data)
 # %% [markdown]
 # **WARNING:** On nemos <= 0.2.9, wrap the angles into the `bounds` before the fit.
 # On these versions, an angle outside the `bounds` gives a row of NaN features.
-# With the default `nan_handling="zero"`, the GAM replaces these NaNs with zeros and gives no warning.
+# With the default `nan_handling="drop"`, the GAM leaves these rows out of the fit and gives no warning. `predict` and `smooth_compute` return NaN at these angles.
 # Later versions will wrap these angles automatically.
 # \
 # For the bounds $(-\pi, \pi)$, use `angle = (angle + np.pi) % (2 * np.pi) - np.pi`.

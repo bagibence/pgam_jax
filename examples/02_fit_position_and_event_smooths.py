@@ -148,15 +148,14 @@ full_basis = spatial_basis + nuisance_basis + event_basis
 #
 # Each block of columns belongs to one smooth. The event block starts with 120
 # NaN rows, drawn in orange. A convolution needs a full window of past samples,
-# so those rows have no value yet. The default `nan_handling="zero"` replaces
-# them with zero and keeps the rows. Pass `nan_handling="drop"` to `GAM` to
-# remove those rows instead.
+# so those rows have no value yet. The default `nan_handling="drop"` leaves
+# those rows out of the fit. Prediction keeps them and returns NaN there. Pass
+# `nan_handling="zero"` to `GAM` to replace the NaNs with zero and keep the rows.
 #
 # **TIP:** If your data has trials, the event response must not cross a trial
-# border. Wrap each input in a `pynapple` `Tsd` with the trial intervals as its
-# `time_support`. Pass these objects to `compute_features`, `fit`, and `predict`
-# in place of the arrays. `nemos` then runs the convolution inside each trial
-# separately, and each trial starts with its own block of NaN rows.
+# border. [Notebook 04](04_trials_with_pynapple.ipynb) shows how to handle this
+# with `pynapple`. It presents two approaches: convolve each trial separately,
+# or build the history from the continuous recording and fit only the trial bins.
 
 # %%
 design = full_basis.compute_features(data.position, data.nuisance, data.events)
@@ -335,6 +334,7 @@ fig, ax = plot_recovered_smooths(
 # Pass the whole recording, because the event term needs the past samples.
 # Then compare the first 3 seconds with the true rate.
 # The rate jumps from bin to bin because position is drawn independently in each bin.
+# (The prediction starts at 1.2 s: before that, the event term has no full window of past samples, so `predict` returns NaN.)
 
 # %%
 # Divide by the bin width to convert the count per bin to spikes/s.

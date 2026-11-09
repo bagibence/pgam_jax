@@ -41,8 +41,12 @@ def test_constructor_rejects_unknown_nan_handling():
         GAM(_eval_basis(), nan_handling="unknown")
 
 
-def test_default_zero_matches_legacy_zero_fill_then_center_behavior():
-    gam = GAM(_eval_basis())
+def test_default_nan_handling_is_drop():
+    assert GAM(_eval_basis()).nan_handling == "drop"
+
+
+def test_zero_matches_legacy_zero_fill_then_center_behavior():
+    gam = GAM(_eval_basis(), nan_handling="zero")
     x = np.linspace(0.0, 1.0, 20)
     x[4] = np.nan
     y = jnp.arange(x.size, dtype=float)
