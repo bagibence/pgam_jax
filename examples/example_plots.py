@@ -9,8 +9,14 @@ import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pynapple as nap
 import seaborn as sns
-from example_data import EVENT_WINDOW_SIZE, spatial_effect
+from example_data import (
+    EVENT_WINDOW_SIZE,
+    TIME_BIN,
+    make_event_kernel,
+    spatial_effect,
+)
 from scipy.stats import binned_statistic, sem
 
 BLUE = "#2C6EAA"
@@ -333,6 +339,25 @@ def plot_binned_tuning(
     return fig, np.array([spatial_ax, nuisance_ax, event_ax])
 
 
+def _label_design_blocks(ax, basis):
+    """Separate the column blocks of a design matrix and label them on top."""
+    centers = []
+    labels = []
+    start = 0
+    for component in basis:
+        width = component.n_basis_funcs
+        if start > 0:
+            ax.axvline(start - 0.5, color="black", linewidth=1.8)
+        centers.append(start + 0.5 * width - 0.5)
+        labels.append(component.label)
+        start += width
+
+    top_axis = ax.secondary_xaxis("top")
+    top_axis.set_xticks(centers)
+    top_axis.set_xticklabels(labels, fontsize=12)
+    top_axis.tick_params(length=0)
+
+
 def plot_design_blocks(basis, data, n_rows=400):
     """
     Draw the first ``n_rows`` of the design matrix, with one block per smooth.
@@ -359,22 +384,7 @@ def plot_design_blocks(basis, data, n_rows=400):
         cmap=color_map,
     )
     ax.set(xlabel="Feature", ylabel="Time bin", title="Design matrix")
-
-    centers = []
-    labels = []
-    start = 0
-    for component in basis:
-        width = component.n_basis_funcs
-        if start > 0:
-            ax.axvline(start - 0.5, color="black", linewidth=1.8)
-        centers.append(start + 0.5 * width - 0.5)
-        labels.append(component.label)
-        start += width
-
-    top_axis = ax.secondary_xaxis("top")
-    top_axis.set_xticks(centers)
-    top_axis.set_xticklabels(labels, fontsize=12)
-    top_axis.tick_params(length=0)
+    _label_design_blocks(ax, basis)
 
     fig.colorbar(image, ax=ax, label="Feature value")
     return fig, ax
@@ -472,7 +482,6 @@ def plot_true_effects(data, value_grid):
 
 
 def plot_recovered_smooths(
-    data,
     value_grid,
     position_smooth,
     nuisance_smooth,
@@ -484,12 +493,12 @@ def plot_recovered_smooths(
     Draw each fitted smooth against its truth.
 
     Each ``*_smooth`` argument is the ``(mean, low, high)`` triple that
-    ``GAM.smooth_compute`` returns.
+    ``GAM.smooth_compute`` returns. Pass ``nuisance_smooth=None`` for a model
+    without the nuisance input. The figure then has no nuisance panel.
 
-    Return the figure and its axes: position, nuisance, then event.
+    Return the figure and its axes: position, nuisance if given, then event.
     """
     position_mean, position_low, position_high = position_smooth
-    nuisance_mean, nuisance_low, nuisance_high = nuisance_smooth
     event_mean, event_low, event_high = (np.asarray(part) for part in event_smooth)
 
     true_position = spatial_effect(value_grid)
@@ -506,11 +515,15 @@ def plot_recovered_smooths(
     # is zero before the event, like the truth. Use only settled rows here.
     # The unsettled rows would drag the baseline toward zero.
     baseline_rows = settled & (event_time_ms < 0)
-    true_event = np.convolve(impulse, data.event_kernel, mode="full")[: impulse.size]
+    true_event = np.convolve(impulse, make_event_kernel(), mode="full")[: impulse.size]
     true_event = true_event - true_event[baseline_rows].mean()
     event_baseline = event_mean[baseline_rows].mean()
 
-    fig, axes = plt.subplots(1, 3, figsize=(15.2, 4.4), constrained_layout=True)
+    if nuisance_smooth is None:
+        fig, axes = plt.subplots(1, 2, figsize=(10.4, 4.4), constrained_layout=True)
+    else:
+        fig, axes = plt.subplots(1, 3, figsize=(15.2, 4.4), constrained_layout=True)
+    event_ax = axes[-1]
 
     axes[0].plot(
         value_grid,
@@ -528,21 +541,28 @@ def plot_recovered_smooths(
         title="Spatial smooth",
     )
 
-    axes[1].axhline(0.0, color="black", linestyle="--", linewidth=2.0, label="Truth")
-    axes[1].plot(value_grid, nuisance_mean, color=GREEN, linewidth=2.7, label="PGAM")
-    axes[1].fill_between(
-        value_grid, nuisance_low, nuisance_high, color=GREEN, alpha=0.2
-    )
-    axes[1].set(
-        xlabel="Nuisance input",
-        title="Nuisance smooth",
-    )
-    # Share the vertical scale with the spatial panel. On its own scale the flat
-    # smooth looks uncertain, but its band is small next to a real effect.
-    axes[1].set_ylim(axes[0].get_ylim())
+    if nuisance_smooth is not None:
+        nuisance_mean, nuisance_low, nuisance_high = nuisance_smooth
+        axes[1].axhline(
+            0.0, color="black", linestyle="--", linewidth=2.0, label="Truth"
+        )
+        axes[1].plot(
+            value_grid, nuisance_mean, color=GREEN, linewidth=2.7, label="PGAM"
+        )
+        axes[1].fill_between(
+            value_grid, nuisance_low, nuisance_high, color=GREEN, alpha=0.2
+        )
+        axes[1].set(
+            xlabel="Nuisance input",
+            title="Nuisance smooth",
+        )
+        # Share the vertical scale with the spatial panel. On its own scale the
+        # flat smooth looks uncertain, but its band is small next to a real
+        # effect.
+        axes[1].set_ylim(axes[0].get_ylim())
 
     valid = settled & np.isfinite(event_mean)
-    axes[2].plot(
+    event_ax.plot(
         event_time_ms,
         true_event,
         color="black",
@@ -550,25 +570,25 @@ def plot_recovered_smooths(
         linewidth=2.4,
         label="Truth",
     )
-    axes[2].plot(
+    event_ax.plot(
         event_time_ms[valid],
         event_mean[valid] - event_baseline,
         color=PURPLE,
         linewidth=2.7,
         label="PGAM",
     )
-    axes[2].fill_between(
+    event_ax.fill_between(
         event_time_ms[valid],
         event_low[valid] - event_baseline,
         event_high[valid] - event_baseline,
         color=PURPLE,
         alpha=0.2,
     )
-    axes[2].set(
+    event_ax.set(
         xlabel="Time from event (ms)",
         ylabel="Change in log-rate",
         title="Temporal smooth",
-        xlim=(-150, EVENT_WINDOW_SIZE * data.time_bin * 1000 + 150),
+        xlim=(-150, EVENT_WINDOW_SIZE * TIME_BIN * 1000 + 150),
     )
 
     for ax in axes:
@@ -807,3 +827,232 @@ def plot_cyclic_and_noncyclic_smooths(
     )
 
     return fig
+
+
+# ---------------------------------------------------------------------------
+# 04_trials_with_pynapple
+# ---------------------------------------------------------------------------
+
+
+def _shade_trials(ax, trials):
+    """Draw a band behind each trial."""
+    for start, end in trials.values:
+        ax.axvspan(start, end, color=PANEL_FILL, zorder=0)
+
+
+def plot_trials(trials, position, events, spikes, n_trials=3):
+    """
+    Draw the inputs and the spikes from the start of the recording to the
+    start of trial ``n_trials``.
+
+    ``position`` is a ``Tsd``. ``events`` and ``spikes`` are ``Ts`` objects.
+    Tinted bands mark the trials. The gaps between the trials are white.
+
+    Return the figure and its axes: position, events, then spikes.
+    """
+    window = nap.IntervalSet(
+        start=position.time_support.start[0], end=trials.start[n_trials]
+    )
+    trials = trials[:n_trials]
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=(12.5, 5.6),
+        sharex=True,
+        height_ratios=[1.0, 0.45, 0.45],
+        constrained_layout=True,
+    )
+
+    shown_position = position.restrict(window)
+    axes[0].plot(shown_position.t, shown_position.values, color=BLUE, linewidth=0.9)
+    axes[0].set(ylabel="Position")
+
+    raster_style = dict(lineoffsets=0.5, linelengths=0.8)
+    axes[1].eventplot(events.restrict(window).t, colors=PURPLE, **raster_style)
+    axes[1].set(ylabel="Events", yticks=[], ylim=(0, 1))
+    axes[2].eventplot(
+        spikes.restrict(window).t,
+        colors=GRAY,
+        linewidths=0.8,
+        **raster_style,
+    )
+    axes[2].set(ylabel="Spikes", yticks=[], ylim=(0, 1), xlabel="Time (s)")
+
+    for ax in axes:
+        _shade_trials(ax, trials)
+    fig.align_ylabels(axes)
+    return fig, axes
+
+
+def _find_leaking_border(design_joined, design_split):
+    """
+    Find the first trial border where an earlier event leaks across.
+
+    Return the row of the first time bin after that border. In that row, the
+    design built from pynapple objects holds NaN in the convolution columns.
+    The design built from arrays holds a response to an event from the trial
+    before in those columns.
+    """
+    joined = np.asarray(design_joined)
+    split = np.asarray(design_split)
+    trial_first_rows = np.searchsorted(design_split.t, design_split.time_support.start)
+    for row in trial_first_rows[1:]:
+        convolution_columns = np.isnan(split[row])
+        if np.any(joined[row, convolution_columns] != 0):
+            return row
+    raise RuntimeError("No event response crosses a trial border.")
+
+
+def plot_design_at_trial_border(
+    basis, design_joined, design_split, design_recording=None, n_before=40
+):
+    """
+    Draw the design matrix around one trial border, with time on the y axis.
+
+    ``design_joined`` is built from plain arrays, which join the trials into
+    one recording. ``design_split`` is built from pynapple objects with the
+    trials as their time support. Both have one row per time bin inside the
+    trials, in the same order. ``design_recording`` is optional. It is built
+    from pynapple objects that cover the whole recording, so it also has rows
+    in the gaps between the trials.
+
+    The border is the first one where an event response from the trial before
+    leaks into the joined design. The plot shows the last ``n_before`` bins of
+    the trial before, the gap, and the first ``EVENT_WINDOW_SIZE + n_before``
+    bins of the next trial. A hatched band covers the gap in the designs that
+    have no rows there. NaN entries are orange.
+
+    Return the figure and its axes: joined, split, then recording if given.
+    """
+    border = _find_leaking_border(design_joined, design_split)
+    time = design_split.t
+    # The rows of the trial before the border, and of the trial after it.
+    segments = [
+        slice(border - n_before, border),
+        slice(border, border + EVENT_WINDOW_SIZE + n_before),
+    ]
+    window_top = time[segments[0].start] - TIME_BIN / 2
+    window_bottom = time[segments[1].stop - 1] + TIME_BIN / 2
+    gap_top = time[border - 1] + TIME_BIN / 2
+    gap_bottom = time[border] - TIME_BIN / 2
+
+    color_map = plt.get_cmap("Blues").copy()
+    color_map.set_bad(MISSING_FILL)
+    n_features = design_split.shape[1]
+
+    def draw(ax, values, row_time):
+        return ax.imshow(
+            np.ma.masked_invalid(values),
+            aspect="auto",
+            interpolation="nearest",
+            cmap=color_map,
+            vmin=0.0,
+            vmax=1.0,
+            extent=(
+                -0.5,
+                n_features - 0.5,
+                row_time[-1] + TIME_BIN / 2,
+                row_time[0] - TIME_BIN / 2,
+            ),
+        )
+
+    panels = [
+        (design_joined, "Arrays: trials joined"),
+        (design_split, "pynapple: trials separate"),
+    ]
+    if design_recording is not None:
+        panels.append((design_recording, "pynapple: whole recording"))
+
+    fig, axes = plt.subplots(
+        1,
+        len(panels),
+        figsize=(5.6 * len(panels) + 1.8, 7.0),
+        sharey=True,
+        constrained_layout=True,
+    )
+    for ax, (design, title) in zip(axes, panels):
+        if design is design_recording:
+            in_window = (design.t > window_top) & (design.t < window_bottom)
+            image = draw(ax, np.asarray(design)[in_window], design.t[in_window])
+        else:
+            # Draw each trial on its own time span. The gap has no rows.
+            for rows in segments:
+                image = draw(ax, np.asarray(design)[rows], time[rows])
+            ax.axhspan(
+                gap_top,
+                gap_bottom,
+                facecolor="white",
+                edgecolor=LIGHT_GRAY,
+                hatch="//",
+                zorder=2,
+            )
+        for edge in [gap_top, gap_bottom]:
+            ax.axhline(edge, color=ORANGE, linewidth=2.4, linestyle="--", zorder=3)
+        ax.set(xlabel="Feature", title=title)
+        _label_design_blocks(ax, basis)
+
+    axes[0].set_ylim(window_bottom, window_top)
+    axes[0].set_ylabel("Time (s)")
+    axes[0].text(
+        0.5 * n_features,
+        0.5 * (gap_top + gap_bottom),
+        "gap between trials",
+        ha="center",
+        va="center",
+        color=ORANGE,
+        fontsize=12,
+        zorder=4,
+        bbox=dict(facecolor="white", edgecolor="none"),
+    )
+    fig.colorbar(image, ax=axes, label="Feature value")
+    return fig, axes
+
+
+def plot_predicted_and_true_rate_in_trials(
+    trials, events, true_rate, predicted_rate, n_trials=2
+):
+    """
+    Draw the predicted and the true firing rate in the first ``n_trials``.
+
+    ``true_rate`` and ``predicted_rate`` are ``Tsd`` objects in spikes per
+    second. ``events`` is a ``Ts``. Dashed vertical lines mark the events.
+
+    Return the figure and its axis.
+    """
+    trials = trials[:n_trials]
+
+    fig, ax = plt.subplots(figsize=(12.5, 3.6), constrained_layout=True)
+    ax.vlines(
+        events.restrict(trials).t,
+        0,
+        1,
+        transform=ax.get_xaxis_transform(),
+        color=PURPLE,
+        linestyle="--",
+        linewidth=1.0,
+        label="Event",
+    )
+    for index, trial in enumerate(trials):
+        # Label only the first trial, so that the legend has one entry per line.
+        first = index == 0
+        true_part = true_rate.restrict(trial)
+        predicted_part = predicted_rate.restrict(trial)
+        ax.plot(
+            true_part.t,
+            true_part.values,
+            color=GRAY,
+            linewidth=3,
+            alpha=0.6,
+            label="True rate" if first else None,
+        )
+        ax.plot(
+            predicted_part.t,
+            predicted_part.values,
+            color=ORANGE,
+            linewidth=1.2,
+            label="PGAM prediction" if first else None,
+        )
+    _shade_trials(ax, trials)
+    ax.set(xlabel="Time (s)", ylabel="Rate (spikes/s)")
+    ax.legend(loc="upper left", bbox_to_anchor=(1, 1), frameon=False)
+    return fig, ax

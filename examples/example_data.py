@@ -7,6 +7,8 @@ The example notebooks import from this module.
 2. ``02_fit_position_and_event_smooths`` fits the spatial, nuisance, and
    event model.
 3. ``03_circular_variables`` fits head direction cells with a cyclic basis.
+4. ``04_trials_with_pynapple`` fits the position and event model to a
+   recording with trials.
 
 Every dataset has its own seed. A notebook can therefore run on its own and
 produce the same numbers on every run.
@@ -22,6 +24,7 @@ SEED_TEMPORAL = 20260926
 # The jump of a non-cyclic fit at the wrap point varies a lot from seed to
 # seed. With this seed, its size is close to the median over seeds.
 SEED_HEAD_DIRECTION = 20260930
+SEED_TRIALS = 20261019
 
 TIME_BIN = 0.01
 
@@ -189,6 +192,97 @@ def make_temporal_dataset(
         true_rate=true_rate,
         event_kernel=event_kernel,
         time_bin=TIME_BIN,
+    )
+
+
+@dataclass
+class TrialRecording:
+    """
+    A recording of one neuron driven by position and events, with trials.
+
+    Every field is a plain array, as a recording system would give it. Times
+    are in seconds.
+    """
+
+    # Position is sampled every TIME_BIN seconds, at the center of each bin.
+    position_time: np.ndarray
+    position: np.ndarray
+    event_times: np.ndarray
+    spike_times: np.ndarray
+    trial_starts: np.ndarray
+    trial_ends: np.ndarray
+    # True firing rate in spikes/s, at position_time.
+    true_rate: np.ndarray
+
+
+def make_trial_recording(
+    n_trials=20,
+    min_trial_duration=4.0,
+    max_trial_duration=8.0,
+    inter_trial_interval=2.0,
+    n_events=180,
+    seed=SEED_TRIALS,
+):
+    """
+    Build a continuous recording that holds trials of different lengths.
+
+    The model is the model of ``make_temporal_dataset`` without the nuisance
+    input. Position and spikes cover the whole recording. Events happen only
+    inside the trials. The gap after each trial is longer than the event
+    response, so the events of one trial have no effect in the next trial.
+    """
+    if inter_trial_interval < EVENT_WINDOW_SIZE * TIME_BIN:
+        raise ValueError(
+            "inter_trial_interval must be at least the length of the event "
+            f"response, {EVENT_WINDOW_SIZE * TIME_BIN} s."
+        )
+    rng = np.random.default_rng(seed)
+
+    # Round the trial times to 0.1 s, so that they print without float noise.
+    trial_durations = rng.uniform(
+        min_trial_duration, max_trial_duration, n_trials
+    ).round(1)
+    # Each trial starts after the previous trial and its gap.
+    trial_starts = np.concatenate(
+        [[0.0], np.cumsum(trial_durations + inter_trial_interval)[:-1]]
+    ).round(1)
+    trial_ends = (trial_starts + trial_durations).round(1)
+
+    n_bins = int(round((trial_ends[-1] + inter_trial_interval) / TIME_BIN))
+    bin_edges = np.arange(n_bins + 1) * TIME_BIN
+    time = bin_edges[:-1] + 0.5 * TIME_BIN
+
+    # A longer trial gets more events on average, so the event rate is the
+    # same in every trial.
+    event_trial = rng.choice(
+        n_trials, size=n_events, p=trial_durations / trial_durations.sum()
+    )
+    event_times = trial_starts[event_trial] + rng.uniform(
+        0.0, trial_durations[event_trial]
+    )
+
+    x = rng.normal(size=n_bins)
+    position = 4 * (x - x.min()) / np.ptp(x) - 2
+
+    event_counts, _ = np.histogram(event_times, bins=bin_edges)
+    event_effect = np.convolve(event_counts, make_event_kernel(), mode="full")[:n_bins]
+    log_rate = TEMPORAL_BASELINE_LOG_RATE + spatial_effect(position) + event_effect
+    expected_count = np.exp(log_rate)
+    spike_counts = rng.poisson(expected_count)
+
+    # Place the spikes of each bin uniformly inside the bin.
+    spike_times = np.repeat(time, spike_counts) + TIME_BIN * rng.uniform(
+        -0.5, 0.5, spike_counts.sum()
+    )
+
+    return TrialRecording(
+        position_time=time,
+        position=position,
+        event_times=np.sort(event_times),
+        spike_times=np.sort(spike_times),
+        trial_starts=trial_starts,
+        trial_ends=trial_ends,
+        true_rate=expected_count / TIME_BIN,
     )
 
 
