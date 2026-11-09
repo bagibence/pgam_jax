@@ -169,7 +169,7 @@ print(f"Design matrix shape: {design_split.shape}")
 # * With arrays, the event contributes to features in the next trial, even though its effect ended during the gap in the original recording.
 # * With pynapple, the first `EVENT_WINDOW_SIZE` rows of the next trial have NaN event features, shown in orange. The position features remain defined, but the event features lack a full window of history within that trial.
 #
-# `GAM` offers two ways to handle these NaNs. The default, `nan_handling="zero"`, replaces missing feature values with zero and keeps the rows. With `nan_handling="drop"`, any row containing a NaN feature is excluded from the fit.
+# `GAM` offers two ways to handle these NaNs. The default, `nan_handling="drop"`, excludes any row containing a NaN feature from the fit. With `nan_handling="zero"`, missing feature values are replaced with zero and the rows are kept.
 
 # %%
 fig, ax = plot_design_at_trial_border(full_basis, design_joined, design_split)
@@ -179,7 +179,7 @@ fig, ax = plot_design_at_trial_border(full_basis, design_joined, design_split)
 #
 # We can pass the pynapple inputs and spike counts directly to `fit`.
 #
-# We use `nan_handling="drop"` because zero filling would set the modeled contribution of events early in the trial to zero, even though those events already affect the recorded neuron's firing.
+# We keep the default `nan_handling="drop"`, because zero filling would set the modeled contribution of events early in the trial to zero, even though those events already affect the recorded neuron's firing.
 # Dropping rows with incomplete event history avoids this mismatch, but discards the first 1.2 seconds of every trial. Later, we show how most of these bins can be recovered.
 
 # %%

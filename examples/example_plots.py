@@ -513,7 +513,7 @@ def plot_recovered_smooths(
     # the centered curve sits at a constant offset. Subtract the pre-event mean
     # to remove that offset. The fit then shows the uncentered response, which
     # is zero before the event, like the truth. Use only settled rows here.
-    # The unsettled rows would drag the baseline toward zero.
+    # Under the default nan_handling="drop", the unsettled rows are NaN.
     baseline_rows = settled & (event_time_ms < 0)
     true_event = np.convolve(impulse, make_event_kernel(), mode="full")[: impulse.size]
     true_event = true_event - true_event[baseline_rows].mean()
